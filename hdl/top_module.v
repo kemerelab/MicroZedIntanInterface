@@ -23,8 +23,22 @@ module top_module(
 // wire clk_stable;
 //reg [4:0] state_counter = 0;
 //reg [5:0] channel;
-reg [15:0] instructions [0:34];
-assign instr = instructions[channel];
+blk_mem_gen_0 instructions(
+    .clka(),
+    .ena(),
+    .wea(),
+    .addra(),
+    .dina(),
+    .douta(),
+    .clkb(CS),
+    .enb(1'b1),
+    .web(1'b0),
+    .addrb(channel),
+    .dinb(),
+    .doutb(instr)
+);
+//reg [15:0] instructions [0:34];
+//assign instr = instructions[channel];
 // wire [15:0] instr = instructions[channel];
 reg [3:0] instr_counter = 4'hF;
 assign MOSI = (CS || state_counter > 7'd63)? 1'bZ : instr[instr_counter];
@@ -38,9 +52,9 @@ clk_wiz_0 pll(
     .clk_out1(clk)
 );
 
-initial begin
-    $readmemh("instr.mem", instructions);
-end
+// initial begin
+//     $readmemh("instr.mem", instructions);
+// end
 
 
 always @(posedge clk) begin
