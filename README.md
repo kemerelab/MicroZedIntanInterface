@@ -2,6 +2,9 @@
 Repository with work in process Microzed projects
 
 ## Steps to building and testing
+0. Set the path up for Vivado command line - `source ~/tools24/Xilinx/Vivado/2024.2/settings64.sh`
+1. Create a Vivado project  - `vivado -mode batch -source scripts/create_project.tcl`. This will
+  create a Vivado project that you can open in the `<repository>/vivado_project/` directory.
 
 ### Within Vivado
 1. Synthesis, Implementation, and Generate Bitstream - can simply click `Generate Bitstream` and these steps should be taken care of.
