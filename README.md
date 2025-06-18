@@ -19,7 +19,8 @@ Repository with work in process Microzed projects
 1. Create the Petalinux project. From the project directory, run `petalinux-create -t project -n <Project Name> --template zynq`
 2. Copy the exported hardware file into this new Petalinux directory. This is how I do it `cd <Project Name>`, `cp ..\<Exported Name> .`
   (The default `<Exported Name>` is `design_1_wrapper.xsa`.)
-3. Do some configuration. Run `petalinux-config -c rootfs`. Under `Image Features`, select `serial-autologin-root` (this is not critically necessary!).
+3. Run `petalinux-config --get-hw-description=.` (this leverages the hardware file you've exported!)
+4. Do some configuration. Run `petalinux-config -c rootfs`. Under `Image Features`, select `serial-autologin-root` (this is not critically necessary!).
   Under `Filesystem Packages -> misc`, locate `packagegroup-core-buildessential` and select it if you want gcc to be available. There may be some desire
   to configure the kernel as well, which you can do by running `petalinux-config -c kernel`. This takes a long time to run, though, and seems unneeded at
   the moment.
