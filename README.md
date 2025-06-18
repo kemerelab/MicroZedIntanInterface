@@ -6,6 +6,10 @@ Repository with work in process Microzed projects
 1. Create a Vivado project  - `vivado -mode batch -source scripts/create_project.tcl`. This will
   create a Vivado project that you can open in the `<repository>/vivado_project/` directory.
 
+**NOTE** I think that the only place the part is specified is in the `scripts/create_project.tcl` file.
+(I made the project with a `xc7z020clg400-1`. I think you should be able to change this to 
+`xc7z010clg400-1` safely????)
+
 ### Within Vivado
 1. Synthesis, Implementation, and Generate Bitstream - can simply click `Generate Bitstream` and these steps should be taken care of.
 2. `File->Export->Export Hardware`, choose "Include Bitstream" option!
