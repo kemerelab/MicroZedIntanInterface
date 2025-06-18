@@ -1,0 +1,31 @@
+# Vivado generated files and folders
+*.jou
+*.log
+*.str
+*.webtalk
+*.wdb
+*.pb
+*.html
+*.xml
+*.backup.jou
+*.backup.log
+
+.cache/
+.hw/
+.ip_user_files/
+.sim/
+.runs/
+.xgui/
+.Xil/
+*.tmp
+*.xpr           # Optional: track if you use GUI workflows
+
+# SDK and Petalinux (if used)
+.sdk/
+*.sdk/
+
+# Editor and OS files
+.vscode/
+*.swp
+.DS_Store
+
