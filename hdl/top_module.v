@@ -10,9 +10,12 @@ module top_module(
     output wire clk_stable,
     output wire SCLK,
     output wire CS,
+    output wire MOSI,
     output reg [6:0] state_counter,
     output reg [5:0] channel,
-    output reg [31:0] timestamp
+    output reg [31:0] timestamp,
+    wire [3:0] ctr,
+    wire [15:0] instr
     
 );
 
@@ -20,6 +23,13 @@ module top_module(
 // wire clk_stable;
 //reg [4:0] state_counter = 0;
 //reg [5:0] channel;
+reg [15:0] instructions [0:34];
+assign instr = instructions[channel];
+// wire [15:0] instr = instructions[channel];
+reg [3:0] instr_counter = 4'hF;
+assign MOSI = (CS || state_counter > 7'd63)? 1'bZ : instr[instr_counter];
+assign ctr = instr_counter;
+
 
 clk_wiz_0 pll(
     .clk_in1(clk_ext),
@@ -28,11 +38,17 @@ clk_wiz_0 pll(
     .clk_out1(clk)
 );
 
+initial begin
+    $readmemh("instr.mem", instructions);
+end
+
+
 always @(posedge clk) begin
     if(reset || ~clk_stable) begin
         state_counter <= 7'd127;
         channel <= 0;
         timestamp <= 0;
+        instr_counter <= 4'hF;
     end else begin
 
         if(state_counter == 7'd79) begin
@@ -40,6 +56,10 @@ always @(posedge clk) begin
         end else begin
             state_counter <= state_counter + 1;
         end
+        if(state_counter <= 7'd63 & state_counter[1:0] == 2'b11) begin
+           instr_counter <= instr_counter - 1;
+        end
+
         case (state_counter)
             7'd127: begin
                timestamp <= 0;
@@ -49,6 +69,9 @@ always @(posedge clk) begin
                end else begin
                     state_counter <= state_counter;
                end
+            end
+            7'd0: begin
+                instr_counter <= 4'hF;
             end
             7'd77: begin
                 timestamp <= (channel == 0)? (timestamp + 1): timestamp;
