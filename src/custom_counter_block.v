@@ -1,60 +1,109 @@
-`timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 06/17/2025 11:10:55 AM
-// Design Name: 
-// Module Name: custom_block
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-//////////////////////////////////////////////////////////////////////////////////
+module custom_bram_interface (
+    input  wire clk,
+    input  wire rstn,
 
+    // BRAM Port B interface
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB CLK" *)
+    (* X_INTERFACE_PARAMETER = "MASTER_TYPE BRAM_CTRL" *)
+    output wire bram_clk,
 
-module custom_counter_block(
-    input wire clk,             // 84 MHz input clock from PS
-    input wire [31:0] enable,   // control register input
-    output reg [31:0] count     // 32-bit output
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB RST" *)
+    output wire bram_rst,
+
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB EN" *)
+    output reg bram_en,
+
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB WE" *)
+    output reg [3:0] bram_we,
+
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB ADDR" *)
+    output reg [31:0] bram_addr,
+
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB DIN" *)
+    output reg [31:0] bram_din,
+
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB DOUT" *)
+    input  wire [31:0] bram_dout
 );
 
-    reg [26:0] clk_divider = 0;  // clock divider for 1 Hz
-    reg clk_1hz = 0;
+    // Clock and reset passthrough
+    assign bram_clk = clk;
+    assign bram_rst = ~rstn;
 
-    reg [31:0] prev_enable = 0;
-    reg counting = 0;
+    // Clock divider for 2.625 MHz tick (84 MHz / 32)
+    reg [4:0] clk_div = 0;
+    wire counter_tick = (clk_div == 5'd31); // 2.625 MHz
+    
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn)
+            clk_div <= 5'd0;
+        else
+            clk_div <= clk_div + 1;
+    end
 
-    // 84 MHz to ~1 Hz divider
-    always @(posedge clk) begin
-        if (clk_divider >= 84000000 - 1) begin
-            clk_divider <= 0;
-            clk_1hz <= 1;
-        end else begin
-            clk_divider <= clk_divider + 1;
-            clk_1hz <= 0;
+    // Counter logic (separate block)
+    reg [31:0] counter = 0;
+    reg [31:0] enable_counter = 0;
+
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            counter <= 32'd0;
+        end else if (counter_tick && enable_counter != 32'd0) begin
+            counter <= counter + 1;
         end
     end
 
-    // Counter and control logic
-    always @(posedge clk) begin
-        if (enable == 0) begin
-            counting <= 0;
-        end else if (prev_enable == 0 && enable != 0) begin
-            count <= 0;
-            counting <= 1;
-        end else if (counting && clk_1hz) begin
-            count <= count + 1;
-        end
+    // FSM for BRAM interface
+    reg [2:0] state;
+    localparam STATE_IDLE       = 3'd0;
+    localparam STATE_READ       = 3'd1;
+    localparam STATE_WAIT       = 3'd2;
+    localparam STATE_PREP_WRITE = 3'd3;
+    localparam STATE_WRITE      = 3'd4;
 
-        prev_enable <= enable;
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            state         <= STATE_IDLE;
+            bram_en       <= 1'b0;
+            bram_we       <= 4'b0000;
+            bram_addr     <= 32'h00000000;
+            bram_din      <= 32'd0;
+            enable_counter <= 32'd0;
+        end else begin
+            case (state)
+                STATE_IDLE: begin
+                    bram_en   <= 1'b1;
+                    bram_we   <= 4'b0000;
+                    bram_addr <= 32'h00000000; // Read enable register
+                    state     <= STATE_READ;
+                end
+
+                STATE_READ: begin
+                    state <= STATE_WAIT;
+                end
+
+                STATE_WAIT: begin
+                    enable_counter <= bram_dout; // Capture enable value
+                    state <= STATE_PREP_WRITE;
+                end
+
+                STATE_PREP_WRITE: begin
+                    bram_din  <= counter;        // Write current counter value
+                    bram_en   <= 1'b1;
+                    bram_we   <= 4'b1111;
+                    bram_addr <= 32'h00000004;
+                    state     <= STATE_WRITE;
+                end
+
+                STATE_WRITE: begin
+                    bram_en <= 1'b0;
+                    bram_we <= 4'b0000;
+                    state   <= STATE_IDLE;
+                end
+
+                default: state <= STATE_IDLE;
+            endcase
+        end
     end
 
 endmodule

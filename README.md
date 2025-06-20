@@ -32,6 +32,10 @@ Repository with work in process Microzed projects
   that lasts across reboots.)
 7. Copy the files `images/linux/boot.scr', `images/linux/BOOT.BIN`, and `images/linux/image.ub` to the SD card.
 
+***NOTE*** - I find that if I want to update my Petalinux after chanigng the Vivado project, I need to copy the exported hardware file
+into both the root Petalinux directory and `../vivado\_project/design\_1\_wrapper.xsa project-spec/hw-description/system.xsa`. Then
+I run the `get\_hw\_description` command (step 3) and `petalinux-build`, and we're good to go.
+
 
 ### Testing in Petalinux
 1. With the SD card in the Microzed, the jumpers need to be set as J1 (topmost) - Left, J2 - Right, J3 - Right. (This is holding the Microzed
@@ -41,5 +45,15 @@ Repository with work in process Microzed projects
    `devmem 0x41200000 32 0x01`. You can read back that it has changed by just running `devmem 0x41200000 32` (this should tell you `0x00000001` since its
    a 32-bit register. Now, the counter is ticking, and the counter can be read at `devmem 0x41210000 32`. It should increment at about 1 Hz. You can
    also stop the counter by writing zero to the enable register, `devmem 0x41200000 32 0x0`, and see that it stops changing.
+4. In the `misc/` directory, you will find `testmem.c`. This is a useful program to test whether we can read values from the PL
+   BRAM quickly. I've been just copying and then pasting into a file using a terminal text editor (i.e., vi), and then compiling
+   it on the command line as `gcc -O3 testmem.c`. I haven't tested whether different optimization levels result in different performance.
 
 
+### Bottom line
+   It seems like, with the PL set to increment the counter at 84 MHz divided by 32 = ~2.6 MHz, we can just barely keep up.
+
+   My calculation is that if we generate 64 channels + 3 aux channels + 5 metadata words = 72 16-bit words per chip.
+   And we have up to 4 chips interfacing. And we run at 30 kHz sampling, our data rate is 8.64 M 16-bit items per second.
+   If we store these at 32-bit items, that drops to 4.32 M words per second, but that means we're stil 100% too slow.
+   And, we're using the processor to transmit data that way, so I think it's time to figure out DMA.
