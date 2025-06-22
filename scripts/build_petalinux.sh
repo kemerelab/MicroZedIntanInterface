@@ -18,10 +18,10 @@ echo "Commented out!"
 # vivado -mode batch -source $PL_DIR/scripts/build_bitstream.tcl
 
 
-if [ ! -f "$XSA_PATH" ]; then
-  echo "ERROR: XSA not found at $XSA_PATH"
-  exit 1
-fi
+# if [ ! -f "$XSA_PATH" ]; then
+#   echo "ERROR: XSA not found at $XSA_PATH"
+#   exit 1
+# fi
 
 # === Step 2: Configure PetaLinux project ===
 cd $PETALINUX_DIR
