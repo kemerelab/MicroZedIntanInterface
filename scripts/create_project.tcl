@@ -18,13 +18,12 @@ set_property simulator_language Mixed [current_project]
 
 # Add source files
 puts "Adding source files..."
-add_files -norecurse src/custom_counter_block.v
+add_files -fileset sources_1 [glob ./src/*.v]
 update_compile_order -fileset sources_1
 
 # Add constraint files
 puts "Adding constraint files..."
-add_files -fileset constrs_1 -norecurse constraints/top.xdc
-add_files -fileset constrs_1 -norecurse constraints/ignore_unused_ports.xdc
+add_files -fileset constrs_1 [glob ./constraints/*.xdc]
 
 # Create block design from exported TCL
 puts "Creating block design..."

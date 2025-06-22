@@ -1,0 +1,51 @@
+
+/include/ "system-conf.dtsi"
+/ {
+    /* Reserved memory for DMA buffers */
+    reserved-memory {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+        
+        /* Large contiguous buffer for DMA operations */
+        dma_buffer_pool: dma_buffer@1e000000 {
+            compatible = "shared-dma-pool";
+            reg = <0x1e000000 0x02000000>; /* 32MB at 480MB mark */
+            no-map;
+            reusable;
+        };
+    };
+    
+    chosen {
+        bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait devtmpfs.mount=1 uio_pdrv_genirq.of_id=generic-uio";
+        stdout-path = "serial0:115200n8";
+    };
+    
+    memory@0 {
+        device_type = "memory";
+        reg = <0x0 0x20000000>; /* 512MB total memory */
+    };
+    
+    /* UIO devices for user-space access */
+    uio_axi_dma: uio_axi_dma {
+        compatible = "generic-uio";
+        reg = <0x40400000 0x10000>; /* AXI DMA base address, 64KB */
+        interrupt-parent = <&intc>;
+        interrupts = <0 61 4>; /* S2MM interrupt - IRQ_F2P[0] = SPI 61 */
+        interrupt-names = "s2mm_introut";
+        memory-region = <&dma_buffer_pool>;
+        status = "okay";
+    };    
+    /* Data generator control - directly under root */
+    data_gen_ctrl: data_gen_ctrl@60000000 {
+        compatible = "generic-uio";
+        reg = <0x60000000 0x10000>;
+        status = "okay";
+    };
+    
+    /* Aliases for easy identification */  
+    aliases {
+        uio0 = &uio_axi_dma;
+        uio1 = &data_gen_ctrl;
+    };
+};
