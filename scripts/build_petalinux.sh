@@ -7,25 +7,33 @@ PETALINUX_DIR=./Petalinux
 PROJECT_NAME=klab_project
 VIVADO_VER=2024.2
 
-XSA_NAME=${PROJECT_NAME}.xsa
-XSA_PATH=./vivado_project/${XSA_NAME}
-SYSTEM_DTSI=./src-petalinux/system-user.dtsi
+REPO_ROOT=$(pwd)  # Save the original repo directory
+SYSTEM_DTSI=$REPO_ROOT/src-petalinux/system-user.dtsi
 
-# === Step 1: Build Vivado project ===
-echo "=== [1/6] Building Vivado project ==="
+XSA_NAME=${PROJECT_NAME}.xsa
+XSA_PATH=$REPO_ROOT/vivado_project/$XSA_NAME
+
+# === Step 0: Build Vivado project ===
+echo "=== [0/7] Building Vivado project ==="
 echo "Commented out!"
 # vivado -mode batch -source $PL_DIR/scripts/create_project.tcl
 # vivado -mode batch -source $PL_DIR/scripts/build_bitstream.tcl
 
-
-# if [ ! -f "$XSA_PATH" ]; then
-#   echo "ERROR: XSA not found at $XSA_PATH"
-#   exit 1
-# fi
+# === Step 1: Create PetaLinux project if missing ===
+if [ ! -f "$PETALINUX_DIR/project-spec/meta-user/conf/petalinuxbsp.conf" ]; then
+  echo "=== [0] Creating new PetaLinux project ==="
+  petalinux-create --type project --template zynq --name $(basename $PETALINUX_DIR)
+fi
 
 # === Step 2: Configure PetaLinux project ===
 cd $PETALINUX_DIR
 echo "=== [2/7] Configuring PetaLinux with XSA ==="
+
+if [ ! -f "$XSA_PATH" ]; then
+  echo "ERROR: XSA not found at $XSA_PATH"
+  exit 1
+fi
+
 petalinux-config --get-hw-description=$XSA_PATH --silentconfig
 
 # === Step 3: Add system-user.dtsi ===

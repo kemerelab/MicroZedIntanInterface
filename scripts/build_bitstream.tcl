@@ -10,4 +10,4 @@ launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1
 
 # export bitstream or hardware if needed
-write_hw_platform -fixed -include_bit -force -file ./vivado_proj/klab_project.xsa
+write_hw_platform -fixed -include_bit -force -file ./vivado_project/klab_project.xsa
