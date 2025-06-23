@@ -23,6 +23,10 @@
 // DMA Buffer
 #define DMA_BUFFER_ADDR 0x1e000000
 #define DMA_BUFFER_SIZE 0x1000 // 4 KB
+#define PING_BUFFER_ADDR DMA_BUFFER_ADDR           // First buffer
+#define PONG_BUFFER_ADDR (DMA_BUFFER_ADDR + 0x1000) // Second buffer (+4KB)
+
+
 
 // Data format
 #define BATCH_WORDS 37*10 
@@ -43,6 +47,30 @@
 #define STATUS_STATE_SHIFT      2
 #define STATUS_CYCLE_SHIFT      9
 #define STATUS_PACKET_COUNT_SHIFT 16
+
+// DMA Control Register (DMACR) bit definitions - PG021 Table 2-3
+#define DMACR_RS        (1 << 0)   // Run/Stop: 1=Run, 0=Stop
+#define DMACR_RESET     (1 << 2)   // Soft Reset: 1=Reset (self-clearing)
+#define DMACR_KEYHOLE   (1 << 3)   // Keyhole Read: 1=Enable keyhole mode
+#define DMACR_CYCLIC_BD (1 << 4)   // Cyclic Buffer Descriptor: 1=Enable (SG mode only)
+#define DMACR_IOC_IRQEN (1 << 12)  // Interrupt on Complete Enable
+#define DMACR_DLY_IRQEN (1 << 13)  // Interrupt on Delay Timer Enable
+#define DMACR_ERR_IRQEN (1 << 14)  // Interrupt on Error Enable
+
+// DMA Status Register (DMASR) bit definitions - PG021 Table 2-4  
+#define DMASR_HALTED    (1 << 0)   // DMA Channel Halted: 1=Halted
+#define DMASR_IDLE      (1 << 1)   // DMA Channel Idle: 1=Idle
+#define DMASR_SGINCLD   (1 << 3)   // Scatter Gather Included: 1=SG enabled
+#define DMASR_DMAINTERR (1 << 4)   // DMA Internal Error: 1=Error occurred
+#define DMASR_DMASLVERR (1 << 5)   // DMA Slave Error: 1=Slave error
+#define DMASR_DMADECERR (1 << 6)   // DMA Decode Error: 1=Address decode error
+#define DMASR_SGINTERR  (1 << 8)   // Scatter Gather Internal Error
+#define DMASR_SGSLVERR  (1 << 9)   // Scatter Gather Slave Error
+#define DMASR_SGDECERR  (1 << 10)  // Scatter Gather Decode Error
+#define DMASR_IOC_IRQ   (1 << 12)  // Interrupt on Complete: 1=Transfer complete
+#define DMASR_DLY_IRQ   (1 << 13)  // Delay Interrupt: 1=Delay timer expired
+#define DMASR_ERR_IRQ   (1 << 14)  // Error Interrupt: 1=Error occurred
+
 
 void print_usage(const char *prog_name) {
     printf("Usage: %s [options]\n", prog_name);
@@ -76,6 +104,25 @@ void print_status(volatile uint32_t *control_regs) {
     printf("=============================\n\n");
 }
 
+
+void print_dma_status(volatile uint32_t *dma_regs) {
+    uint32_t dmacr = dma_regs[DMA_S2MM_DMACR / 4];
+    uint32_t dmasr = dma_regs[DMA_S2MM_DMASR / 4];
+    
+    printf("DMA Control Register (0x%08X):\n", dmacr);
+    printf("  Run/Stop: %s\n", (dmacr & DMACR_RS) ? "RUN" : "STOP");
+    printf("  Reset: %s\n", (dmacr & DMACR_RESET) ? "ACTIVE" : "INACTIVE");
+    printf("  IOC IRQ Enable: %s\n", (dmacr & DMACR_IOC_IRQEN) ? "ENABLED" : "DISABLED");
+    
+    printf("DMA Status Register (0x%08X):\n", dmasr);
+    printf("  Halted: %s\n", (dmasr & DMASR_HALTED) ? "YES" : "NO");
+    printf("  Idle: %s\n", (dmasr & DMASR_IDLE) ? "YES" : "NO");
+    printf("  IOC IRQ: %s\n", (dmasr & DMASR_IOC_IRQ) ? "TRIGGERED" : "CLEAR");
+    printf("  Errors: %s%s%s\n", 
+           (dmasr & DMASR_DMAINTERR) ? "INTERNAL " : "",
+           (dmasr & DMASR_DMASLVERR) ? "SLAVE " : "",
+           (dmasr & DMASR_DMADECERR) ? "DECODE " : "");
+}
 
 int flush_pl_fifo(volatile uint32_t *dma_regs, volatile uint64_t *dma_buffer, 
                               volatile uint32_t *control_regs) {
@@ -166,7 +213,10 @@ int main(int argc, char *argv[]) {
     int uio_fd, mem_fd;
     volatile uint32_t *dma_regs;
     volatile uint32_t *control_regs;
-    volatile uint64_t *dma_buffer;
+    // volatile uint64_t *dma_buffer;
+    volatile uint64_t *ping_buffer;
+    volatile uint64_t *pong_buffer;
+
     
     int enable_transmission = 0;
     int disable_transmission = 0;
@@ -180,6 +230,8 @@ int main(int argc, char *argv[]) {
     uint64_t current_timestamp, last_timestamp = 0;
     int received_packets = 0;
     int missed_timestamps = 0;
+    int current_buffer = 0; // 0 = ping, 1 = pong
+
     
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -229,10 +281,17 @@ int main(int argc, char *argv[]) {
     control_regs = (volatile uint32_t *) mmap(NULL, CONTROL_RANGE, PROT_READ | PROT_WRITE, 
                                               MAP_SHARED, mem_fd, CONTROL_BASE_ADDR);
     
-    dma_buffer = (volatile uint64_t *) mmap(NULL, DMA_BUFFER_SIZE, PROT_READ | PROT_WRITE, 
-                                            MAP_SHARED, mem_fd, DMA_BUFFER_ADDR);
+    // dma_buffer = (volatile uint64_t *) mmap(NULL, DMA_BUFFER_SIZE, PROT_READ | PROT_WRITE, 
+    //                                         MAP_SHARED, mem_fd, DMA_BUFFER_ADDR);
+
+    // Map both ping and pong buffers
+    ping_buffer = (volatile uint64_t *) mmap(NULL, DMA_BUFFER_SIZE, PROT_READ | PROT_WRITE, 
+                                            MAP_SHARED, mem_fd, PING_BUFFER_ADDR);
     
-    if (dma_regs == MAP_FAILED || control_regs == MAP_FAILED || dma_buffer == MAP_FAILED) {
+    pong_buffer = (volatile uint64_t *) mmap(NULL, DMA_BUFFER_SIZE, PROT_READ | PROT_WRITE, 
+                                            MAP_SHARED, mem_fd, PONG_BUFFER_ADDR);                                        
+    
+    if (dma_regs == MAP_FAILED || control_regs == MAP_FAILED || ping_buffer == MAP_FAILED || pong_buffer == MAP_FAILED) {
         perror("Failed to mmap");
         close(uio_fd);
         close(mem_fd);
@@ -296,7 +355,8 @@ int main(int argc, char *argv[]) {
         wait_for_dma_idle(dma_regs, 1000);
         
         // Step 2: Flush PL-side DMA FIFO to remove stale data
-        flush_pl_fifo(dma_regs, dma_buffer, control_regs);
+        flush_pl_fifo(dma_regs, ping_buffer, control_regs);
+        flush_pl_fifo(dma_regs, pong_buffer, control_regs);
         
         // Step 3: Reset DMA controller
         reset_dma_controller(dma_regs);
@@ -307,6 +367,23 @@ int main(int argc, char *argv[]) {
         // Step 5: Reset timestamp
         printf("Resetting timestamp...\n");
         control_regs[CONTROL_REG_OFFSET / 4] = CTRL_RESET_TIMESTAMP;
+        
+        current_buffer = 0;
+        /*
+        * DMA REGISTER OPERATIONS - DETAILED EXPLANATION
+        * Reference: Xilinx PG021 - AXI DMA v7.1 Product Guide
+        * 
+        * CRITICAL FIX: Proper sequencing to avoid DMA internal errors
+        */
+        
+        dma_regs[DMA_S2MM_DMACR / 4] = DMACR_RESET; // 0x4
+        usleep(50);
+
+        dma_regs[DMA_S2MM_DMACR / 4] = DMACR_RS; // 0x1
+
+        dma_regs[DMA_S2MM_DMASR / 4] = 0xFFFFFFFF; // Clear status
+
+        dma_regs[DMA_S2MM_DSTADDR / 4] = PING_BUFFER_ADDR;
 
         // Step 6: Enable transmission
         printf("Enabling transmission for continuous mode...\n");
@@ -315,30 +392,46 @@ int main(int argc, char *argv[]) {
         
         printf("Starting DMA continuous capture (expect 37 64-bit words per batch):\n");
         printf("Press Ctrl+C to stop\n\n");
-        
-        while (1) {
-            // Reset and enable DMA
-            dma_regs[DMA_S2MM_DMACR / 4] = 4; // Reset
-            usleep(50);
-            dma_regs[DMA_S2MM_DMACR / 4] = 0x1; // Enable
-            dma_regs[DMA_S2MM_DMASR / 4] = 0xFFFFFFFF; // Clear status
-            
-            // Set destination and length
-            dma_regs[DMA_S2MM_DSTADDR / 4] = DMA_BUFFER_ADDR;
-            dma_regs[DMA_S2MM_LENGTH / 4] = BATCH_SIZE;
-            
+
+        dma_regs[DMA_S2MM_LENGTH / 4] = BATCH_SIZE;
+
+        while (1) {            
             // Wait for DMA completion (IOC bit 12)
-            while (!(dma_regs[DMA_S2MM_DMASR / 4] & (1 << 12))) {
+            while (!(dma_regs[DMA_S2MM_DMASR / 4] & DMASR_IOC_IRQ)) {
                 usleep(50);
+            
+                    // Check for errors
+                    //uint32_t status = dma_regs[DMA_S2MM_DMASR / 4];
+                    //if (status & (DMASR_DMAINTERR | DMASR_DMASLVERR | DMASR_DMADECERR)) {
+                    //    printf("DMA Error in ping-pong mode: 0x%08X\n", status);
+                    //    return -1;
+                    //}
+                    // Can't do this, because we always get 0x00005011, which is DMA Int Err
             }
             
+            // Process completed buffer while setting up next transfer
+            volatile uint64_t *completed_buffer = (current_buffer == 0) ? ping_buffer : pong_buffer;
+            volatile uint64_t *next_buffer = (current_buffer == 0) ? pong_buffer : ping_buffer;
+            uint32_t next_addr = (current_buffer == 0) ? PONG_BUFFER_ADDR : PING_BUFFER_ADDR;
+
+            // Clear IOC flag and immediately start next transfer
+            // This minimizes the gap between transfers
+            dma_regs[DMA_S2MM_DMACR / 4] = DMACR_RESET; // 0x4 - This seems to be critical. Not sure why we need it.
+            usleep(50);
+            dma_regs[DMA_S2MM_DMACR / 4] = DMACR_RS; // 0x1
+            dma_regs[DMA_S2MM_DMASR / 4] = 0xFFFFFFFF; // Clear completion flag
+            //dma_regs[DMA_S2MM_DMASR / 4] = DMASR_IOC_IRQ; // Clear completion flag
+            dma_regs[DMA_S2MM_DSTADDR / 4] = next_addr;    // Set next buffer address
+            dma_regs[DMA_S2MM_LENGTH / 4] = BATCH_SIZE;    // Start next transfer
+
+
             for (int i = 0; i < BATCH_WORDS; i++) {
-                if (dma_buffer[i] == 0xDEADBEEFCAFEBABE) {
+                if (completed_buffer[i] == 0xDEADBEEFCAFEBABE) {
                     magic_detected = 1;
                 }
                 else {
                     if (magic_detected) {
-                        current_timestamp = dma_buffer[i];
+                        current_timestamp = completed_buffer[i];
                         magic_detected = 0;
                         received_packets += 1;
                         if ((current_timestamp - last_timestamp) > 1) {
@@ -352,15 +445,20 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
+
+            // Switch to next buffer
+            current_buffer = 1 - current_buffer;
         }
     }
     
     // Cleanup
     munmap((void *)dma_regs, DMA_RANGE);
     munmap((void *)control_regs, CONTROL_RANGE);
-    munmap((void *)dma_buffer, DMA_BUFFER_SIZE);
+    munmap((void *)ping_buffer, DMA_BUFFER_SIZE);
+    munmap((void *)pong_buffer, DMA_BUFFER_SIZE);
     close(uio_fd);
     close(mem_fd);
     
     return 0;
 }
+
