@@ -1,11 +1,8 @@
-module data_generator_blk #(
-    parameter NUM_CONTROL_REGS = 64,
-    parameter NUM_STATUS_REGS = 64
-)(
+module data_generator_blk (
     input  wire        clk,
     input  wire        rstn,
-    input  wire [NUM_CONTROL_REGS*8-1:0] pl_control_regs,  // Packed control array from AXI
-    output reg  [NUM_STATUS_REGS*8-1:0]  pl_status_regs,   // Packed status array to AXI
+    input  wire [31:0] control_reg,     // Full 32-bit control register from AXI
+    output reg  [31:0] status_reg,      // Status register to AXI
     
     output reg  [63:0] m_axis_tdata,
     output reg         m_axis_tvalid,
@@ -13,25 +10,11 @@ module data_generator_blk #(
     output reg         m_axis_tlast
 );
 
-// Unpack control registers for easier access
-reg [7:0] control_regs [0:NUM_CONTROL_REGS-1];
-
-// Generate blocks for unpacking control registers
-genvar j;
-generate
-    for (j = 0; j < NUM_CONTROL_REGS; j = j + 1) begin : control_unpack_gen
-        always @(*) begin
-            control_regs[j] = pl_control_regs[j*8+7:j*8];
-        end
-    end
-endgenerate
-
-// Extract control signals from control register 0
-wire transmit_enabled = control_regs[0][0];      // Bit 0 of register 0
-wire reset_timestamp  = control_regs[0][1];      // Bit 1 of register 0
-wire pause_timestamp  = control_regs[0][2];      // Bit 2 of register 0
-// Bits 3-7 of register 0: Reserved for future use
-// Registers 1-63: Available as control_regs[1] through control_regs[63]
+// Extract control signals from control register
+wire transmit_enabled = control_reg[0];    // Bit 0: Enable transmission
+wire reset_timestamp  = control_reg[1];    // Bit 1: Reset timestamp to 0
+wire pause_timestamp  = control_reg[2];    // Bit 2: Pause timestamp increment
+// Bits 3-31: Reserved for future use
 
 // Interface attributes
 (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 M_AXIS TDATA" *)
@@ -164,55 +147,14 @@ always @(posedge clk) begin
     end
 end
 
-// Unpack status registers for easier access
-reg [7:0] status_regs [0:NUM_STATUS_REGS-1];
-
-// Build status register array - populate unpacked status registers
+// Build status register
 always @(*) begin
-    // Register 0: Control flags
-    status_regs[0] = {6'b000000, last_packet_sent, transmission_active};
-    
-    // Register 1: State counter (0-79)
-    status_regs[1] = {1'b0, state_counter};
-    
-    // Register 2: Cycle counter (0-34)
-    status_regs[2] = {2'b00, cycle_counter};
-    
-    // Register 3-4: Packet count (16-bit)
-    status_regs[3] = packets_sent[7:0];
-    status_regs[4] = packets_sent[15:8];
-    
-    // Register 5: Reserved
-    status_regs[5] = 8'h00;
-
-    // Register 6-13: Timestamp (64-bit)
-    status_regs[6]  = timestamp[7:0];
-    status_regs[7]  = timestamp[15:8];
-    status_regs[8]  = timestamp[23:16];
-    status_regs[9]  = timestamp[31:24];
-    status_regs[10] = timestamp[39:32];
-    status_regs[11] = timestamp[47:40];
-    status_regs[12] = timestamp[55:48];
-    status_regs[13] = timestamp[63:56];
-    
+    status_reg[0]     = transmission_active;     // Bit 0: Currently transmitting
+    status_reg[1]     = last_packet_sent;        // Bit 1: Last packet sent flag
+    status_reg[8:2]   = state_counter;           // Bits 8:2: Current state (0-79)
+    status_reg[14:9]  = cycle_counter;           // Bits 14:9: Current cycle (0-34)
+    status_reg[15]    = 1'b0;                    // Bit 15: Reserved
+    status_reg[31:16] = packets_sent;            // Bits 31:16: Packet count
 end
-
-// Generate blocks for remaining status registers (set to 0)
-generate
-    for (j = 14; j < NUM_STATUS_REGS; j = j + 1) begin : status_zero_gen
-        always @(*) begin
-            status_regs[j] = 8'h00;
-        end
-    end
-endgenerate
-
-// Generate blocks for packing status registers
-generate
-    for (j = 0; j < NUM_STATUS_REGS; j = j + 1) begin : status_pack_gen
-        always @(*) begin
-            pl_status_regs[j*8+7:j*8] = status_regs[j];
-        end
-    end
-endgenerate
 
 endmodule
