@@ -1,7 +1,7 @@
 /include/ "system-conf.dtsi"
 / {
 	chosen {
-		bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw rootwait uio_pdrv_genirq.of_id=generic-uio";
+		bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw rootwait uio_pdrv_genirq.of_id=generic-uio ip=192.168.100.1::192.168.1.1:255.255.255.0:petalinux:enx000a35001e53:off";
         /* bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait devtmpfs.mount=1 uio_pdrv_genirq.of_id=generic-uio"; */
 		stdout-path = "serial0:115200n8";
 	};
@@ -17,11 +17,18 @@
 		#size-cells = <1>;
 		ranges;
 
-		dma_reserved: dma-memory@10000000 {
+		dma_reserved: dma-memory@1e000000 {
 			compatible = "shared-dma-pool";
-			reg = <0x10000000 0x2000000>; /* 32MB at 256MB offset */
+			reg = <0x1e000000 0x2000000>; /* 32MB at 512MB offset */
 			no-map;
 		};
+	};
+
+	/* Aliases for easy identification */  
+	aliases {
+		uio0 = &axi_dma_0;
+		uio1 = &axi_lite_control_0;
+		uio2 = &axi_lite_control_0;
 	};
 };
 
@@ -31,19 +38,29 @@
 	/* Keep the existing reg, interrupts, and other properties from pl.dtsi */
 	/* Add memory region for DMA operations */
 	memory-region = <&dma_reserved>;
+	// interrupts = <0 61 4>; /* S2MM interrupt - IRQ_F2P[0] = SPI 61. PL is setting this to 29 for some reason?!!? */
 	status = "okay";
-	/* Add interrupt if your control registers generate interrupts */
-	/* interrupt-parent = <&intc>; */
-	/* interrupts = <0 62 4>; */ /* IRQ_F2P[1] if needed */
-	/* interrupt-names = "control_irq"; */};
+};
 
 /* Override the auto-generated AXI Lite Control to use UIO */
 &axi_lite_control_0 {
 	compatible = "generic-uio"; // pl.dtsi has "xlnx,axi-lite-control-1.0";
 	/* Keep the existing reg and other properties from pl.dtsi */
 	status = "okay";
-
+	/* Add interrupt if your control registers generate interrupts */
+	/* interrupt-parent = <&intc>; */
+	/* interrupts = <0 62 4>; */ /* IRQ_F2P[1] if needed */
+	/* interrupt-names = "control_irq"; */
 };
+
+/* Override the auto-generated AXI Lite Status to use UIO */
+&axi_lite_status_0 {
+	compatible = "generic-uio";
+	/* Keep the existing reg and other properties from pl.dtsi */
+	status = "okay";
+};
+
+
 
 /* Alternative configuration using xlnx,axi-dma if you prefer native driver support */
 /*
