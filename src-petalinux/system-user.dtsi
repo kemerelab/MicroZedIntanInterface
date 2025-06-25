@@ -1,4 +1,3 @@
-/dts-v1/;
 /include/ "system-conf.dtsi"
 / {
 	chosen {
@@ -24,48 +23,26 @@
 			no-map;
 		};
 	};
+};
 
-	amba_pl: amba_pl@0 {
-		#address-cells = <1>;
-		#size-cells = <1>;
-		compatible = "simple-bus";
-		ranges;
+/* Override the auto-generated AXI DMA to use UIO instead of native driver */
+&axi_dma_0 {
+	compatible = "generic-uio"; // pl.dtsi has "simple-bus"
+	/* Keep the existing reg, interrupts, and other properties from pl.dtsi */
+	/* Add memory region for DMA operations */
+	memory-region = <&dma_reserved>;
+	status = "okay";
+	/* Add interrupt if your control registers generate interrupts */
+	/* interrupt-parent = <&intc>; */
+	/* interrupts = <0 62 4>; */ /* IRQ_F2P[1] if needed */
+	/* interrupt-names = "control_irq"; */};
 
-		/* AXI DMA with Scatter-Gather */
-		uio_axi_dma: uio_axi_dma {
-			compatible = "generic-uio";
-			reg = <0x40400000 0x10000>; /* AXI DMA base address - 64K range */
-			interrupt-parent = <&intc>;
-			interrupts = <0 61 4>; /* S2MM interrupt - IRQ_F2P[0] */
-			interrupt-names = "s2mm_introut";
-			memory-region = <&dma_buffer_pool>;
-			xlnx,addrwidth = <0x20>; /* 32-bit addressing */
-			xlnx,sg-length-width = <0x17>; /* SG length width */
-			status = "okay";
-		};
+/* Override the auto-generated AXI Lite Control to use UIO */
+&axi_lite_control_0 {
+	compatible = "generic-uio"; // pl.dtsi has "xlnx,axi-lite-control-1.0";
+	/* Keep the existing reg and other properties from pl.dtsi */
+	status = "okay";
 
-		/* Control Register Interface */
-		uio_control_reg: uio_control_reg {
-			compatible = "generic-uio";
-			reg = <0x80000000 0x1000>; /* Control registers - 4K range */
-			status = "okay";
-			/* Add interrupt if your control registers generate interrupts */
-			/* interrupt-parent = <&intc>; */
-			/* interrupts = <0 62 4>; */ /* IRQ_F2P[1] if needed */
-			/* interrupt-names = "control_irq"; */
-		};
-
-		/* Status Register Interface */
-		uio_status_reg: uio_status_reg {
-			compatible = "generic-uio";
-			reg = <0x80001000 0x1000>; /* Status registers - 4K range */
-			status = "okay";
-			/* Add interrupt if your status registers generate interrupts */
-			/* interrupt-parent = <&intc>; */
-			/* interrupts = <0 63 4>; */ /* IRQ_F2P[2] if needed */
-			/* interrupt-names = "status_irq"; */
-		};
-	};
 };
 
 /* Alternative configuration using xlnx,axi-dma if you prefer native driver support */
