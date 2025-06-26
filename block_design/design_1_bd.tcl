@@ -637,8 +637,8 @@ proc create_root_design { parentCell } {
      return 1
    }
     set_property -dict [list \
-    CONFIG.N_CTRL {1} \
-    CONFIG.N_STATUS {1} \
+    CONFIG.N_CTRL {22} \
+    CONFIG.N_STATUS {6} \
   ] $axi_lite_registers_0
 
 
@@ -647,7 +647,7 @@ proc create_root_design { parentCell } {
   connect_bd_intf_net -intf_net axi_smc_M00_AXI [get_bd_intf_pins axi_smc/M00_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
   connect_bd_intf_net -intf_net axi_smc_M01_AXI [get_bd_intf_pins axi_lite_registers_0/s_axi] [get_bd_intf_pins axi_smc/M01_AXI]
   connect_bd_intf_net -intf_net axis_data_fifo_0_M_AXIS [get_bd_intf_pins axis_data_fifo_0/M_AXIS] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
-  connect_bd_intf_net -intf_net data_generator_blk_0_m_axis [get_bd_intf_pins data_generator_blk_0/m_axis] [get_bd_intf_pins axis_data_fifo_0/S_AXIS]
+  connect_bd_intf_net -intf_net data_generator_blk_0_m_axis [get_bd_intf_pins data_generator_blk_0/M_AXIS] [get_bd_intf_pins axis_data_fifo_0/S_AXIS]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins axi_smc/S00_AXI]
@@ -657,10 +657,10 @@ proc create_root_design { parentCell } {
   connect_bd_net -net axi_dma_0_s2mm_introut  [get_bd_pins axi_dma_0/s2mm_introut] \
   [get_bd_pins processing_system7_0/IRQ_F2P]
   connect_bd_net -net axi_lite_registers_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers_0/ctrl_regs_pl] \
-  [get_bd_pins data_generator_blk_0/control_reg]
+  [get_bd_pins data_generator_blk_0/ctrl_regs_pl]
   connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M/locked] \
   [get_bd_pins proc_sys_reset_0_84M/dcm_locked]
-  connect_bd_net -net data_generator_blk_0_status_reg  [get_bd_pins data_generator_blk_0/status_reg] \
+  connect_bd_net -net data_generator_blk_0_status_reg  [get_bd_pins data_generator_blk_0/status_regs_pl] \
   [get_bd_pins axi_lite_registers_0/status_regs_pl]
   connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0_84M/peripheral_aresetn] \
   [get_bd_pins axis_data_fifo_0/s_axis_aresetn] \
