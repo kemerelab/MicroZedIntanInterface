@@ -35,14 +35,21 @@ module axi_lite_registers #(
     output reg  [32*N_CTRL-1:0]     ctrl_regs_pl,
 
     // Status from PL
-    input  wire [32*N_STATUS-1:0]   status_regs_pl
+    input  wire [32*N_STATUS-1:0]   status_regs_pl,
+
+    // Read notification outputs to PL
+    output reg  [N_STATUS-1:0]      status_read_pulse_pl
 );
 
 // Internal shadow registers (AXI domain)
 reg [31:0] ctrl_regs_axi [0:N_CTRL-1];
 reg [31:0] status_regs_axi [0:N_STATUS-1];
 
-// Write state
+// Read address register and read pulse generation
+reg [31:0] read_addr;
+reg [N_STATUS-1:0] status_read_axi;
+
+// Write state machine
 integer i;
 always @(posedge s_axi_aclk) begin
     if (!s_axi_aresetn) begin
@@ -50,6 +57,9 @@ always @(posedge s_axi_aclk) begin
         s_axi_wready  <= 0;
         s_axi_bvalid  <= 0;
         s_axi_bresp   <= 2'b00;
+        // Initialize control registers
+        for (i = 0; i < N_CTRL; i = i + 1)
+            ctrl_regs_axi[i] <= 32'b0;
     end else begin
         s_axi_awready <= ~s_axi_awready & s_axi_awvalid;
         s_axi_wready  <= ~s_axi_wready  & s_axi_wvalid;
@@ -57,84 +67,145 @@ always @(posedge s_axi_aclk) begin
         if (s_axi_awready & s_axi_awvalid & s_axi_wready & s_axi_wvalid) begin
             if (s_axi_awaddr[11:2] < N_CTRL) begin
                 i = s_axi_awaddr[11:2];
-                if (ctrl_regs_axi[i] !== s_axi_wdata) begin
-                    ctrl_regs_axi[i] <= s_axi_wdata;
-                end
+                // Proper write strobe handling
+                if (s_axi_wstrb[0]) ctrl_regs_axi[i][7:0]   <= s_axi_wdata[7:0];
+                if (s_axi_wstrb[1]) ctrl_regs_axi[i][15:8]  <= s_axi_wdata[15:8];
+                if (s_axi_wstrb[2]) ctrl_regs_axi[i][23:16] <= s_axi_wdata[23:16];
+                if (s_axi_wstrb[3]) ctrl_regs_axi[i][31:24] <= s_axi_wdata[31:24];
+                s_axi_bresp <= 2'b00; // OKAY response
+            end else begin
+                s_axi_bresp <= 2'b10; // SLVERR for invalid address
             end
             s_axi_bvalid <= 1;
-            s_axi_bresp  <= 2'b00;
         end else if (s_axi_bvalid & s_axi_bready) begin
             s_axi_bvalid <= 0;
         end
     end
 end
 
-// Read state
+// AXI Read state machine
 always @(posedge s_axi_aclk) begin
     if (!s_axi_aresetn) begin
+        s_axi_rvalid <= 0;
+        s_axi_rdata  <= 32'b0;
+        s_axi_rresp  <= 2'b00;
+        read_addr    <= 32'b0;
         s_axi_arready <= 0;
-        s_axi_rvalid  <= 0;
-        s_axi_rresp   <= 2'b00;
-        s_axi_rdata   <= 32'd0;
+        status_read_axi <= 0;
     end else begin
         s_axi_arready <= ~s_axi_arready & s_axi_arvalid;
+        
+        // Clear read pulses by default
+        status_read_axi <= 0;
 
-        if (s_axi_arready & s_axi_arvalid) begin
+        if (s_axi_arvalid && s_axi_arready) begin
+            read_addr <= s_axi_araddr;
+            s_axi_rvalid <= 1;
+
             if (s_axi_araddr[11:2] < N_CTRL) begin
                 s_axi_rdata <= ctrl_regs_axi[s_axi_araddr[11:2]];
+                s_axi_rresp <= 2'b00; // OKAY
             end else if ((s_axi_araddr[11:2] - N_CTRL) < N_STATUS) begin
                 s_axi_rdata <= status_regs_axi[s_axi_araddr[11:2] - N_CTRL];
+                s_axi_rresp <= 2'b00; // OKAY
+                // Generate read pulse when status register read starts
+                status_read_axi[s_axi_araddr[11:2] - N_CTRL] <= 1;
             end else begin
                 s_axi_rdata <= 32'hdeadbeef;
+                s_axi_rresp <= 2'b10; // SLVERR for invalid address
             end
-            s_axi_rvalid <= 1;
-            s_axi_rresp  <= 2'b00;
-        end else if (s_axi_rvalid & s_axi_rready) begin
+        end else if (s_axi_rvalid && s_axi_rready) begin
             s_axi_rvalid <= 0;
         end
     end
 end
 
-// CDC for control regs: AXI -> PL
+// ============================================================================
+// CLOCK DOMAIN CROSSING - CONTROL REGISTERS (AXI -> PL)
+// ============================================================================
+
+// Two-stage synchronizer for control registers
 reg [31:0] ctrl_sync1 [0:N_CTRL-1];
 reg [31:0] ctrl_sync2 [0:N_CTRL-1];
 
 always @(posedge pl_clk) begin
     if (!pl_rstn) begin
         for (i = 0; i < N_CTRL; i = i + 1) begin
-            ctrl_sync1[i] <= 0;
-            ctrl_sync2[i] <= 0;
+            ctrl_sync1[i] <= 32'b0;
+            ctrl_sync2[i] <= 32'b0;
         end
     end else begin
         for (i = 0; i < N_CTRL; i = i + 1) begin
-            ctrl_sync1[i] <= ctrl_regs_axi[i];
-            ctrl_sync2[i] <= ctrl_sync1[i];
+            ctrl_sync1[i] <= ctrl_regs_axi[i];  // Cross from AXI to PL domain
+            ctrl_sync2[i] <= ctrl_sync1[i];     // Second stage synchronizer
         end
     end
 end
 
-// Flatten for output
+// Flatten control registers for output to PL
 always @(*) begin
     for (i = 0; i < N_CTRL; i = i + 1)
         ctrl_regs_pl[i*32 +: 32] = ctrl_sync2[i];
 end
 
-// CDC for status regs: PL -> AXI
+// ============================================================================
+// CLOCK DOMAIN CROSSING - STATUS REGISTERS (PL -> AXI)
+// ============================================================================
+
+// First stage: Register inputs in PL domain
+reg [31:0] status_pl_reg [0:N_STATUS-1];
+
+always @(posedge pl_clk) begin
+    if (!pl_rstn) begin
+        for (i = 0; i < N_STATUS; i = i + 1) begin
+            status_pl_reg[i] <= 32'b0;
+        end
+    end else begin
+        // Register the PL inputs in their own domain first
+        for (i = 0; i < N_STATUS; i = i + 1) begin
+            status_pl_reg[i] <= status_regs_pl[i*32 +: 32];
+        end
+    end
+end
+
+// Second stage: Cross to AXI domain with two-stage synchronizers
 reg [31:0] status_sync1 [0:N_STATUS-1];
 reg [31:0] status_sync2 [0:N_STATUS-1];
 
 always @(posedge s_axi_aclk) begin
     if (!s_axi_aresetn) begin
         for (i = 0; i < N_STATUS; i = i + 1) begin
-            status_sync1[i] <= 0;
-            status_sync2[i] <= 0;
+            status_sync1[i] <= 32'b0;
+            status_sync2[i] <= 32'b0;
+            status_regs_axi[i] <= 32'b0;
         end
     end else begin
+        // Status registers - simple two-stage sync
         for (i = 0; i < N_STATUS; i = i + 1) begin
-            status_sync1[i] <= status_regs_pl[i*32 +: 32];
-            status_sync2[i] <= status_sync1[i];
-            status_regs_axi[i] <= status_sync2[i];
+            status_sync1[i] <= status_pl_reg[i];    // Cross clock domain
+            status_sync2[i] <= status_sync1[i];     // Second stage
+            status_regs_axi[i] <= status_sync2[i];  // Final output
         end
+    end
+end
+
+// ============================================================================
+// CLOCK DOMAIN CROSSING - READ PULSES (AXI -> PL)
+// ============================================================================
+
+// Cross read pulses to PL domain
+reg [N_STATUS-1:0] status_read_sync1, status_read_sync2;
+
+always @(posedge pl_clk) begin
+    if (!pl_rstn) begin
+        status_read_sync1 <= 0;
+        status_read_sync2 <= 0;
+        status_read_pulse_pl <= 0;
+    end else begin
+        // Two-stage synchronizer for read pulses
+        status_read_sync1 <= status_read_axi;
+        status_read_sync2 <= status_read_sync1;
+        status_read_pulse_pl <= status_read_sync2;
     end
 end
 

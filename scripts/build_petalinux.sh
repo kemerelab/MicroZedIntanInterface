@@ -96,7 +96,7 @@ petalinux-package --boot \
   --u-boot $BOOT_OUT/u-boot.elf\
   --force
 
-  petalinux-package --boot --fsbl ./images/linux/zynq_fsbl.elf --uboot ./images/linux/u-boot.elf --fpga ./images/linux/system.bit --force
+# petalinux-package --boot --fsbl ./images/linux/zynq_fsbl.elf --uboot ./images/linux/u-boot.elf --fpga ./images/linux/system.bit --force
 
 echo "=== ✅ SD card image files are in: $BOOT_OUT ==="
 echo "    Copy the following to the FAT32 partition of your SD card:"

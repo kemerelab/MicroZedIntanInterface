@@ -20,7 +20,7 @@ set script_folder [_tcl::get_script_folder]
 ################################################################
 # Check if script is running in correct Vivado version.
 ################################################################
-set scripts_vivado_version 2024.2
+set scripts_vivado_version 2025.1
 set current_vivado_version [version -short]
 
 if { [string first $scripts_vivado_version $current_vivado_version] == -1 } {
@@ -142,6 +142,7 @@ xilinx.com:ip:axi_dma:7.1\
 xilinx.com:ip:axis_data_fifo:2.0\
 xilinx.com:ip:smartconnect:1.0\
 xilinx.com:ip:clk_wiz:6.0\
+xilinx.com:inline_hdl:ilvector_logic:1.0\
 "
 
    set list_ips_missing ""
@@ -247,7 +248,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_ACT_ENET0_PERIPHERAL_FREQMHZ {125.000000} \
     CONFIG.PCW_ACT_ENET1_PERIPHERAL_FREQMHZ {10.000000} \
     CONFIG.PCW_ACT_FPGA0_PERIPHERAL_FREQMHZ {100.000000} \
-    CONFIG.PCW_ACT_FPGA1_PERIPHERAL_FREQMHZ {83.333336} \
+    CONFIG.PCW_ACT_FPGA1_PERIPHERAL_FREQMHZ {10.000000} \
     CONFIG.PCW_ACT_FPGA2_PERIPHERAL_FREQMHZ {10.000000} \
     CONFIG.PCW_ACT_FPGA3_PERIPHERAL_FREQMHZ {10.000000} \
     CONFIG.PCW_ACT_PCAP_PERIPHERAL_FREQMHZ {200.000000} \
@@ -267,7 +268,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_APU_CLK_RATIO_ENABLE {6:2:1} \
     CONFIG.PCW_APU_PERIPHERAL_FREQMHZ {667} \
     CONFIG.PCW_CLK0_FREQ {100000000} \
-    CONFIG.PCW_CLK1_FREQ {83333336} \
+    CONFIG.PCW_CLK1_FREQ {10000000} \
     CONFIG.PCW_CLK2_FREQ {10000000} \
     CONFIG.PCW_CLK3_FREQ {10000000} \
     CONFIG.PCW_CPU_CPU_6X4X_MAX_RANGE {667} \
@@ -288,7 +289,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_ENET_RESET_ENABLE {1} \
     CONFIG.PCW_ENET_RESET_SELECT {Share reset pin} \
     CONFIG.PCW_EN_CLK0_PORT {1} \
-    CONFIG.PCW_EN_CLK1_PORT {1} \
+    CONFIG.PCW_EN_CLK1_PORT {0} \
     CONFIG.PCW_EN_CLK2_PORT {0} \
     CONFIG.PCW_EN_CLK3_PORT {0} \
     CONFIG.PCW_EN_DDR {1} \
@@ -309,13 +310,11 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_FCLK2_PERIPHERAL_CLKSRC {IO PLL} \
     CONFIG.PCW_FCLK3_PERIPHERAL_CLKSRC {IO PLL} \
     CONFIG.PCW_FCLK_CLK0_BUF {TRUE} \
-    CONFIG.PCW_FCLK_CLK1_BUF {TRUE} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {100} \
     CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ {84} \
     CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ {33.333333} \
     CONFIG.PCW_FPGA3_PERIPHERAL_FREQMHZ {50} \
     CONFIG.PCW_FPGA_FCLK0_ENABLE {1} \
-    CONFIG.PCW_FPGA_FCLK1_ENABLE {1} \
     CONFIG.PCW_GPIO_EMIO_GPIO_ENABLE {0} \
     CONFIG.PCW_GPIO_MIO_GPIO_ENABLE {1} \
     CONFIG.PCW_GPIO_MIO_GPIO_IO {MIO} \
@@ -638,8 +637,13 @@ proc create_root_design { parentCell } {
    }
     set_property -dict [list \
     CONFIG.N_CTRL {22} \
-    CONFIG.N_STATUS {6} \
+    CONFIG.N_STATUS {7} \
   ] $axi_lite_registers_0
+
+
+  # Create instance: ilvector_logic_0, and set properties
+  set ilvector_logic_0 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilvector_logic:1.0 ilvector_logic_0 ]
+  set_property CONFIG.C_SIZE {1} $ilvector_logic_0
 
 
   # Create interface connections
@@ -656,30 +660,37 @@ proc create_root_design { parentCell } {
   # Create port connections
   connect_bd_net -net axi_dma_0_s2mm_introut  [get_bd_pins axi_dma_0/s2mm_introut] \
   [get_bd_pins processing_system7_0/IRQ_F2P]
+  connect_bd_net -net axi_dma_0_s2mm_prmry_reset_out_n  [get_bd_pins axi_dma_0/s2mm_prmry_reset_out_n] \
+  [get_bd_pins ilvector_logic_0/Op1] \
+  [get_bd_pins data_generator_blk_0/dma_reset_n]
   connect_bd_net -net axi_lite_registers_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers_0/ctrl_regs_pl] \
   [get_bd_pins data_generator_blk_0/ctrl_regs_pl]
+  connect_bd_net -net axi_lite_registers_0_status_read_pulse_pl  [get_bd_pins axi_lite_registers_0/status_read_pulse_pl] \
+  [get_bd_pins data_generator_blk_0/status_read_pulse_pl]
   connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M/locked] \
   [get_bd_pins proc_sys_reset_0_84M/dcm_locked]
-  connect_bd_net -net data_generator_blk_0_status_reg  [get_bd_pins data_generator_blk_0/status_regs_pl] \
+  connect_bd_net -net data_generator_blk_0_status_regs_pl  [get_bd_pins data_generator_blk_0/status_regs_pl] \
   [get_bd_pins axi_lite_registers_0/status_regs_pl]
+  connect_bd_net -net ilvector_logic_0_Res  [get_bd_pins ilvector_logic_0/Res] \
+  [get_bd_pins axis_data_fifo_0/s_axis_aresetn]
   connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0_84M/peripheral_aresetn] \
-  [get_bd_pins axis_data_fifo_0/s_axis_aresetn] \
+  [get_bd_pins ilvector_logic_0/Op2] \
   [get_bd_pins axi_lite_registers_0/pl_rstn] \
   [get_bd_pins data_generator_blk_0/rstn]
   connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
-  [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
-  [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
   [get_bd_pins axi_dma_0/s_axi_lite_aclk] \
   [get_bd_pins axi_dma_0/m_axi_s2mm_aclk] \
-  [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK] \
-  [get_bd_pins axis_data_fifo_0/m_axis_aclk] \
   [get_bd_pins axi_smc/aclk] \
-  [get_bd_pins smartconnect_0/aclk] \
+  [get_bd_pins axis_data_fifo_0/m_axis_aclk] \
   [get_bd_pins clk_wiz_0_84M/clk_in1] \
+  [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
+  [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK] \
+  [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
+  [get_bd_pins smartconnect_0/aclk] \
   [get_bd_pins axi_lite_registers_0/s_axi_aclk]
   connect_bd_net -net processing_system7_0_FCLK_CLK1  [get_bd_pins clk_wiz_0_84M/clk_out1] \
-  [get_bd_pins proc_sys_reset_0_84M/slowest_sync_clk] \
   [get_bd_pins axis_data_fifo_0/s_axis_aclk] \
+  [get_bd_pins proc_sys_reset_0_84M/slowest_sync_clk] \
   [get_bd_pins axi_lite_registers_0/pl_clk] \
   [get_bd_pins data_generator_blk_0/clk]
   connect_bd_net -net processing_system7_0_FCLK_RESET0_N  [get_bd_pins processing_system7_0/FCLK_RESET0_N] \
@@ -690,8 +701,8 @@ proc create_root_design { parentCell } {
   [get_bd_pins smartconnect_0/aresetn] \
   [get_bd_pins axi_lite_registers_0/s_axi_aresetn]
   connect_bd_net -net rst_ps7_0_100M_peripheral_reset  [get_bd_pins rst_ps7_0_100M/peripheral_reset] \
-  [get_bd_pins proc_sys_reset_0_84M/ext_reset_in] \
-  [get_bd_pins clk_wiz_0_84M/reset]
+  [get_bd_pins clk_wiz_0_84M/reset] \
+  [get_bd_pins proc_sys_reset_0_84M/ext_reset_in]
 
   # Create address segments
   assign_bd_address -offset 0x40400000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_dma_0/S_AXI_LITE/Reg] -force
