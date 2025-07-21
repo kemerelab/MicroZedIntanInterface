@@ -46,7 +46,7 @@ if { [string first $scripts_vivado_version $current_vivado_version] == -1 } {
 
 # The design that will be created by this Tcl script contains the following 
 # module references:
-# data_generator_blk, axi_lite_registers
+# axi_lite_registers2, data_generator_bram_blk, simple_dual_port_bram_wrapper
 
 # Please add the sources of those modules before sourcing this Tcl script.
 
@@ -138,11 +138,9 @@ if { $bCheckIPs == 1 } {
    set list_check_ips "\ 
 xilinx.com:ip:processing_system7:5.5\
 xilinx.com:ip:proc_sys_reset:5.0\
-xilinx.com:ip:axi_dma:7.1\
-xilinx.com:ip:axis_data_fifo:2.0\
-xilinx.com:ip:smartconnect:1.0\
 xilinx.com:ip:clk_wiz:6.0\
-xilinx.com:inline_hdl:ilvector_logic:1.0\
+xilinx.com:ip:smartconnect:1.0\
+xilinx.com:ip:axi_bram_ctrl:4.1\
 "
 
    set list_ips_missing ""
@@ -168,8 +166,9 @@ xilinx.com:inline_hdl:ilvector_logic:1.0\
 set bCheckModules 1
 if { $bCheckModules == 1 } {
    set list_check_mods "\ 
-data_generator_blk\
-axi_lite_registers\
+axi_lite_registers2\
+data_generator_bram_blk\
+simple_dual_port_bram_wrapper\
 "
 
    set list_mods_missing ""
@@ -311,7 +310,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_FCLK3_PERIPHERAL_CLKSRC {IO PLL} \
     CONFIG.PCW_FCLK_CLK0_BUF {TRUE} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {100} \
-    CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ {84} \
+    CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ {100} \
     CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ {33.333333} \
     CONFIG.PCW_FPGA3_PERIPHERAL_FREQMHZ {50} \
     CONFIG.PCW_FPGA_FCLK0_ENABLE {1} \
@@ -564,8 +563,8 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_USE_DMA0 {0} \
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
     CONFIG.PCW_USE_M_AXI_GP0 {1} \
-    CONFIG.PCW_USE_M_AXI_GP1 {0} \
-    CONFIG.PCW_USE_S_AXI_HP0 {1} \
+    CONFIG.PCW_USE_M_AXI_GP1 {1} \
+    CONFIG.PCW_USE_S_AXI_HP0 {0} \
   ] $processing_system7_0
 
 
@@ -575,139 +574,145 @@ proc create_root_design { parentCell } {
   # Create instance: proc_sys_reset_0_84M, and set properties
   set proc_sys_reset_0_84M [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 proc_sys_reset_0_84M ]
 
-  # Create instance: axi_dma_0, and set properties
-  set axi_dma_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0 ]
+  # Create instance: clk_wiz_0_84M, and set properties
+  set clk_wiz_0_84M [ create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clk_wiz_0_84M ]
   set_property -dict [list \
-    CONFIG.c_include_mm2s {0} \
-    CONFIG.c_include_sg {0} \
-  ] $axi_dma_0
+    CONFIG.CLKIN1_JITTER_PS {100.0} \
+    CONFIG.CLKIN2_JITTER_PS {66.66000000000001} \
+    CONFIG.CLKOUT1_DRIVES {BUFG} \
+    CONFIG.CLKOUT1_JITTER {130.736} \
+    CONFIG.CLKOUT1_PHASE_ERROR {94.994} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {84} \
+    CONFIG.CLKOUT1_USED {true} \
+    CONFIG.CLKOUT2_DRIVES {BUFG} \
+    CONFIG.CLKOUT2_JITTER {113.523} \
+    CONFIG.CLKOUT2_PHASE_ERROR {94.994} \
+    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {175} \
+    CONFIG.CLKOUT2_USED {true} \
+    CONFIG.CLKOUT3_DRIVES {BUFG} \
+    CONFIG.CLKOUT4_DRIVES {BUFG} \
+    CONFIG.CLKOUT5_DRIVES {BUFG} \
+    CONFIG.CLKOUT6_DRIVES {BUFG} \
+    CONFIG.CLKOUT7_DRIVES {BUFG} \
+    CONFIG.FEEDBACK_SOURCE {FDBK_AUTO} \
+    CONFIG.MMCM_BANDWIDTH {OPTIMIZED} \
+    CONFIG.MMCM_CLKFBOUT_MULT_F {10.500} \
+    CONFIG.MMCM_CLKIN1_PERIOD {10.000} \
+    CONFIG.MMCM_CLKIN2_PERIOD {6.667} \
+    CONFIG.MMCM_CLKOUT0_DIVIDE_F {12.500} \
+    CONFIG.MMCM_CLKOUT1_DIVIDE {6} \
+    CONFIG.MMCM_COMPENSATION {ZHOLD} \
+    CONFIG.MMCM_DIVCLK_DIVIDE {1} \
+    CONFIG.NUM_OUT_CLKS {2} \
+    CONFIG.PRIMITIVE {MMCM} \
+    CONFIG.SECONDARY_IN_FREQ {150} \
+    CONFIG.SECONDARY_SOURCE {Single_ended_clock_capable_pin} \
+    CONFIG.USE_INCLK_SWITCHOVER {false} \
+  ] $clk_wiz_0_84M
 
 
-  # Create instance: axis_data_fifo_0, and set properties
-  set axis_data_fifo_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axis_data_fifo:2.0 axis_data_fifo_0 ]
-  set_property -dict [list \
-    CONFIG.HAS_TLAST {1} \
-    CONFIG.IS_ACLK_ASYNC {1} \
-  ] $axis_data_fifo_0
-
-
-  # Create instance: smartconnect_0, and set properties
-  set smartconnect_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_0 ]
-
-  # Create instance: axi_smc, and set properties
-  set axi_smc [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 axi_smc ]
-  set_property -dict [list \
-    CONFIG.NUM_MI {2} \
-    CONFIG.NUM_SI {1} \
-  ] $axi_smc
-
-
-  # Create instance: data_generator_blk_0, and set properties
-  set block_name data_generator_blk
-  set block_cell_name data_generator_blk_0
-  if { [catch {set data_generator_blk_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+  # Create instance: axi_lite_registers2_0, and set properties
+  set block_name axi_lite_registers2
+  set block_cell_name axi_lite_registers2_0
+  if { [catch {set axi_lite_registers2_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
-   } elseif { $data_generator_blk_0 eq "" } {
+   } elseif { $axi_lite_registers2_0 eq "" } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
   
-  # Create instance: clk_wiz_0_84M, and set properties
-  set clk_wiz_0_84M [ create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clk_wiz_0_84M ]
-  set_property -dict [list \
-    CONFIG.CLKOUT1_JITTER {246.960} \
-    CONFIG.CLKOUT1_PHASE_ERROR {293.793} \
-    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {84} \
-    CONFIG.MMCM_CLKFBOUT_MULT_F {49.875} \
-    CONFIG.MMCM_CLKOUT0_DIVIDE_F {11.875} \
-    CONFIG.MMCM_DIVCLK_DIVIDE {5} \
-  ] $clk_wiz_0_84M
+  # Create instance: smartconnect_0, and set properties
+  set smartconnect_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_0 ]
+  set_property CONFIG.NUM_SI {1} $smartconnect_0
 
 
-  # Create instance: axi_lite_registers_0, and set properties
-  set block_name axi_lite_registers
-  set block_cell_name axi_lite_registers_0
-  if { [catch {set axi_lite_registers_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+  # Create instance: smartconnect_1, and set properties
+  set smartconnect_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_1 ]
+  set_property CONFIG.NUM_SI {1} $smartconnect_1
+
+
+  # Create instance: data_generator_bram_0, and set properties
+  set block_name data_generator_bram_blk
+  set block_cell_name data_generator_bram_0
+  if { [catch {set data_generator_bram_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
-   } elseif { $axi_lite_registers_0 eq "" } {
+   } elseif { $data_generator_bram_0 eq "" } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
-    set_property -dict [list \
-    CONFIG.N_CTRL {22} \
-    CONFIG.N_STATUS {7} \
-  ] $axi_lite_registers_0
+  
+  # Create instance: simple_dual_port_bra_0, and set properties
+  set block_name simple_dual_port_bram_wrapper
+  set block_cell_name simple_dual_port_bra_0
+  if { [catch {set simple_dual_port_bra_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $simple_dual_port_bra_0 eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+  
+  # Create instance: axi_bram_ctrl_0, and set properties
+  set axi_bram_ctrl_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0 ]
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_0
 
 
-  # Create instance: ilvector_logic_0, and set properties
-  set ilvector_logic_0 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilvector_logic:1.0 ilvector_logic_0 ]
-  set_property CONFIG.C_SIZE {1} $ilvector_logic_0
-
+  # Create instance: proc_sys_reset_175MHz, and set properties
+  set proc_sys_reset_175MHz [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 proc_sys_reset_175MHz ]
 
   # Create interface connections
-  connect_bd_intf_net -intf_net axi_dma_0_M_AXI_S2MM [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins smartconnect_0/S00_AXI]
-  connect_bd_intf_net -intf_net axi_smc_M00_AXI [get_bd_intf_pins axi_smc/M00_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
-  connect_bd_intf_net -intf_net axi_smc_M01_AXI [get_bd_intf_pins axi_lite_registers_0/s_axi] [get_bd_intf_pins axi_smc/M01_AXI]
-  connect_bd_intf_net -intf_net axis_data_fifo_0_M_AXIS [get_bd_intf_pins axis_data_fifo_0/M_AXIS] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
-  connect_bd_intf_net -intf_net data_generator_blk_0_m_axis [get_bd_intf_pins data_generator_blk_0/M_AXIS] [get_bd_intf_pins axis_data_fifo_0/S_AXIS]
+  connect_bd_intf_net -intf_net axi_bram_ctrl_0_BRAM_PORTA [get_bd_intf_pins axi_bram_ctrl_0/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bra_0/BRAM_PORTB]
+  connect_bd_intf_net -intf_net data_generator_bram_0_BRAM_PORTA [get_bd_intf_pins data_generator_bram_0/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bra_0/BRAM_PORTA]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
-  connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins axi_smc/S00_AXI]
-  connect_bd_intf_net -intf_net smartconnect_0_M00_AXI [get_bd_intf_pins smartconnect_0/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
+  connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins smartconnect_0/S00_AXI]
+  connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP1 [get_bd_intf_pins smartconnect_1/S00_AXI] [get_bd_intf_pins processing_system7_0/M_AXI_GP1]
+  connect_bd_intf_net -intf_net smartconnect_0_M00_AXI [get_bd_intf_pins smartconnect_0/M00_AXI] [get_bd_intf_pins axi_lite_registers2_0/s_axi]
+  connect_bd_intf_net -intf_net smartconnect_1_M00_AXI [get_bd_intf_pins axi_bram_ctrl_0/S_AXI] [get_bd_intf_pins smartconnect_1/M00_AXI]
 
   # Create port connections
-  connect_bd_net -net axi_dma_0_s2mm_introut  [get_bd_pins axi_dma_0/s2mm_introut] \
-  [get_bd_pins processing_system7_0/IRQ_F2P]
-  connect_bd_net -net axi_dma_0_s2mm_prmry_reset_out_n  [get_bd_pins axi_dma_0/s2mm_prmry_reset_out_n] \
-  [get_bd_pins ilvector_logic_0/Op1] \
-  [get_bd_pins data_generator_blk_0/dma_reset_n]
-  connect_bd_net -net axi_lite_registers_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers_0/ctrl_regs_pl] \
-  [get_bd_pins data_generator_blk_0/ctrl_regs_pl]
-  connect_bd_net -net axi_lite_registers_0_status_read_pulse_pl  [get_bd_pins axi_lite_registers_0/status_read_pulse_pl] \
-  [get_bd_pins data_generator_blk_0/status_read_pulse_pl]
-  connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M/locked] \
-  [get_bd_pins proc_sys_reset_0_84M/dcm_locked]
-  connect_bd_net -net data_generator_blk_0_status_regs_pl  [get_bd_pins data_generator_blk_0/status_regs_pl] \
-  [get_bd_pins axi_lite_registers_0/status_regs_pl]
-  connect_bd_net -net ilvector_logic_0_Res  [get_bd_pins ilvector_logic_0/Res] \
-  [get_bd_pins axis_data_fifo_0/s_axis_aresetn]
-  connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0_84M/peripheral_aresetn] \
-  [get_bd_pins ilvector_logic_0/Op2] \
-  [get_bd_pins axi_lite_registers_0/pl_rstn] \
-  [get_bd_pins data_generator_blk_0/rstn]
-  connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
-  [get_bd_pins axi_dma_0/s_axi_lite_aclk] \
-  [get_bd_pins axi_dma_0/m_axi_s2mm_aclk] \
-  [get_bd_pins axi_smc/aclk] \
-  [get_bd_pins axis_data_fifo_0/m_axis_aclk] \
-  [get_bd_pins clk_wiz_0_84M/clk_in1] \
-  [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
-  [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK] \
-  [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
-  [get_bd_pins smartconnect_0/aclk] \
-  [get_bd_pins axi_lite_registers_0/s_axi_aclk]
-  connect_bd_net -net processing_system7_0_FCLK_CLK1  [get_bd_pins clk_wiz_0_84M/clk_out1] \
-  [get_bd_pins axis_data_fifo_0/s_axis_aclk] \
+  connect_bd_net -net axi_lite_registers2_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers2_0/ctrl_regs_pl] \
+  [get_bd_pins data_generator_bram_0/ctrl_regs_pl]
+  connect_bd_net -net clk_wiz_0_84M_clk_out1  [get_bd_pins clk_wiz_0_84M/clk_out1] \
+  [get_bd_pins axi_lite_registers2_0/pl_clk] \
   [get_bd_pins proc_sys_reset_0_84M/slowest_sync_clk] \
-  [get_bd_pins axi_lite_registers_0/pl_clk] \
-  [get_bd_pins data_generator_blk_0/clk]
+  [get_bd_pins data_generator_bram_0/clk]
+  connect_bd_net -net clk_wiz_0_84M_clk_out2  [get_bd_pins clk_wiz_0_84M/clk_out2] \
+  [get_bd_pins smartconnect_0/aclk] \
+  [get_bd_pins smartconnect_1/aclk] \
+  [get_bd_pins processing_system7_0/M_AXI_GP1_ACLK] \
+  [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
+  [get_bd_pins axi_lite_registers2_0/s_axi_aclk] \
+  [get_bd_pins axi_bram_ctrl_0/s_axi_aclk] \
+  [get_bd_pins proc_sys_reset_175MHz/slowest_sync_clk]
+  connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M/locked] \
+  [get_bd_pins proc_sys_reset_0_84M/dcm_locked] \
+  [get_bd_pins proc_sys_reset_175MHz/dcm_locked]
+  connect_bd_net -net data_generator_bram_0_status_regs_pl  [get_bd_pins data_generator_bram_0/status_regs_pl] \
+  [get_bd_pins axi_lite_registers2_0/status_regs_pl]
+  connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0_84M/peripheral_aresetn] \
+  [get_bd_pins axi_lite_registers2_0/pl_rstn] \
+  [get_bd_pins data_generator_bram_0/rstn]
+  connect_bd_net -net proc_sys_reset_175MHz_interconnect_aresetn  [get_bd_pins proc_sys_reset_175MHz/interconnect_aresetn] \
+  [get_bd_pins smartconnect_0/aresetn] \
+  [get_bd_pins smartconnect_1/aresetn] \
+  [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn] \
+  [get_bd_pins axi_lite_registers2_0/s_axi_aresetn]
+  connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
+  [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
+  [get_bd_pins clk_wiz_0_84M/clk_in1]
   connect_bd_net -net processing_system7_0_FCLK_RESET0_N  [get_bd_pins processing_system7_0/FCLK_RESET0_N] \
   [get_bd_pins rst_ps7_0_100M/ext_reset_in]
-  connect_bd_net -net rst_ps7_0_100M_peripheral_aresetn  [get_bd_pins rst_ps7_0_100M/peripheral_aresetn] \
-  [get_bd_pins axi_dma_0/axi_resetn] \
-  [get_bd_pins axi_smc/aresetn] \
-  [get_bd_pins smartconnect_0/aresetn] \
-  [get_bd_pins axi_lite_registers_0/s_axi_aresetn]
   connect_bd_net -net rst_ps7_0_100M_peripheral_reset  [get_bd_pins rst_ps7_0_100M/peripheral_reset] \
   [get_bd_pins clk_wiz_0_84M/reset] \
-  [get_bd_pins proc_sys_reset_0_84M/ext_reset_in]
+  [get_bd_pins proc_sys_reset_0_84M/ext_reset_in] \
+  [get_bd_pins proc_sys_reset_175MHz/ext_reset_in]
 
   # Create address segments
-  assign_bd_address -offset 0x40400000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_dma_0/S_AXI_LITE/Reg] -force
-  assign_bd_address -offset 0x60000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers_0/s_axi/reg0] -force
-  assign_bd_address -offset 0x00000000 -range 0x40000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+  assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x40000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers2_0/s_axi/reg0] -force
 
 
   # Restore current instance

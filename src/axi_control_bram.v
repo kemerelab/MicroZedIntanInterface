@@ -1,6 +1,6 @@
-module axi_lite_registers #(
-    parameter integer N_CTRL = 4,
-    parameter integer N_STATUS = 4
+module axi_lite_registers2 #(
+    parameter integer N_CTRL = 22,     // Updated for your data generator (22 control regs)
+    parameter integer N_STATUS = 7     // Updated for your data generator (7 status regs)
 )(
     input  wire                     s_axi_aclk,
     input  wire                     s_axi_aresetn,
@@ -34,20 +34,19 @@ module axi_lite_registers #(
     // Control to PL
     output reg  [32*N_CTRL-1:0]     ctrl_regs_pl,
 
-    // Status from PL
-    input  wire [32*N_STATUS-1:0]   status_regs_pl,
-
-    // Read notification outputs to PL
-    output reg  [N_STATUS-1:0]      status_read_pulse_pl
+    // Status from PL (data generator status only)
+    input  wire [32*N_STATUS-1:0]   status_regs_pl
+    
+    // REMOVED: All FIFO-related ports
 );
 
 // Internal shadow registers (AXI domain)
 reg [31:0] ctrl_regs_axi [0:N_CTRL-1];
-reg [31:0] status_regs_axi [0:N_STATUS-1];
+reg [31:0] status_regs_axi [0:N_STATUS-1];  // Back to N_STATUS only
 
 // Read address register and read pulse generation
 reg [31:0] read_addr;
-reg [N_STATUS-1:0] status_read_axi;
+reg [N_STATUS-1:0] status_read_axi;  // Back to N_STATUS only
 
 // Write state machine
 integer i;
@@ -103,9 +102,11 @@ always @(posedge s_axi_aclk) begin
             s_axi_rvalid <= 1;
 
             if (s_axi_araddr[11:2] < N_CTRL) begin
+                // Control registers
                 s_axi_rdata <= ctrl_regs_axi[s_axi_araddr[11:2]];
                 s_axi_rresp <= 2'b00; // OKAY
             end else if ((s_axi_araddr[11:2] - N_CTRL) < N_STATUS) begin
+                // Status registers (data generator only)
                 s_axi_rdata <= status_regs_axi[s_axi_araddr[11:2] - N_CTRL];
                 s_axi_rresp <= 2'b00; // OKAY
                 // Generate read pulse when status register read starts
@@ -152,7 +153,7 @@ end
 // CLOCK DOMAIN CROSSING - STATUS REGISTERS (PL -> AXI)
 // ============================================================================
 
-// First stage: Register inputs in PL domain
+// First stage: Register inputs in PL domain (data generator only)
 reg [31:0] status_pl_reg [0:N_STATUS-1];
 
 always @(posedge pl_clk) begin
@@ -161,7 +162,7 @@ always @(posedge pl_clk) begin
             status_pl_reg[i] <= 32'b0;
         end
     end else begin
-        // Register the PL inputs in their own domain first
+        // Register the PL status inputs in their own domain first
         for (i = 0; i < N_STATUS; i = i + 1) begin
             status_pl_reg[i] <= status_regs_pl[i*32 +: 32];
         end
@@ -175,37 +176,17 @@ reg [31:0] status_sync2 [0:N_STATUS-1];
 always @(posedge s_axi_aclk) begin
     if (!s_axi_aresetn) begin
         for (i = 0; i < N_STATUS; i = i + 1) begin
+            status_regs_axi[i] <= 32'b0;
             status_sync1[i] <= 32'b0;
             status_sync2[i] <= 32'b0;
-            status_regs_axi[i] <= 32'b0;
         end
     end else begin
-        // Status registers - simple two-stage sync
+        // Data generator status registers - need clock crossing
         for (i = 0; i < N_STATUS; i = i + 1) begin
             status_sync1[i] <= status_pl_reg[i];    // Cross clock domain
             status_sync2[i] <= status_sync1[i];     // Second stage
             status_regs_axi[i] <= status_sync2[i];  // Final output
         end
-    end
-end
-
-// ============================================================================
-// CLOCK DOMAIN CROSSING - READ PULSES (AXI -> PL)
-// ============================================================================
-
-// Cross read pulses to PL domain
-reg [N_STATUS-1:0] status_read_sync1, status_read_sync2;
-
-always @(posedge pl_clk) begin
-    if (!pl_rstn) begin
-        status_read_sync1 <= 0;
-        status_read_sync2 <= 0;
-        status_read_pulse_pl <= 0;
-    end else begin
-        // Two-stage synchronizer for read pulses
-        status_read_sync1 <= status_read_axi;
-        status_read_sync2 <= status_read_sync1;
-        status_read_pulse_pl <= status_read_sync2;
     end
 end
 

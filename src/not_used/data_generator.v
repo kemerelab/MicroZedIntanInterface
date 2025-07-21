@@ -25,10 +25,7 @@ module data_generator_blk (
     
     // Control and status interfaces
     input  wire [32*22-1:0] ctrl_regs_pl,
-    output wire [32*7-1:0]  status_regs_pl,
-    
-    // Read notification inputs from AXI control
-    input  wire [6:0]       status_read_pulse_pl
+    output wire [32*6-1:0]  status_regs_pl
 );
 
 // Extract control bits from first control register
@@ -50,7 +47,8 @@ endgenerate
 
 // Create reset signals
 wire full_system_reset_n = rstn;
-wire axi_reset_n = rstn & dma_reset_n;
+wire axi_reset_n = rstn;
+//wire axi_reset_n = rstn & dma_reset_n;
 
 // Control counters
 reg [6:0] state_counter;
@@ -61,10 +59,9 @@ localparam [63:0] MAGIC_NUMBER = 64'hDEADBEEFCAFEBABE;
 reg [63:0] timestamp;
 
 // Status tracking
-reg [15:0] packets_sent;
+reg [31:0] packets_sent;
 reg        transmission_active;
 reg [31:0] loop_counter;
-reg        packet_complete;
 reg        synchronizing_dma_reset;
 
 // Dummy data for testing
@@ -89,24 +86,22 @@ always @(posedge clk) begin
         state_counter <= 7'd0;
         cycle_counter <= 6'd0;
         timestamp <= 64'd0;
-        packets_sent <= 16'd0;
+        packets_sent <= 32'd0;
         transmission_active <= 1'b0;
         loop_counter <= 32'd0;
-        packet_complete <= 1'b0;
         synchronizing_dma_reset <= 1'b0;
     end else begin
         // Detect DMA reset and handle synchronization
-        if (!dma_reset_n) begin
-            transmission_active <= 1'b0;
-            packets_sent <= 16'd0;
-            loop_counter <= 32'd0;
-            packet_complete <= 1'b0;
-            synchronizing_dma_reset <= 1'b1;
-        end else if (synchronizing_dma_reset) begin
-            if (state_counter == 7'd0 && cycle_counter == 6'd0) begin
-                synchronizing_dma_reset <= 1'b0;
-            end
-        end
+//        if (!dma_reset_n) begin
+//            transmission_active <= 1'b0;
+//            packets_sent <= 32'd0;
+//            loop_counter <= 32'd0;
+//            synchronizing_dma_reset <= 1'b1;
+//        end else if (synchronizing_dma_reset) begin
+//            if (state_counter == 7'd0 && cycle_counter == 6'd0) begin
+//                synchronizing_dma_reset <= 1'b0;
+//            end
+//        end
         
         // State machine always runs to maintain timing
         if (is_last_state) begin
@@ -116,7 +111,6 @@ always @(posedge clk) begin
 
                 if (transmission_active) begin
                     packets_sent <= packets_sent + 1;
-                    packet_complete <= 1'b1;
                 end
 
                 if (!enable_transmission && reset_timestamp) begin
@@ -129,11 +123,17 @@ always @(posedge clk) begin
                     loop_counter <= loop_counter + 1;
                 end
 
-                if (enable_transmission && !loop_limit_reached && !synchronizing_dma_reset) begin
+                if (enable_transmission && !loop_limit_reached) begin
                     transmission_active <= 1'b1;
                 end else begin
                     transmission_active <= 1'b0;
                 end
+                
+//                if (enable_transmission && !loop_limit_reached && !synchronizing_dma_reset) begin
+//                    transmission_active <= 1'b1;
+//                end else begin
+//                    transmission_active <= 1'b0;
+//                end                
 
             end else begin
                 cycle_counter <= cycle_counter + 1;
@@ -142,10 +142,6 @@ always @(posedge clk) begin
             state_counter <= state_counter + 1;
         end
         
-        // Handle status register read notifications
-        if (status_read_pulse_pl[6]) begin
-            packet_complete <= 1'b0;
-        end
     end
 end
 
@@ -175,10 +171,18 @@ always @(posedge clk) begin
                         end
                     end
                     7'd2: begin
-                        m_axis_tdata <= {dummy_data[0], dummy_data[1], dummy_data[2], dummy_data[3]};
                         m_axis_tvalid <= 1'b1;
                         if (is_last_cycle) begin
+                            m_axis_tdata <= {dummy_data[3], dummy_data[2], dummy_data[1], dummy_data[0]};
                             m_axis_tlast <= 1'b1;
+                        end else begin
+                            case (cycle_counter)
+                                6'd0:  m_axis_tdata <= {dummy_data[0], dummy_data[1], dummy_data[2], dummy_data[3]};
+                                6'd1:  m_axis_tdata <= {cycle_counter, 10'h000, cycle_counter, 10'h000, cycle_counter, 10'h000, cycle_counter, 10'h000};
+                                6'd2:  m_axis_tdata <= {timestamp[15:0], timestamp[31:16], timestamp[47:32], timestamp[63:48]};
+                                default: m_axis_tdata <= {cycle_counter, cycle_counter, cycle_counter, cycle_counter, 
+                                                        cycle_counter, cycle_counter, cycle_counter, cycle_counter};
+                            endcase
                         end
                     end
                     default: begin
@@ -191,12 +195,11 @@ always @(posedge clk) begin
 end
 
 // Pack status signals into output bus
-assign status_regs_pl[0*32 +: 32] = {30'd0, synchronizing_dma_reset, transmission_active};
+assign status_regs_pl[0*32 +: 32] = {29'd0, loop_limit_reached, synchronizing_dma_reset, transmission_active};
 assign status_regs_pl[1*32 +: 32] = {25'd0, state_counter};
 assign status_regs_pl[2*32 +: 32] = {26'd0, cycle_counter};
-assign status_regs_pl[3*32 +: 32] = {16'd0, packets_sent};
+assign status_regs_pl[3*32 +: 32] = packets_sent;
 assign status_regs_pl[4*32 +: 32] = timestamp[31:0];
 assign status_regs_pl[5*32 +: 32] = timestamp[63:32];
-assign status_regs_pl[6*32 +: 32] = {30'd0, loop_limit_reached, packet_complete};
 
 endmodule
