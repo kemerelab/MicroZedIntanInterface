@@ -1,0 +1,4 @@
+domain_path: /home/ckemere/Code/FPGA/Vitis2/DMA/export/DMA/sw/standalone_ps7_cortexa9_0
+app_src_dir: /home/ckemere/Xilinx/2025.1/Vitis/data/embeddedsw/lib/sw_apps/hello_world
+template: hello_world
+lang: c
