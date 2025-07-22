@@ -10,6 +10,9 @@
 *.backup.jou
 *.backup.log
 
+# Vitis
+.clangd
+
 .cache/
 .hw/
 .ip_user_files/
