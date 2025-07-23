@@ -29,7 +29,7 @@ app = client.get_component(name="klab-firmware")
 status = app.import_files(from_loc="firmware", files=['src', 'include'], is_skip_copy_sources=True)
 
 app.set_app_config('USER_INCLUDE_DIRECTORIES','../../../firmware/include')
-
+app.set_app_config('USER_COMPILE_OPTIMIZATION_LEVEL','-O3') # We can't make timing with the default -O0!!
 
 # After creating the app:
 
