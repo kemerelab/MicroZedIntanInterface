@@ -166,7 +166,7 @@ always_ff @(posedge clk) begin
 end
 
 // Pack status signals - only data generator's own status
-assign status_regs_pl[0*32 +: 32] = {29'd0, loop_limit_reached, synchronizing_dma_reset, transmission_active};
+assign status_regs_pl[0*32 +: 32] = {30'd0, loop_limit_reached, transmission_active};
 assign status_regs_pl[1*32 +: 32] = {25'd0, state_counter};
 assign status_regs_pl[2*32 +: 32] = {26'd0, cycle_counter};
 assign status_regs_pl[3*32 +: 32] = packets_sent;
