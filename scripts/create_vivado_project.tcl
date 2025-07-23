@@ -18,16 +18,17 @@ set_property simulator_language Mixed [current_project]
 
 # Add source files
 puts "Adding source files..."
-add_files -fileset sources_1 [glob ./src/*.v]
+add_files -fileset sources_1 [glob ./programmable_logic/src/*.v]
+add_files -fileset sources_1 [glob ./programmable_logic/src/*.sv]
 update_compile_order -fileset sources_1
 
 # Add constraint files
 puts "Adding constraint files..."
-add_files -fileset constrs_1 [glob ./constraints/*.xdc]
+add_files -fileset constrs_1 [glob ./programmable_logic/constraints/*.xdc]
 
 # Create block design from exported TCL
 puts "Creating block design..."
-source block_design/design_1_bd.tcl
+source programmable_logic/block_design/design_1_bd.tcl
 
 # Make the block design wrapper
 puts "Creating HDL wrapper..."

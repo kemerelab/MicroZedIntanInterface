@@ -2,44 +2,28 @@
 Repository with work in process Microzed projects
 
 ## Steps to building and testing
-0. Set the path up for Vivado command line - `source ~/tools24/Xilinx/Vivado/2024.2/settings64.sh`
-1. Create a Vivado project  - `vivado -mode batch -source scripts/create_project.tcl`. This will
+0. Set the path up for Vivado command line - `source ~/Xilinx/2025.1/Vivado/settings64.sh`
+1. Create a Vivado project  - `vivado -mode batch -source scripts/create_vivado_project.tcl`. This will
   create a Vivado project that you can open in the `<repository>/vivado_project/` directory.
 
 **NOTE** I think that the only place the part is specified is in the `scripts/create_project.tcl` file.
 (I made the project with a `xc7z020clg400-1`. I think you should be able to change this to 
 `xc7z010clg400-1` safely????)
 
-### Within Vivado
+### Building from Within Vivado
 1. Synthesis, Implementation, and Generate Bitstream - can simply click `Generate Bitstream` and these steps should be taken care of.
 2. `File->Export->Export Hardware`, choose "Include Bitstream" option!
 
-### From Console Window
-0. Set the path - `source ~/tools24/Xilinx/Petalinux/2024.2/tool/settings.sh`
-1. Create the Petalinux project. From the project directory, run `petalinux-create -t project -n <Project Name> --template zynq`
-2. Copy the exported hardware file into this new Petalinux directory. This is how I do it `cd <Project Name>`, `cp ..\<Exported Name> .`
-  (The default `<Exported Name>` is `design_1_wrapper.xsa`.)
-3. Run `petalinux-config --get-hw-description=.` (this leverages the hardware file you've exported!)
-  It will bring up a menu for configuration stuff. AFAIK all we need to do is `TAB` to the `<Exit>` command
-  and hit enter.
-4. Do some configuration. Run `petalinux-config -c rootfs`. Under `Image Features`, select `serial-autologin-root` (this is not critically necessary!).
-  Under `Filesystem Packages -> misc`, locate `packagegroup-core-buildessential` and select it if you want gcc to be available. There may be some desire
-  to configure the kernel as well, which you can do by running `petalinux-config -c kernel`. This takes a long time to run, though, and seems unneeded at
-  the moment.
-5. Build Petalinux. Run `petalinux-build`. This will take a (long) time.
-6. Generate the files to boot from SD Card. `petalinux-package --boot --fsbl ./images/linux/zynq_fsbl.elf --uboot ./images/linux/u-boot.elf --fpga ./images/linux/system.bit --force`.
-  (This assumes your pwd is the Petalinux project directory.) (At some point, we may want to change the structure of the SD files so that there is a filesystem
-  that lasts across reboots.)
-7. Copy the files `images/linux/boot.scr', `images/linux/BOOT.BIN`, and `images/linux/image.ub` to the SD card.
+### Alternative to building from within Vivado
+1. Run `vivado -mode batch -source scripts/build_bitstream.tcl`. This should end up with the exported hardware in `vivado_project/klab.xsa`
 
 
-### Testing in Petalinux
-1. With the SD card in the Microzed, the jumpers need to be set as J1 (topmost) - Left, J2 - Right, J3 - Right. (This is holding the Microzed
-  so that the USB connector is facting up.)
-2. When you plug in, it should boot, the LED on the right should be blue. If you connect to a serial monitor, you should eventually be logged in at a prompt.
-3. This project implements a counter that is stopped or started by setting the value of a register. To enable the counter, write a non-zero value:
-   `devmem 0x41200000 32 0x01`. You can read back that it has changed by just running `devmem 0x41200000 32` (this should tell you `0x00000001` since its
-   a 32-bit register. Now, the counter is ticking, and the counter can be read at `devmem 0x41210000 32`. It should increment at about 1 Hz. You can
-   also stop the counter by writing zero to the enable register, `devmem 0x41200000 32 0x0`, and see that it stops changing.
-
+### Creating a Vitis project
+1. Set the path for Vitis command line - `source ./Xilinx/2025.1/Vitis/settings64.sh`
+2. From the root directory of the repository run `vitis -s scripts/create_vitis_project.py`. This will
+  create a Vitis project that you can open in the `<repository>/vitis_project`. The script automatically
+  sources the hardware file that was created in the previous step with Vivado. It by default also builds
+  this project.
+3. I'm still missing the final step of building the BIF which we can load onto an SD card. You can do this
+  from Vitis in the meantime.
 
