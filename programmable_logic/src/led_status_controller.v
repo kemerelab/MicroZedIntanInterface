@@ -8,7 +8,7 @@ module led_status_controller #(
 )(
     // Clock and reset
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK CLK" *)
-    (* X_INTERFACE_PARAMETER = "FREQ_HZ 84000000" *)
+    //(* X_INTERFACE_PARAMETER = "FREQ_HZ 84000000" *)
     input  wire        clk,
     (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 RST RST" *)
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)

@@ -1,5 +1,13 @@
-// File: data_generator_core.sv
-// Clean data generator - just focuses on generating data
+// Implemented as 3 major always blocks.
+// 1. Run the master cycled state machine. Maintain the timestamp consistently
+//    regardless of whether we acquiring/transmitting data. Process control data 
+//    (which comes from the AXI interface), like enable/disable transmission and
+//    reset timestamps.
+// 2. Run the data acquisiton state machine. This uses the cycles/states controlled
+//    by state machine #1.
+// 3. Run the data exfiltration state machine. This loads data, prefaced by a
+//    a header and a timestamp, into a FIFO for transmission via the dual port BRAM
+//    to the PS. (FIFO and BRAM are external to this file.)
 
 module data_generator_core (
     input  logic        clk,
@@ -13,7 +21,14 @@ module data_generator_core (
     output logic        fifo_write_en,
     output logic [31:0] fifo_write_data,
     input  logic        fifo_full,
-    input  logic [8:0]  fifo_count
+    input  logic [8:0]  fifo_count,
+    
+    // Serial interface signals
+    output logic        csn,        // Chip select (active low)
+    output logic        sclk,       // Serial clock
+    output logic        copi,       // Controller Out, Peripheral In
+    input  logic        cipo0,      // Controller In, Peripheral Out 0
+    input  logic        cipo1       // Controller In, Peripheral Out 1
 );
 
 // Extract control bits
@@ -22,15 +37,25 @@ logic reset_timestamp     = ctrl_regs_pl[0*32 + 1];
 // Loop count: number of 35-cycle frames to run (0 = infinite)
 logic [31:0] loop_count = ctrl_regs_pl[1*32 +: 32];
 
-// Unpack extra 16-bit words from ctrl_regs_pl
-logic [15:0] ctrl_words [0:39];
+// Reserved control registers for future use
+logic [31:0] ctrl_reg_2 = ctrl_regs_pl[2*32 +: 32];  // Reserved for future control
+logic [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
+
+// Extract COPI message words from the last 18 registers (36 x 16-bit words)
+logic [15:0] copi_words [0:35];
 genvar i;
 generate
-    for (i = 0; i < 20; i = i + 1) begin : unpack_ctrl
-        assign ctrl_words[2*i]     = ctrl_regs_pl[(i+2)*32 +: 16];
-        assign ctrl_words[2*i + 1] = ctrl_regs_pl[(i+2)*32 + 16 +: 16];
+    for (i = 0; i < 18; i = i + 1) begin : unpack_copi_words
+        assign copi_words[2*i]     = ctrl_regs_pl[(i+4)*32 +: 16];      // Low 16 bits
+        assign copi_words[2*i + 1] = ctrl_regs_pl[(i+4)*32 + 16 +: 16]; // High 16 bits
     end
 endgenerate
+
+// CIPO received data storage (4 separate 16-bit registers per cycle)
+logic [15:0] cipo0a_data [0:34];  // CIPO0 line, register A
+logic [15:0] cipo0b_data [0:34];  // CIPO0 line, register B  
+logic [15:0] cipo1a_data [0:34];  // CIPO1 line, register A
+logic [15:0] cipo1b_data [0:34];  // CIPO1 line, register B
 
 // Control counters
 logic [6:0] state_counter;
@@ -45,7 +70,6 @@ logic [63:0] timestamp;
 logic [31:0] packets_sent;
 logic        transmission_active;
 logic [31:0] loop_counter;
-logic        synchronizing_dma_reset;
 
 // Dummy data for testing
 logic [15:0] dummy_data [3:0];
@@ -56,12 +80,11 @@ initial begin
     dummy_data[3] = 16'hDEF0;
 end
 
-// Helper signals
+// Helper signals for state machine logic
 logic is_last_state = (state_counter == 7'd79);
 logic is_first_cycle = (cycle_counter == 6'd0);
 logic is_last_cycle = (cycle_counter == 6'd34);
 logic loop_limit_reached = (loop_count != 32'd0) && (loop_counter >= loop_count);
-
 
 // State machine and control logic 
 always_ff @(posedge clk) begin
@@ -71,7 +94,6 @@ always_ff @(posedge clk) begin
         timestamp <= 64'd0;
         transmission_active <= 1'b0;
         loop_counter <= 32'd0;
-        synchronizing_dma_reset <= 1'b0;
     end else begin        
         // State machine goes from 0 to 79, then repeats
         if (is_last_state) begin
@@ -100,6 +122,122 @@ always_ff @(posedge clk) begin
             end
         end else begin
             state_counter <= state_counter + 1;
+        end
+    end
+end
+
+/*
+Complete Serial Protocol Timing (80-state machine):
+
+State 0:  CSn=0, SCLK=0, COPI=0 (default)
+State 1:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (setup bit 15)
+State 2:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (clock bit 15)
+State 3:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (hold)
+State 4:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (transition)
+State 5:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][14] (setup bit 14)
+State 6:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][14] (clock bit 14)
+State 7:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][14] (hold)
+...
+State 57: CSn=0, SCLK=0, COPI=copi_words[cycle_counter][1] (setup bit 1)
+State 58: CSn=0, SCLK=1, COPI=copi_words[cycle_counter][1] (clock bit 1)
+State 59: CSn=0, SCLK=1, COPI=copi_words[cycle_counter][1] (hold)
+State 60: CSn=0, SCLK=0, COPI=copi_words[cycle_counter][1] (transition)
+State 61: CSn=0, SCLK=0, COPI=copi_words[cycle_counter][0] (setup bit 0)
+State 62: CSn=0, SCLK=1, COPI=copi_words[cycle_counter][0] (clock bit 0 - LAST RISING EDGE)
+State 63: CSn=0, SCLK=1, COPI=copi_words[cycle_counter][0] (hold - LAST CLOCK HIGH)
+State 64: CSn=0, SCLK=0, COPI=copi_words[cycle_counter][0] (LAST FALLING EDGE)
+State 65: CSn=0, SCLK=0, COPI=copi_words[cycle_counter][0] (hold low)
+
+*** CSn GOES HIGH HERE ***
+State 66: CSn=1, SCLK=0, COPI=0 (inactive)
+State 67: CSn=1, SCLK=0, COPI=0 (inactive)
+State 68: CSn=1, SCLK=0, COPI=0 (inactive)
+State 69: CSn=1, SCLK=0, COPI=0 (inactive)
+State 70: CSn=1, SCLK=0, COPI=0 (inactive)
+State 71: CSn=1, SCLK=0, COPI=0 (inactive)
+State 72: CSn=1, SCLK=0, COPI=0 (inactive)
+State 73: CSn=1, SCLK=0, COPI=0 (inactive)
+State 74: CSn=1, SCLK=0, COPI=0 (inactive)
+State 75: CSn=1, SCLK=0, COPI=0 (inactive)
+State 76: CSn=1, SCLK=0, COPI=0 (inactive)
+State 77: CSn=1, SCLK=0, COPI=0 (inactive)
+State 78: CSn=1, SCLK=0, COPI=0 (inactive)
+State 79: CSn=1, SCLK=0, COPI=0 (inactive)
+
+Key Timing:
+- CSn active: States 0-65 (66 states total)  
+- 16 clocks: Rising edges at states 2,6,10,14,18,22,26,30,34,38,42,46,50,54,58,62
+- Last clock high: State 63
+- Last falling edge: State 64
+- CSn goes HIGH: State 66
+- Inactive period: States 66-79 (14 states)
+*/
+
+// Serial interface control - CSn, SCLK, and COPI generation
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        csn <= 1'b1;           // Default high (inactive)
+        sclk <= 1'b0;          // Default low
+        copi <= 1'b0;          // Default low
+    end else begin
+        // Default values (used when not transmitting or not in protocol)
+        csn <= 1'b1;           // CSn high when not in protocol
+        sclk <= 1'b0;          // SCLK low when not active
+        copi <= 1'b0;          // COPI low when not active
+        
+        if (transmission_active) begin
+            if (state_counter <= 7'd65) begin
+                // CSn goes low during protocol (states 0-65)
+                csn <= 1'b0;
+                
+                // SCLK is 1/4th the rate of the master clock, and there are 16 clock cycles
+                // Clock high when bit 1 is set and state <= 63
+                if ((state_counter[1] == 1'b1) && (state_counter <= 7'd63)) begin
+                    sclk <= 1'b1;
+                end
+            end
+                
+            // COPI data transmission - MSB first, set on states 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60
+            // Uses copi_words[cycle_counter] as the source for each cycle's transmission  
+            // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
+            if ((state_counter % 7'd4 == 7'd0) && (state_counter <= 7'd60)) begin
+                logic [3:0] bit_index = ~state_counter[5:2];  // MSB first: ~0=15, ~1=14, ..., ~15=0
+                copi <= copi_words[cycle_counter][bit_index];
+            end
+        end
+    end
+end
+
+// CIPO data sampling - 4 registers total (2 per input line)
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        // Reset all received data
+        for (int j = 0; j < 35; j++) begin
+            cipo0a_data[j] <= 16'h0;
+            cipo0b_data[j] <= 16'h0;
+            cipo1a_data[j] <= 16'h0;
+            cipo1b_data[j] <= 16'h0;
+        end
+    end else begin
+        if (transmission_active && (state_counter <= 7'd65)) begin
+            // Sample CIPO A registers on rising edges (states 2,6,10,14... every 4 states starting at 2)
+            // Sample CIPO B registers 2 states later (states 4,8,12,16... every 4 states starting at 4)
+            
+            // Check if this is a CIPO A sampling state (2,6,10,14,18,22,26,30,34,38,42,46,50,54,58,62)
+            if ((state_counter >= 7'd2) && ((state_counter - 7'd2) % 7'd4 == 7'd0) && (state_counter <= 7'd62)) begin
+                // Calculate which bit position (15 down to 0)
+                logic [3:0] bit_index = 15 - ((state_counter - 7'd2) / 7'd4);
+                cipo0a_data[cycle_counter][bit_index] <= cipo0;
+                cipo1a_data[cycle_counter][bit_index] <= cipo1;
+            end
+            
+            // Check if this is a CIPO B sampling state (4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64)
+            if ((state_counter >= 7'd4) && ((state_counter - 7'd4) % 7'd4 == 7'd0) && (state_counter <= 7'd64)) begin
+                // Calculate which bit position (15 down to 0)
+                logic [3:0] bit_index = 15 - ((state_counter - 7'd4) / 7'd4);
+                cipo0b_data[cycle_counter][bit_index] <= cipo0;
+                cipo1b_data[cycle_counter][bit_index] <= cipo1;
+            end
         end
     end
 end

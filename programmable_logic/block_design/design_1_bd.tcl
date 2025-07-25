@@ -46,7 +46,7 @@ if { [string first $scripts_vivado_version $current_vivado_version] == -1 } {
 
 # The design that will be created by this Tcl script contains the following 
 # module references:
-# axi_lite_registers2, data_generator_bram_blk, simple_dual_port_bram_wrapper, led_status_controller
+# simple_dual_port_bram_wrapper, led_status_controller, axi_lite_registers, data_generator
 
 # Please add the sources of those modules before sourcing this Tcl script.
 
@@ -166,10 +166,10 @@ xilinx.com:ip:axi_bram_ctrl:4.1\
 set bCheckModules 1
 if { $bCheckModules == 1 } {
    set list_check_mods "\ 
-axi_lite_registers2\
-data_generator_bram_blk\
 simple_dual_port_bram_wrapper\
 led_status_controller\
+axi_lite_registers\
+data_generator\
 "
 
    set list_mods_missing ""
@@ -240,6 +240,11 @@ proc create_root_design { parentCell } {
   # Create ports
   set led0 [ create_bd_port -dir O -type data led0 ]
   set led1 [ create_bd_port -dir O -type data led1 ]
+  set csn_0 [ create_bd_port -dir O -type data csn_0 ]
+  set sclk_0 [ create_bd_port -dir O -type clk sclk_0 ]
+  set copi_0 [ create_bd_port -dir O -type data copi_0 ]
+  set cipo0_0 [ create_bd_port -dir I -type data cipo0_0 ]
+  set cipo1_0 [ create_bd_port -dir I -type data cipo1_0 ]
 
   # Create instance: processing_system7_0, and set properties
   set processing_system7_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7:5.5 processing_system7_0 ]
@@ -614,17 +619,6 @@ proc create_root_design { parentCell } {
   ] $clk_wiz_0_84M_175M
 
 
-  # Create instance: axi_lite_registers_interface, and set properties
-  set block_name axi_lite_registers2
-  set block_cell_name axi_lite_registers_interface
-  if { [catch {set axi_lite_registers_interface [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   } elseif { $axi_lite_registers_interface eq "" } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   }
-  
   # Create instance: smartconnect_0, and set properties
   set smartconnect_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_0 ]
   set_property CONFIG.NUM_SI {1} $smartconnect_0
@@ -635,17 +629,6 @@ proc create_root_design { parentCell } {
   set_property CONFIG.NUM_SI {1} $smartconnect_1
 
 
-  # Create instance: data_generator, and set properties
-  set block_name data_generator_bram_blk
-  set block_cell_name data_generator
-  if { [catch {set data_generator [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   } elseif { $data_generator eq "" } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   }
-  
   # Create instance: simple_dual_port_bram, and set properties
   set block_name simple_dual_port_bram_wrapper
   set block_cell_name simple_dual_port_bram
@@ -676,22 +659,48 @@ proc create_root_design { parentCell } {
      return 1
    }
   
+  # Create instance: axi_lite_registers, and set properties
+  set block_name axi_lite_registers
+  set block_cell_name axi_lite_registers
+  if { [catch {set axi_lite_registers [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $axi_lite_registers eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+  
+  # Create instance: data_generator, and set properties
+  set block_name data_generator
+  set block_cell_name data_generator
+  if { [catch {set data_generator [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $data_generator eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+  
   # Create interface connections
   connect_bd_intf_net -intf_net axi_bram_ctrl_0_BRAM_PORTA [get_bd_intf_pins axi_bram_ctrl_0/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram/BRAM_PORTB]
-  connect_bd_intf_net -intf_net data_generator_bram_0_BRAM_PORTA [get_bd_intf_pins data_generator/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram/BRAM_PORTA]
+  connect_bd_intf_net -intf_net data_generator_0_BRAM_PORTA [get_bd_intf_pins data_generator/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram/BRAM_PORTA]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins smartconnect_0/S00_AXI]
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP1 [get_bd_intf_pins smartconnect_1/S00_AXI] [get_bd_intf_pins processing_system7_0/M_AXI_GP1]
-  connect_bd_intf_net -intf_net smartconnect_0_M00_AXI [get_bd_intf_pins smartconnect_0/M00_AXI] [get_bd_intf_pins axi_lite_registers_interface/s_axi]
+  connect_bd_intf_net -intf_net smartconnect_0_M00_AXI [get_bd_intf_pins axi_lite_registers/s_axi] [get_bd_intf_pins smartconnect_0/M00_AXI]
   connect_bd_intf_net -intf_net smartconnect_1_M00_AXI [get_bd_intf_pins axi_bram_ctrl_0/S_AXI] [get_bd_intf_pins smartconnect_1/M00_AXI]
 
   # Create port connections
-  connect_bd_net -net axi_lite_registers2_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers_interface/ctrl_regs_pl] \
+  connect_bd_net -net axi_lite_registers_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers/ctrl_regs_pl] \
   [get_bd_pins data_generator/ctrl_regs_pl]
+  connect_bd_net -net cipo0_0_1  [get_bd_ports cipo0_0] \
+  [get_bd_pins data_generator/cipo0]
+  connect_bd_net -net cipo1_0_1  [get_bd_ports cipo1_0] \
+  [get_bd_pins data_generator/cipo1]
   connect_bd_net -net clk_wiz_0_84M_clk_out1  [get_bd_pins clk_wiz_0_84M_175M/clk_out1] \
-  [get_bd_pins axi_lite_registers_interface/pl_clk] \
   [get_bd_pins proc_sys_reset_0_84M/slowest_sync_clk] \
+  [get_bd_pins axi_lite_registers/pl_clk] \
   [get_bd_pins data_generator/clk] \
   [get_bd_pins led_status_controller/clk]
   connect_bd_net -net clk_wiz_0_84M_clk_out2  [get_bd_pins clk_wiz_0_84M_175M/clk_out2] \
@@ -699,28 +708,34 @@ proc create_root_design { parentCell } {
   [get_bd_pins smartconnect_1/aclk] \
   [get_bd_pins processing_system7_0/M_AXI_GP1_ACLK] \
   [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
-  [get_bd_pins axi_lite_registers_interface/s_axi_aclk] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aclk] \
-  [get_bd_pins proc_sys_reset_175MHz/slowest_sync_clk]
+  [get_bd_pins proc_sys_reset_175MHz/slowest_sync_clk] \
+  [get_bd_pins axi_lite_registers/s_axi_aclk]
   connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M_175M/locked] \
   [get_bd_pins proc_sys_reset_0_84M/dcm_locked] \
   [get_bd_pins proc_sys_reset_175MHz/dcm_locked]
+  connect_bd_net -net data_generator_0_copi  [get_bd_pins data_generator/copi] \
+  [get_bd_ports copi_0]
+  connect_bd_net -net data_generator_0_csn  [get_bd_pins data_generator/csn] \
+  [get_bd_ports csn_0]
+  connect_bd_net -net data_generator_0_sclk  [get_bd_pins data_generator/sclk] \
+  [get_bd_ports sclk_0]
   connect_bd_net -net data_generator_bram_0_status_regs_pl  [get_bd_pins data_generator/status_regs_pl] \
-  [get_bd_pins axi_lite_registers_interface/status_regs_pl] \
+  [get_bd_pins axi_lite_registers/status_regs_pl] \
   [get_bd_pins led_status_controller/status_regs_pl]
   connect_bd_net -net led_status_controller_0_led0  [get_bd_pins led_status_controller/led0] \
   [get_bd_ports led0]
   connect_bd_net -net led_status_controller_0_led1  [get_bd_pins led_status_controller/led1] \
   [get_bd_ports led1]
   connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0_84M/peripheral_aresetn] \
-  [get_bd_pins axi_lite_registers_interface/pl_rstn] \
-  [get_bd_pins data_generator/rstn] \
+  [get_bd_pins axi_lite_registers/pl_rstn] \
   [get_bd_pins led_status_controller/rstn]
   connect_bd_net -net proc_sys_reset_175MHz_interconnect_aresetn  [get_bd_pins proc_sys_reset_175MHz/interconnect_aresetn] \
   [get_bd_pins smartconnect_0/aresetn] \
   [get_bd_pins smartconnect_1/aresetn] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn] \
-  [get_bd_pins axi_lite_registers_interface/s_axi_aresetn]
+  [get_bd_pins axi_lite_registers/s_axi_aresetn] \
+  [get_bd_pins data_generator/rstn]
   connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
   [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
   [get_bd_pins clk_wiz_0_84M_175M/clk_in1]
@@ -733,12 +748,13 @@ proc create_root_design { parentCell } {
 
   # Create address segments
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
-  assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers2_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers_interface/s_axi/reg0] -force
+  assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers/s_axi/reg0] -force
 
 
   # Restore current instance
   current_bd_instance $oldCurInst
 
+  validate_bd_design
   save_bd_design
 }
 # End of create_root_design()
@@ -750,6 +766,4 @@ proc create_root_design { parentCell } {
 
 create_root_design ""
 
-
-common::send_gid_msg -ssname BD::TCL -id 2053 -severity "WARNING" "This Tcl script was generated from a block design that has not been validated. It is possible that design <$design_name> may result in errors during validation."
 

@@ -1,9 +1,9 @@
 // File: data_generator_bram_blk.v
 // Clean Verilog wrapper that combines data generator and FIFO-BRAM interface
-// Now with proper parameter support
+// Now with proper parameter support and serial interface
 
 
-module data_generator_bram_blk #(
+module data_generator #(
     // BRAM configuration parameters
     parameter integer BRAM_ADDR_WIDTH = 16,        // Byte address width  
     parameter integer BRAM_DATA_WIDTH = 32,        // Data width
@@ -11,7 +11,7 @@ module data_generator_bram_blk #(
     parameter integer FIFO_DEPTH = 256            // FIFO depth (entries)
 )(
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK CLK" *)
-    (* X_INTERFACE_PARAMETER = "FREQ_HZ 84000000" *)
+    //(* X_INTERFACE_PARAMETER = "FREQ_HZ 84000000" *)
     input  wire        clk,
     (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 RST RST" *)
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
@@ -35,7 +35,29 @@ module data_generator_bram_blk #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA EN" *)
     output wire            bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
-    output wire [3:0]      bram_we
+    output wire [3:0]      bram_we,
+    
+    // Serial interface signals
+    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CSN DATA" *)
+    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    output wire            csn,         // Chip select (active low)
+    
+    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 SCLK CLK" *)
+    (* X_INTERFACE_PARAMETER = "FREQ_HZ 1312500" *)
+    output wire            sclk,        // Serial clock (84MHz/64 = ~1.3MHz)
+    
+    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 COPI DATA" *)
+    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    output wire            copi,         // Controller Out, Peripheral In
+    
+    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CIPO0 DATA" *)
+    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    input  wire        cipo0,      // Controller In, Peripheral Out 0
+
+    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CIPO1 DATA" *)
+    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    input  wire        cipo1       // Controller In, Peripheral Out 1
+
 );
 
     // Parameter validation
@@ -73,7 +95,14 @@ module data_generator_bram_blk #(
         .fifo_write_en(fifo_write_en),
         .fifo_write_data(fifo_write_data),
         .fifo_full(fifo_full),
-        .fifo_count(fifo_count)
+        .fifo_count(fifo_count),
+        
+        // Serial interface
+        .csn(csn),
+        .sclk(sclk),
+        .copi(copi),
+        .cipo0(cipo0),
+        .cipo1(cipo1)
     );
 
     // Instantiate the FIFO-BRAM interface
@@ -104,7 +133,7 @@ module data_generator_bram_blk #(
     
     // Combine status registers in wrapper
     // Clean separation: data generator owns 0-5, wrapper adds FIFO/BRAM status as 6
-    assign status_regs_pl[0*32 +: 32] = data_gen_status[0*32 +: 32];  // Generator status 0
+    assign status_regs_pl[0*32 +: 32] = data_gen_status[0*32 +: 32];  // Generator status 0 (includes clock_counter)
     assign status_regs_pl[1*32 +: 32] = data_gen_status[1*32 +: 32];  // Generator status 1  
     assign status_regs_pl[2*32 +: 32] = data_gen_status[2*32 +: 32];  // Generator status 2
     assign status_regs_pl[3*32 +: 32] = data_gen_status[3*32 +: 32];  // Generator status 3

@@ -1,4 +1,4 @@
-module axi_lite_registers2 #(
+module axi_lite_registers #(
     parameter integer N_CTRL = 22,     // Updated for your data generator (22 control regs)
     parameter integer N_STATUS = 7     // Updated for your data generator (7 status regs)
 )(
