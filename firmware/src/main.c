@@ -7,6 +7,7 @@
 #include "xil_cache.h"
 #include "lwip/init.h"
 #include "lwip/timeouts.h"
+#include "xuartps.h"
 
 // Global variables
 XTimer timer;
@@ -35,6 +36,101 @@ u32 udp_send_errors = 0;
 // Pre-allocated packet buffer for UDP 
 // Use __attribute__((aligned(64))) to align to cache line boundary for optimal performance
 static u32 udp_packet_buffer[WORDS_PER_PACKET] __attribute__((aligned(64)));
+
+// Serial debug command buffer
+#define SERIAL_CMD_BUFFER_SIZE 64
+static char serial_cmd_buffer[SERIAL_CMD_BUFFER_SIZE];
+static int serial_cmd_index = 0;
+
+// ============================================================================
+// SERIAL DEBUG COMMAND HANDLING
+// ============================================================================
+
+void process_serial_command(const char* cmd) {
+    // Trim whitespace
+    while (*cmd == ' ' || *cmd == '\t') cmd++;
+    
+    if (strncmp(cmd, "start", 5) == 0) {
+        xil_printf("Serial command: Starting transmission\r\n");
+        enable_streaming_flag = 1;
+        
+    } else if (strncmp(cmd, "stop", 4) == 0) {
+        xil_printf("Serial command: Stopping transmission\r\n");
+        disable_streaming_flag = 1;
+        
+    } else if (strncmp(cmd, "reset", 5) == 0) {
+        xil_printf("Serial command: Resetting timestamp\r\n");
+        reset_timestamp_flag = 1;
+        
+    } else if (strncmp(cmd, "status", 6) == 0) {
+        xil_printf("Serial command: Status\r\n");
+        pl_print_status();
+        
+    } else if (strncmp(cmd, "benchmark", 9) == 0) {
+        xil_printf("Serial command: Running BRAM benchmark\r\n");
+        benchmark_bram_reads();
+        
+    } else if (strncmp(cmd, "dump", 4) == 0) {
+        // Parse dump command: "dump [start] [count]"
+        u32 start_addr = 0;
+        u32 word_count = 16;  // Default
+        
+        sscanf(cmd, "dump %u %u", &start_addr, &word_count);
+        
+        xil_printf("Serial command: Dumping BRAM from %u, count %u\r\n", start_addr, word_count);
+        dump_bram_data(start_addr, word_count);
+        
+    } else if (strncmp(cmd, "help", 4) == 0 || strlen(cmd) == 0) {
+        xil_printf("\r\nSerial Debug Commands:\r\n");
+        xil_printf("  start    - Start data transmission\r\n");
+        xil_printf("  stop     - Stop data transmission\r\n");
+        xil_printf("  reset    - Reset timestamp and counters\r\n");
+        xil_printf("  status   - Show system status\r\n");
+        xil_printf("  benchmark - Run BRAM read performance test\r\n");
+        xil_printf("  dump [start] [count] - Dump BRAM contents\r\n");
+        xil_printf("  help     - Show this help\r\n");
+        
+    } else {
+        xil_printf("Unknown command: '%s'. Type 'help' for commands.\r\n", cmd);
+    }
+}
+
+void check_serial_input(void) {
+    // Check if UART has data available
+    if (XUartPs_IsReceiveData(STDIN_BASEADDRESS)) {
+        char ch = XUartPs_RecvByte(STDIN_BASEADDRESS);
+        
+        // Handle different line endings and backspace
+        if (ch == '\r' || ch == '\n') {
+            if (serial_cmd_index > 0) {
+                // Null terminate the command
+                serial_cmd_buffer[serial_cmd_index] = '\0';
+                
+                xil_printf("\r\n");  // Echo newline
+                
+                // Process the command
+                process_serial_command(serial_cmd_buffer);
+                
+                // Reset buffer
+                serial_cmd_index = 0;
+                
+                // Print prompt
+                xil_printf("debug> ");
+            }
+        } else if (ch == '\b' || ch == 127) {  // Backspace or DEL
+            if (serial_cmd_index > 0) {
+                serial_cmd_index--;
+                xil_printf("\b \b");  // Erase character on terminal
+            }
+        } else if (ch >= 32 && ch <= 126) {  // Printable characters
+            if (serial_cmd_index < SERIAL_CMD_BUFFER_SIZE - 1) {
+                serial_cmd_buffer[serial_cmd_index++] = ch;
+                XUartPs_SendByte(STDIN_BASEADDRESS, ch);  // Echo character
+            }
+        }
+        // Ignore other characters (like additional \n after \r)
+    }
+}
 
 // ============================================================================
 // BRAM ACCESS FUNCTIONS
@@ -330,6 +426,7 @@ int main() {
     
     xil_printf("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
     xil_printf("System ready. Commands: start, stop, reset_timestamp, status, dump_bram\r\n");
+    xil_printf("Serial debug: Type 'help' for commands\r\n");
     
     // Initialize PL
     pl_set_transmission(0);
@@ -342,8 +439,13 @@ int main() {
 
     benchmark_bram_reads();
     
+    xil_printf("debug> ");
+    
     // Main event loop - minimal copying, direct BRAM access with UDP transmission
     while (1) {
+        // Check for serial debug commands
+        check_serial_input();
+        
         network_maintenance_loop();
         
         if (stream_enabled) {
