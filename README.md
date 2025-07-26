@@ -1,0 +1,1 @@
+To setup the workspace please start by extracting vitis_project.zip. Then navigate to vits_workspace and extract archive.zip. Once this is done open up Vitis Unified IDE and set workspace to <Repo>/vitis_workspace.
