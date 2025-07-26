@@ -200,7 +200,7 @@ def tcp_control():
                 validator.print_statistics()
             elif cmd == "test":
                 print("\n[TCP] Running simple test sequence...")
-                print("[TCP] Step 1: Reset timestamp")loop
+                print("[TCP] Step 1: Reset timestamp")
                 send_tcp_command(sock, "reset_timestamp")
                 time.sleep(0.5)
                 
