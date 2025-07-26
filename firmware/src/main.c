@@ -25,9 +25,7 @@ volatile int reset_timestamp_flag = 0;
 u32 ps_read_address = 0;              // Current PS read position (word address)
 
 // Packet validation tracking
-u64 expected_timestamp = 0;
 u32 error_count = 0;
-u32 timestamp_gaps = 0;
 
 // UDP transmission
 u32 udp_packets_sent = 0;
@@ -75,10 +73,9 @@ void process_serial_command(const char* cmd) {
         u32 start_addr = 0;
         u32 word_count = 16;  // Default
         
-        sscanf(cmd, "dump %u %u", &start_addr, &word_count);
+        sscanf(cmd, "dump %lu %lu", &start_addr, &word_count);
         
-        xil_printf("Serial command: Dumping BRAM from %u, count %u\r\n", start_addr, word_count);
-        dump_bram_data(start_addr, word_count);
+        pl_dump_bram_data(start_addr, word_count);
         
     } else if (strncmp(cmd, "help", 4) == 0 || strlen(cmd) == 0) {
         xil_printf("\r\nSerial Debug Commands:\r\n");
@@ -152,94 +149,41 @@ static int packets_available(void) {
     return n_words_available / WORDS_PER_PACKET;
 }
 
+
 // Read and validate one packet directly from BRAM with UDP transmission
 static int process_packet_from_bram(void) {
     // Calculate BRAM address (no copying - read directly)
-    // u32 magic_low_offset = (ps_read_address + 1) % BRAM_SIZE_WORDS;
     u32 magic_low_offset = ps_read_address; // should always be smaller than BRAM_SIZE_WORDS!!!
     u32 magic_high_offset = (ps_read_address + 1) % BRAM_SIZE_WORDS;
-    u32 timestamp_low_offset = (ps_read_address + 2) % BRAM_SIZE_WORDS;
-    u32 timestamp_high_offset = (ps_read_address + 3) % BRAM_SIZE_WORDS;
-    
-    // Read packet header directly from BRAM
+    // Read packet header from BRAM
     u32 magic_low = Xil_In32(BRAM_BASE_ADDR + (magic_low_offset * 4));
     u32 magic_high = Xil_In32(BRAM_BASE_ADDR + (magic_high_offset * 4));
-    u32 timestamp_low = Xil_In32(BRAM_BASE_ADDR + (timestamp_low_offset * 4));
-    u32 timestamp_high = Xil_In32(BRAM_BASE_ADDR + (timestamp_high_offset * 4));
-    u32 packets_sent = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_3_OFFSET);
-
     // Reconstruct 64-bit values
     u64 magic = ((u64)magic_high << 32) | magic_low;
-    u64 timestamp = ((u64)timestamp_high << 32) | timestamp_low;
-    
     // Validate magic number
     if (magic != 0xCAFEBABEDEADBEEF) {
-        xil_printf("\r\n*** MAGIC ERROR at packet %u (%u) ***\r\n", packets_received_count, n_words_available);
-        xil_printf("Expected: 0xCAFEBABEDEADBEEF\r\n");
-        xil_printf("Got:      0x%016llX\r\n", magic);
-        xil_printf("Raw words: 0x%08X, 0x%08X\r\n", magic_low, magic_high);
-        xil_printf("Raw words: 0x%08X, 0x%08X\r\n", timestamp_low, timestamp_high);
+        // The only way that this should happen is if we've overflowed our BRAM
+        // To try to recover, we need to keep moving ASAP. So we won't send
+        //  this packet over the network, but we'll try to fast forward.
+        ps_read_address = (ps_read_address + WORDS_PER_PACKET) % BRAM_SIZE_WORDS;
+    
+        error_count++;  // ERROR TO TRACK
 
-        u32 back_1_offset = (ps_read_address > 0) ? (ps_read_address - 1) : (BRAM_SIZE_WORDS - 1);
-        u32 back_2_offset = (ps_read_address > 1) ? (ps_read_address - 2) : 
-                           ((ps_read_address == 0) ? (BRAM_SIZE_WORDS - 2) : (BRAM_SIZE_WORDS - 1));
-        
-        u32 back_1_addr = BRAM_BASE_ADDR + (back_1_offset * 4);
-        u32 back_2_addr = BRAM_BASE_ADDR + (back_2_offset * 4);
-            
-        u32 back_1 = Xil_In32(back_1_addr);
-        u32 back_2 = Xil_In32(back_2_addr);
-        xil_printf("Previous words: 0x%08X, 0x%08X\r\n", back_2, back_1);
-
-        xil_printf("PS read addr: %u\r\n", ps_read_address);
-        xil_printf("Packets Sent: %u\r\n", packets_sent);
-
-        xil_printf("**********************\r\n\r\n");
-        
-        error_count++;
         return 0;  // Packet validation failed
     }
-    
-    // Check for timestamp continuity
-    if (expected_timestamp != 0 && timestamp != expected_timestamp) {
-        xil_printf("\r\n*** TIMESTAMP GAP at packet %u ***\r\n", packets_received_count);
-        xil_printf("Expected: %llu, Got: %llu (gap: %lld)\r\n",
-                  expected_timestamp, timestamp, (long long)(timestamp - expected_timestamp));
-        xil_printf("*****************************\r\n\r\n");
-        timestamp_gaps++;
-    }
-    
+
+    // TODO: If we are in an error state, we could track how long we stay there
+    //       by measuring the timestamp gap when we recover.
+
     // UDP transmission (always enabled) - zero-copy with pre-allocated buffer
-    // Copy packet data to pre-allocated buffer with safe address wrapping
+    // Copy packet data to pre-allocated buffer with safe address wrapping.
+    // TODO: Consider replacing with memcpy
     
     for (int i = 0; i < WORDS_PER_PACKET; i++) {
         u32 word_offset = (ps_read_address + i) % BRAM_SIZE_WORDS;
         u32 safe_addr = BRAM_BASE_ADDR + (word_offset * 4);
         udp_packet_buffer[i] = Xil_In32(safe_addr);
     }
-    
-    /*
-    // Use fast memcpy instead of slow Xil_In32 loop
-    if ((ps_read_address + WORDS_PER_PACKET) <= BRAM_SIZE_WORDS) {
-        // Packet doesn't wrap - single fast memcpy
-        u32 packet_start_addr = BRAM_BASE_ADDR + (ps_read_address * 4);
-        memcpy(udp_packet_buffer, (void*)packet_start_addr, BYTES_PER_PACKET);
-    } else {
-        // Packet wraps around BRAM boundary - two memcpy calls
-        u32 words_before_wrap = BRAM_SIZE_WORDS - ps_read_address;
-        u32 words_after_wrap = WORDS_PER_PACKET - words_before_wrap;
-        
-        // Copy first chunk (before wrap)
-        u32 first_chunk_addr = BRAM_BASE_ADDR + (ps_read_address * 4);
-        memcpy(udp_packet_buffer, (void*)first_chunk_addr, words_before_wrap * 4);
-        
-        // Copy second chunk (after wrap)
-        memcpy(&udp_packet_buffer[words_before_wrap], (void*)BRAM_BASE_ADDR, words_after_wrap * 4);
-    }
-    */
-    
-    // Ensure cache coherency before sending to network hardware
-    // Xil_DCacheFlushRange((UINTPTR)udp_packet_buffer, BYTES_PER_PACKET);
     
     // Create pbuf that references our buffer directly (zero-copy!)
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, BYTES_PER_PACKET, PBUF_REF);
@@ -252,11 +196,7 @@ static int process_packet_from_bram(void) {
         if (result == ERR_OK) {
             udp_packets_sent++;
         } else {
-            udp_send_errors++;
-            // Only print occasional UDP errors to avoid spam
-            if (udp_send_errors % 1000 == 1) {
-                xil_printf("UDP send error %u (code %d)\r\n", udp_send_errors, result);
-            }
+            udp_send_errors++;  // ERROR TO TRACK
         }
         
         // Free pbuf (this won't free our buffer since it's PBUF_REF)
@@ -268,41 +208,17 @@ static int process_packet_from_bram(void) {
     // Update read pointer
     ps_read_address = (ps_read_address + WORDS_PER_PACKET) % BRAM_SIZE_WORDS;
     
-    expected_timestamp = timestamp + 1;
     packets_received_count++;
     
     return 1;  // Success
 }
 
-// Initialize BRAM interface
-int init_bram_interface(void) {
-    xil_printf("Initializing BRAM interface...\r\n");
-    
-    ps_read_address = 0;
-    expected_timestamp = 0;
-    error_count = 0;
-    timestamp_gaps = 0;
-    udp_packets_sent = 0;
-    udp_send_errors = 0;
-    
-    // Test BRAM connectivity
-    u32 test_data = Xil_In32(BRAM_BASE_ADDR);
-    xil_printf("BRAM[0]: 0x%08X\r\n", test_data);
-    
-    xil_printf("BRAM interface initialization complete\r\n");
-    xil_printf("  BRAM base address: 0x%08X\r\n", BRAM_BASE_ADDR);
-    xil_printf("  BRAM size: %u words (%u bytes)\r\n", BRAM_SIZE_WORDS, BRAM_SIZE_BYTES);
-    xil_printf("  Packet size: %u words (%u bytes)\r\n", WORDS_PER_PACKET, BYTES_PER_PACKET);
-    xil_printf("  Max packets: %u\r\n", MAX_PACKETS_IN_BRAM);
-    
-    return XST_SUCCESS;
-}
 
 // ============================================================================
 // STREAMING CONTROL
 // ============================================================================
 
-void handle_enable_streaming_bram(void) {
+void handle_enable_streaming(void) {
     if (stream_enabled) {
         xil_printf("Streaming already enabled\r\n");
         return;
@@ -311,9 +227,7 @@ void handle_enable_streaming_bram(void) {
     // Reset state
     packets_received_count = 0;
     ps_read_address = 0;
-    expected_timestamp = 0;
     error_count = 0;
-    timestamp_gaps = 0;
     udp_packets_sent = 0;
     udp_send_errors = 0;
     
@@ -330,7 +244,7 @@ void handle_enable_streaming_bram(void) {
     xil_printf("BRAM streaming STARTED\r\n");
 }
 
-void handle_disable_streaming_bram(void) {
+void handle_disable_streaming(void) {
     if (!stream_enabled) {
         xil_printf("Streaming already disabled\r\n");
         return;
@@ -340,37 +254,35 @@ void handle_disable_streaming_bram(void) {
     pl_set_transmission(0);
     
     xil_printf("BRAM streaming STOPPED\r\n");
-    xil_printf("Summary: %u packets processed, %u errors, %u timestamp gaps\r\n",
-              packets_received_count, error_count, timestamp_gaps);
+    xil_printf("Summary: %u packets processed, %u errors\r\n",
+              packets_received_count, error_count);
     xil_printf("UDP: %u packets sent, %u errors\r\n", udp_packets_sent, udp_send_errors);
 }
 
-void handle_reset_timestamp_bram(void) {
+void handle_reset_timestamp(void) {
     packets_received_count = 0;
     ps_read_address = 0;
-    expected_timestamp = 0;
     error_count = 0;
-    timestamp_gaps = 0;
     udp_packets_sent = 0;
     udp_send_errors = 0;
     pl_reset_timestamp();
     xil_printf("Timestamp and counters RESET\r\n");
 }
 
-void process_command_flags_bram(void) {
+void process_command_flags(void) {
     if (enable_streaming_flag) {
         enable_streaming_flag = 0;
-        handle_enable_streaming_bram();
+        handle_enable_streaming();
     }
     
     if (disable_streaming_flag) {
         disable_streaming_flag = 0;
-        handle_disable_streaming_bram();
+        handle_disable_streaming();
     }
     
     if (reset_timestamp_flag) {
         reset_timestamp_flag = 0;
-        handle_reset_timestamp_bram();
+        handle_reset_timestamp();
     }
 }
 
@@ -381,17 +293,7 @@ void network_maintenance_loop(void) {
     
     xemacif_input(&server_netif);
     sys_check_timeouts();
-    process_command_flags_bram();
-}
-
-// Simple BRAM dump for debugging
-void dump_bram_data(u32 start_addr, u32 word_count) {
-    xil_printf("BRAM dump starting at address %u:\r\n", start_addr);
-    for (u32 i = 0; i < word_count; i++) {
-        u32 addr = (start_addr + i) % BRAM_SIZE_WORDS;
-        u32 data = Xil_In32(BRAM_BASE_ADDR + addr * 4);
-        xil_printf("%u: 0x%08X - 0x%08X\r\n", i, BRAM_BASE_ADDR + addr * 4, data);
-    }
+    process_command_flags();
 }
 
 // ============================================================================
@@ -405,17 +307,13 @@ int main() {
     init_platform();
     XilTickTimer_Init(&timer);
     
-    // Initialize BRAM interface
-    if (init_bram_interface() != XST_SUCCESS) {
-        xil_printf("FATAL: BRAM interface initialization failed\r\n");
-        return -1;
-    }
-    
     // Initialize network
     IP4_ADDR(&ipaddr, 192, 168, 1, 10);
     IP4_ADDR(&netmask, 255, 255, 255, 0);
     IP4_ADDR(&gw, 192, 168, 1, 1);
     
+    // TODO: Figure out how to make this work with hotplug
+    // TODO: Ideally, we'd allow for a DHCP option with some sort of discovery protocol
     lwip_init();
     
     netif_add(&server_netif, &ipaddr, &netmask, &gw, NULL, NULL, NULL);
@@ -438,6 +336,8 @@ int main() {
     udp_stream_init();
 
     benchmark_bram_reads();
+
+    pl_set_copi_commands(mosi_test_pattern);
     
     xil_printf("debug> ");
     
@@ -451,16 +351,18 @@ int main() {
         if (stream_enabled) {
             // Process all available packets with direct BRAM access and UDP transmission
             while (packets_available() > 1) {  // Keep 1 packet buffer for safety
+                process_packet_from_bram();
+                /*
                 if (!process_packet_from_bram()) {
                     // Validation failed - stop streaming
-                    handle_disable_streaming_bram();
+                    handle_disable_streaming();
                     break;
-                }
+                }*/
                 
                 // Periodic status (every 30k packets)
                 if (packets_received_count % 30000 == 0) {
-                    xil_printf("Processed %u packets, %u errors, %u gaps, %u nwa, UDP: %u sent/%u errors\r\n",
-                              packets_received_count, error_count, timestamp_gaps, n_words_available,
+                    xil_printf("Processed %u packets, %u errors, %u nwa, UDP: %u sent/%u errors\r\n",
+                              packets_received_count, error_count, n_words_available,
                               udp_packets_sent, udp_send_errors);
                 }
             }

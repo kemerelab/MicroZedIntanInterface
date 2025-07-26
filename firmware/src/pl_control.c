@@ -97,3 +97,122 @@ void pl_print_status(void) {
     xil_printf("==================\r\n");
 }
 
+
+// Simple BRAM dump for debugging
+void pl_dump_bram_data(u32 start_addr, u32 word_count) {
+    xil_printf("BRAM dump starting at address %u:\r\n", start_addr);
+    for (u32 i = 0; i < word_count; i++) {
+        u32 addr = (start_addr + i) % BRAM_SIZE_WORDS;
+        u32 data = Xil_In32(BRAM_BASE_ADDR + addr * 4);
+        xil_printf("%u: 0x%08X - 0x%08X\r\n", i, BRAM_BASE_ADDR + addr * 4, data);
+    }
+}
+
+// ============================================================================
+// ============================================================================
+// INTAN COMMAND CONFIGURATION SENT FROM FPGA TO CHIPs (COPI / MOSI)
+// ============================================================================
+// ============================================================================
+
+// Our interface uses 35-element packets for both sending and receiving data.
+// Each packet corresponds to a 35-command COPI sequence.
+
+// Set all 35 COPI command words from an array of 16-bit values
+void pl_set_copi_commands(const u16 copi_array[35]) {
+    // MOSI commands are stored in control registers 4-21 (18 registers total)
+    // Each 32-bit register holds two 16-bit MOSI words:
+    // - Low 16 bits: even-indexed MOSI word (0, 2, 4, ...)
+    // - High 16 bits: odd-indexed MOSI word (1, 3, 5, ...)
+    
+    for (int i = 0; i < 18; i++) {
+        u32 reg_value = 0;
+        
+        // Pack two 16-bit MOSI words into one 32-bit register
+        reg_value = (u32)copi_array[2*i];                    // Low 16 bits: even index
+        if ((2*i + 1) < 35) {                               // Check bounds for odd index
+            reg_value |= ((u32)copi_array[2*i + 1]) << 16;  // High 16 bits: odd index
+        }
+        
+        // Write to control register (MOSI commands start at CTRL_REG_MOSI_START_OFFSET)
+        u32 reg_offset = CTRL_REG_MOSI_START_OFFSET + (i * 4);
+        Xil_Out32(PL_CTRL_BASE_ADDR + reg_offset, reg_value);
+    }
+    
+    xil_printf("MOSI commands updated\r\n");
+}
+
+// ============================================================================
+// PREDEFINED MOSI COMMAND ARRAYS
+// ============================================================================
+// Notes:
+// Register WRITE is 10AA_AAAA VVVV_VVVV
+// Register READ is  11AA_AAAA 0000_0000
+// Convert is 00CC_CCCC 0000_000X, where X=1 is part of the fas-settle routine
+
+
+// Channel conversion command sequence
+const u16 convert_cmd_sequence[35] = {
+    0x0000, 0x0100, 0x0200, 0x0300, 0x0400, 0x0500, 0x0600, 0x0700,  // Channels 0-7
+    0x0800, 0x0900, 0x0A00, 0x0B00, 0x0C00, 0x0D00, 0x0E00, 0x0F00,  // Channels 8-15
+    0x1000, 0x1100, 0x1200, 0x1300, 0x1400, 0x1500, 0x1600, 0x1700,  // Channels 16-23
+    0x1800, 0x1900, 0x1A00, 0x1B00, 0x1C00, 0x1D00, 0x1E00, 0x1F00,  // Channels 24-31
+    0x0000, 0x0000, 0x0000                                           // Last 3 commands are zeros
+};
+
+// Initialization  command sequence
+const u16 initialization_cmd_sequence[35] = {
+    0xFF00, 0xFF00, // Two dummy reads (read channel 63)
+    0x80DE, // write register 0  - (fast settle off and other specified values)
+    0x8142, // write register 1  - (Vdd sense enable + ADC buffer bias = 2)
+    0x8204, // write register 2  - (Mux Bias = 4)
+    0x8302, // write register 3  - (temperature sensor disabled, digital output in HiZ)
+    0x849C, // write register 4  - (Weak MISO, not twos complement or abs mode, DSPen=True, Cutoff = 1.1658 Hz at 30kHz (cutoff freq=12))
+    0x8500, // write register 5  - (Disable impedance check stuff)
+    0x8680, // write register 6  - (Impedance DAC to middle value, anyway its disabled)
+    0x8700, // write register 7  - (Zcheckp on channel 0, but anyway no Zcheck!)
+    0x8811, // write register 8  - (RH1 is on chip, RH1 DAC1=17) (settings for 10 kHz upper filter)
+    0x8980, // write register 9  - (Aux1 Enable, RH1 DAC2=0)
+    0x8A10, // write register 10 - (RH2 is on chip, RH2 DAC1=16)
+    0x8B80, // write register 11 - (Aux2 Enable, RH2 DAC2=0)
+    0x8C2C, // write register 12 - (RL is on chip, RL DAC1=44) (settings for 1 Hz lower filter)
+    0x8D86, // write register 13 - (Aux3 Enable, RL DAC3=0, RL DAC2=6)
+    0x8EFF, // write register 14 - (All amplifiers on)
+    0x8FFF, // write register 15 - (All amplifiers on)
+    0x90FF, // write register 16 - (All amplifiers on)
+    0x91FF, // write register 17 - (All amplifiers on)
+    0x92FF, // write register 18 - (All amplifiers on RHD2164)
+    0x93FF, // write register 19 - (All amplifiers on RHD2164)
+    0x94FF, // write register 20 - (All amplifiers on RHD2164)
+    0x95FF, // write register 21 - (All amplifiers on RHD2164)
+    0x5500, // Calibrate (need 9 clocks)
+    0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // 5 dummy reads to accomplish calibration
+    0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00   // 5 more dummy reads to accomplish calibration
+};
+
+// Channel conversion command sequence
+const u16 cable_length_cmd_sequence[35] = {
+    0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // "Dummy reads" register 63 (chip id)   
+    0xA800, 0xA900, 0xAA00, 0xAB00, 0xAC00,  // Read registers 40-44 ("INTAN")
+    0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // "Dummy reads" register 63 (chip id)   
+    0xA800, 0xA900, 0xAA00, 0xAB00, 0xAC00,  // Read registers 40-44 ("INTAN")
+    0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // "Dummy reads" register 63 (chip id)   
+    0xA800, 0xA900, 0xAA00, 0xAB00, 0xAC00,  // Read registers 40-44 ("INTAN")
+    0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00   // "Dummy reads" register 63 (chip id)   
+};
+
+// Other interesting ROM registers:
+//    63 - // chip id is 1 (RHD2132), 2 (RHD2216), or 4 (RHD2164)
+//    62 - // number of amplifiers - 16, 32, or 64
+//    61 - //unipolar or bipolar (should be 0x0001 = unipolar)
+//    60 - // Die revision
+//    59 - // MISO A/B (different data on A and B)
+//    48, 49, 50, 51, 52, 53, 54, 55 - could be string version of chip name
+
+// Test pattern with incrementing values
+const u16 mosi_test_pattern[35] = {
+    0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007,
+    0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F,
+    0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017,
+    0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F,
+    0x0020, 0x0021, 0x0022
+};

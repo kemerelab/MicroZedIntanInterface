@@ -35,6 +35,7 @@
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp
 #define CTRL_REG_1_OFFSET   (1 * 4)   // Loop count
+#define CTRL_REG_MOSI_START_OFFSET  (CTRL_REG_0_OFFSET + (4 * 4)) // Offset for MOSI control words
 
 // Status register offsets
 #define STATUS_REG_0_OFFSET  (22 * 4)  // Transmission status
@@ -85,20 +86,18 @@ extern u32 udp_send_errors;
 // CORE FUNCTIONS
 // ============================================================================
 
-// Initialization
-int init_bram_interface(void);
-
 // Streaming control
-void handle_enable_streaming_bram(void);
-void handle_disable_streaming_bram(void);
-void handle_reset_timestamp_bram(void);
-void process_command_flags_bram(void);
+void handle_enable_streaming(void);
+void handle_disable_streaming(void);
+void handle_reset_timestamp(void);
+void process_command_flags(void);
 
 // Main loop
 void network_maintenance_loop(void);
 
 // ============================================================================
-// PL CONTROL FUNCTIONS
+// PL CONTROL FUNCTIONSvoid pl_dump_bram_data(u32 start_addr, u32 word_count) {
+
 // ============================================================================
 
 // Basic PL control
@@ -116,13 +115,21 @@ u32 pl_get_bram_write_address(void);
 // Status display
 void pl_print_status(void);
 
+// Debug
+void pl_dump_bram_data(u32 start_addr, u32 word_count);
+
+
+void pl_set_mosi_channel_sequence(void);
+void pl_set_copi_commands(const u16 copi_array[35]);
+
+extern const u16 convert_cmd_sequence[35];
+extern const u16 initialization_cmd_sequence[35];
+extern const u16 cable_length_cmd_sequence[35];
+extern const u16 mosi_test_pattern[35];
+
 // ============================================================================
 // DEBUG FUNCTIONS
 // ============================================================================
-
-// BRAM dump for debugging
-void dump_bram_data(u32 start_addr, u32 word_count);
-
 
 // BRAM benchmark function
 void benchmark_bram_reads(void);

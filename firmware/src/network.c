@@ -81,8 +81,7 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
                 word_count = 10;  // Keep default count
             }
             
-            xil_printf("TCP Command: Dumping BRAM contents\r\n");
-            dump_bram_data(start_addr, word_count);
+            pl_dump_bram_data(start_addr, word_count);
             
         // Help command
         } else if (strncmp(p->payload, "help", 4) == 0) {
