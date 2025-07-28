@@ -1,0 +1,8 @@
+//arch = zynq; split = false; format = BIN
+the_ROM_image:
+{
+	[bootloader]./vitis_workspace/klab-platform/export/klab-platform/sw/boot/fsbl.elf
+	./vitis_workspace/klab-firmware/_ide/bitstream/klab_project.bit
+	./vitis_workspace/klab-firmware/build/klab-firmware.elf
+	./vitis_workspace/klab-firmware-core1/build/klab-firmware-core1.elf
+}

@@ -2,6 +2,7 @@
 #include "sleep.h"
 #include <stdio.h>
 #include "xil_io.h"
+#include "shared_print.h"
 
 // ============================================================================
 // PL CONTROL FUNCTIONS
@@ -12,10 +13,10 @@ void pl_set_transmission(int enable) {
     
     if (enable) {
         ctrl_reg |= CTRL_ENABLE_TRANSMISSION;
-        xil_printf("PL transmission ENABLED\r\n");
+        send_message("PL transmission ENABLED\r\n");
     } else {
         ctrl_reg &= ~CTRL_ENABLE_TRANSMISSION;
-        xil_printf("PL transmission DISABLED\r\n");
+        send_message("PL transmission DISABLED\r\n");
     }
     
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_0_OFFSET, ctrl_reg);
@@ -32,12 +33,12 @@ void pl_reset_timestamp(void) {
     ctrl_reg &= ~CTRL_RESET_TIMESTAMP;
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_0_OFFSET, ctrl_reg);
     
-    xil_printf("PL timestamp RESET\r\n");
+    send_message("PL timestamp RESET\r\n");
 }
 
 void pl_set_loop_count(u32_t loop_count) {
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_1_OFFSET, loop_count);
-    xil_printf("PL loop count set to %u\r\n", loop_count);
+    send_message("PL loop count set to %u\r\n", loop_count);
 }
 
 // ============================================================================
@@ -85,26 +86,26 @@ void pl_print_status(void) {
     u32_t status2 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_2_OFFSET);
     u32_t status3 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_3_OFFSET);
     
-    xil_printf("=== PL STATUS ===\r\n");
-    xil_printf("Transmission: %s\r\n", (status0 & STATUS_TRANSMISSION_ACTIVE) ? "ACTIVE" : "STOPPED");
-    xil_printf("Loop limit reached: %s\r\n", (status0 & STATUS_LOOP_LIMIT_REACHED) ? "YES" : "NO");
-    xil_printf("State counter: %u\r\n", status1 & 0x7F);
-    xil_printf("Cycle counter: %u\r\n", status2 & 0x3F);
-    xil_printf("Packets sent: %u\r\n", status3);
-    xil_printf("Timestamp: %llu\r\n", pl_get_timestamp());
-    xil_printf("BRAM write address: %u\r\n", pl_get_bram_write_address());
-    xil_printf("FIFO count: %u\r\n", pl_get_fifo_count());
-    xil_printf("==================\r\n");
+    send_message("=== PL STATUS ===\r\n");
+    send_message("Transmission: %s\r\n", (status0 & STATUS_TRANSMISSION_ACTIVE) ? "ACTIVE" : "STOPPED");
+    send_message("Loop limit reached: %s\r\n", (status0 & STATUS_LOOP_LIMIT_REACHED) ? "YES" : "NO");
+    send_message("State counter: %u\r\n", status1 & 0x7F);
+    send_message("Cycle counter: %u\r\n", status2 & 0x3F);
+    send_message("Packets sent: %u\r\n", status3);
+    send_message("Timestamp: %llu\r\n", pl_get_timestamp());
+    send_message("BRAM write address: %u\r\n", pl_get_bram_write_address());
+    send_message("FIFO count: %u\r\n", pl_get_fifo_count());
+    send_message("==================\r\n");
 }
 
 
 // Simple BRAM dump for debugging
 void pl_dump_bram_data(u32 start_addr, u32 word_count) {
-    xil_printf("BRAM dump starting at address %u:\r\n", start_addr);
+    send_message("BRAM dump starting at address %u:\r\n", start_addr);
     for (u32 i = 0; i < word_count; i++) {
         u32 addr = (start_addr + i) % BRAM_SIZE_WORDS;
         u32 data = Xil_In32(BRAM_BASE_ADDR + addr * 4);
-        xil_printf("%u: 0x%08X - 0x%08X\r\n", i, BRAM_BASE_ADDR + addr * 4, data);
+        send_message("%u: 0x%08X - 0x%08X\r\n", i, BRAM_BASE_ADDR + addr * 4, data);
     }
 }
 
@@ -138,7 +139,7 @@ void pl_set_copi_commands(const u16 copi_array[35]) {
         Xil_Out32(PL_CTRL_BASE_ADDR + reg_offset, reg_value);
     }
     
-    xil_printf("MOSI commands updated\r\n");
+    send_message("MOSI commands updated\r\n");
 }
 
 // ============================================================================

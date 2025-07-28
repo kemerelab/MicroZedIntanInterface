@@ -2,6 +2,7 @@
 #include "xil_io.h"
 #include "xil_cache.h"
 #include <string.h>
+#include "shared_print.h"
 
 // BRAM read performance benchmark
 void benchmark_bram_reads(void) {
@@ -9,8 +10,8 @@ void benchmark_bram_reads(void) {
     const u32 total_words = num_packets * WORDS_PER_PACKET;
     XTime start_time, end_time;
     
-    xil_printf("\r\n=== BRAM READ BENCHMARK ===\r\n");
-    xil_printf("Reading %u sequential packets (%u words, %u bytes total)\r\n", 
+    send_message("\r\n=== BRAM READ BENCHMARK ===\r\n");
+    send_message("Reading %u sequential packets (%u words, %u bytes total)\r\n", 
               num_packets, total_words, total_words * 4);
     
     // Test buffer to hold all 10 packets
@@ -20,11 +21,11 @@ void benchmark_bram_reads(void) {
     u32 start_packet_addr = 0;  // Start at beginning of BRAM
     
     // Invalidate cache for entire test region
-    xil_printf("Invalidating cache for test region...\r\n");
+    send_message("Invalidating cache for test region...\r\n");
     Xil_DCacheInvalidateRange(BRAM_BASE_ADDR + (start_packet_addr * 4), total_words * 4);
     
     // Method 1: Xil_In32 word-by-word (current method)
-    xil_printf("Method 1: Xil_In32 word-by-word (sequential packets)...\r\n");
+    send_message("Method 1: Xil_In32 word-by-word (sequential packets)...\r\n");
     XTime_GetTime(&start_time);
     
     for (u32 packet = 0; packet < num_packets; packet++) {
@@ -40,13 +41,13 @@ void benchmark_bram_reads(void) {
     
     XTime_GetTime(&end_time);
     u32 xil_in32_time_us = (u32)((end_time - start_time) * 1000000 / XPAR_CPU_CORE_CLOCK_FREQ_HZ);
-    xil_printf("  Time: %u microseconds\r\n", xil_in32_time_us);
+    send_message("  Time: %u microseconds\r\n", xil_in32_time_us);
     
     // Invalidate cache again before next test
     Xil_DCacheInvalidateRange(BRAM_BASE_ADDR + (start_packet_addr * 4), total_words * 4);
     
     // Method 2: memcpy bulk transfer (potentially faster)
-    xil_printf("Method 2: memcpy bulk transfer (sequential packets)...\r\n");
+    send_message("Method 2: memcpy bulk transfer (sequential packets)...\r\n");
     XTime_GetTime(&start_time);
     
     for (u32 packet = 0; packet < num_packets; packet++) {
@@ -70,13 +71,13 @@ void benchmark_bram_reads(void) {
     
     XTime_GetTime(&end_time);
     u32 memcpy_time_us = (u32)((end_time - start_time) * 1000000 / XPAR_CPU_CORE_CLOCK_FREQ_HZ);
-    xil_printf("  Time: %u microseconds\r\n", memcpy_time_us);
+    send_message("  Time: %u microseconds\r\n", memcpy_time_us);
     
     // Invalidate cache again before next test
     Xil_DCacheInvalidateRange(BRAM_BASE_ADDR + (start_packet_addr * 4), total_words * 4);
     
     // Method 3: Optimized Xil_In32 (sequential addressing when possible)
-    xil_printf("Method 3: Optimized Xil_In32 (sequential packets)...\r\n");
+    send_message("Method 3: Optimized Xil_In32 (sequential packets)...\r\n");
     XTime_GetTime(&start_time);
     
     for (u32 packet = 0; packet < num_packets; packet++) {
@@ -102,11 +103,11 @@ void benchmark_bram_reads(void) {
     
     XTime_GetTime(&end_time);
     u32 optimized_time_us = (u32)((end_time - start_time) * 1000000 / XPAR_CPU_CORE_CLOCK_FREQ_HZ);
-    xil_printf("  Time: %u microseconds\r\n", optimized_time_us);
+    send_message("  Time: %u microseconds\r\n", optimized_time_us);
     
     // Method 4: Single large memcpy (if no wrapping)
     if ((start_packet_addr + total_words) <= BRAM_SIZE_WORDS) {
-        xil_printf("Method 4: Single large memcpy (all packets at once)...\r\n");
+        send_message("Method 4: Single large memcpy (all packets at once)...\r\n");
         
         // Invalidate cache for single large transfer test
         Xil_DCacheInvalidateRange(BRAM_BASE_ADDR + (start_packet_addr * 4), total_words * 4);
@@ -119,99 +120,99 @@ void benchmark_bram_reads(void) {
         
         XTime_GetTime(&end_time);
         u32 single_memcpy_time_us = (u32)((end_time - start_time) * 1000000 / XPAR_CPU_CORE_CLOCK_FREQ_HZ);
-        xil_printf("  Time: %u microseconds\r\n", single_memcpy_time_us);
+        send_message("  Time: %u microseconds\r\n", single_memcpy_time_us);
         
         // Add to results summary
-        xil_printf("\r\n--- BENCHMARK RESULTS ---\r\n");
-        xil_printf("Xil_In32 (modulo):     %u us\r\n", xil_in32_time_us);
-        xil_printf("memcpy (per packet):   %u us", memcpy_time_us);
+        send_message("\r\n--- BENCHMARK RESULTS ---\r\n");
+        send_message("Xil_In32 (modulo):     %u us\r\n", xil_in32_time_us);
+        send_message("memcpy (per packet):   %u us", memcpy_time_us);
         if (memcpy_time_us > 0) {
             u32 speedup = (xil_in32_time_us * 10) / memcpy_time_us;
-            xil_printf(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
+            send_message(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
                       memcpy_time_us < xil_in32_time_us ? "faster" : "slower");
         } else {
-            xil_printf(" (too fast to measure)\r\n");
+            send_message(" (too fast to measure)\r\n");
         }
         
-        xil_printf("Xil_In32 (sequential): %u us", optimized_time_us);
+        send_message("Xil_In32 (sequential): %u us", optimized_time_us);
         if (optimized_time_us > 0) {
             u32 speedup = (xil_in32_time_us * 10) / optimized_time_us;
-            xil_printf(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
+            send_message(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
                       optimized_time_us < xil_in32_time_us ? "faster" : "slower");
         } else {
-            xil_printf(" (too fast to measure)\r\n");
+            send_message(" (too fast to measure)\r\n");
         }
         
-        xil_printf("Single large memcpy:   %u us", single_memcpy_time_us);
+        send_message("Single large memcpy:   %u us", single_memcpy_time_us);
         if (single_memcpy_time_us > 0) {
             u32 speedup = (xil_in32_time_us * 10) / single_memcpy_time_us;
-            xil_printf(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
+            send_message(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
                       single_memcpy_time_us < xil_in32_time_us ? "faster" : "slower");
         } else {
-            xil_printf(" (too fast to measure)\r\n");
+            send_message(" (too fast to measure)\r\n");
         }
         
         // Throughput calculations
         u32 total_bytes = total_words * 4;
-        xil_printf("\r\nThroughput:\r\n");
+        send_message("\r\nThroughput:\r\n");
         if (xil_in32_time_us > 0) {
             u32 throughput1 = (total_bytes * 1000) / xil_in32_time_us;
-            xil_printf("Xil_In32 (modulo):     %u KB/s\r\n", throughput1);
+            send_message("Xil_In32 (modulo):     %u KB/s\r\n", throughput1);
         }
         if (memcpy_time_us > 0) {
             u32 throughput2 = (total_bytes * 1000) / memcpy_time_us;
-            xil_printf("memcpy (per packet):   %u KB/s\r\n", throughput2);
+            send_message("memcpy (per packet):   %u KB/s\r\n", throughput2);
         }
         if (optimized_time_us > 0) {
             u32 throughput3 = (total_bytes * 1000) / optimized_time_us;
-            xil_printf("Xil_In32 (sequential): %u KB/s\r\n", throughput3);
+            send_message("Xil_In32 (sequential): %u KB/s\r\n", throughput3);
         }
         if (single_memcpy_time_us > 0) {
             u32 throughput4 = (total_bytes * 1000) / single_memcpy_time_us;
-            xil_printf("Single large memcpy:   %u KB/s\r\n", throughput4);
+            send_message("Single large memcpy:   %u KB/s\r\n", throughput4);
         }
     } else {
-        xil_printf("Method 4: Skipped (test data would wrap around BRAM)\r\n");
+        send_message("Method 4: Skipped (test data would wrap around BRAM)\r\n");
         
         // Results summary without Method 4
-        xil_printf("\r\n--- BENCHMARK RESULTS ---\r\n");
-        xil_printf("Xil_In32 (modulo):     %u us\r\n", xil_in32_time_us);
-        xil_printf("memcpy (per packet):   %u us", memcpy_time_us);
+        send_message("\r\n--- BENCHMARK RESULTS ---\r\n");
+        send_message("Xil_In32 (modulo):     %u us\r\n", xil_in32_time_us);
+        send_message("memcpy (per packet):   %u us", memcpy_time_us);
         if (memcpy_time_us > 0) {
             u32 speedup = (xil_in32_time_us * 10) / memcpy_time_us;
-            xil_printf(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
+            send_message(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
                       memcpy_time_us < xil_in32_time_us ? "faster" : "slower");
         } else {
-            xil_printf(" (too fast to measure)\r\n");
+            send_message(" (too fast to measure)\r\n");
         }
         
-        xil_printf("Xil_In32 (sequential): %u us", optimized_time_us);
+        send_message("Xil_In32 (sequential): %u us", optimized_time_us);
         if (optimized_time_us > 0) {
             u32 speedup = (xil_in32_time_us * 10) / optimized_time_us;
-            xil_printf(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
+            send_message(" (%u.%ux %s)\r\n", speedup/10, speedup%10,
                       optimized_time_us < xil_in32_time_us ? "faster" : "slower");
         } else {
-            xil_printf(" (too fast to measure)\r\n");
+            send_message(" (too fast to measure)\r\n");
         }
         
         // Throughput calculations
         u32 total_bytes = total_words * 4;
-        xil_printf("\r\nThroughput:\r\n");
+        send_message("\r\nThroughput:\r\n");
         if (xil_in32_time_us > 0) {
             u32 throughput1 = (total_bytes * 1000) / xil_in32_time_us;
-            xil_printf("Xil_In32 (modulo):     %u KB/s\r\n", throughput1);
+            send_message("Xil_In32 (modulo):     %u KB/s\r\n", throughput1);
         }
         if (memcpy_time_us > 0) {
             u32 throughput2 = (total_bytes * 1000) / memcpy_time_us;
-            xil_printf("memcpy (per packet):   %u KB/s\r\n", throughput2);
+            send_message("memcpy (per packet):   %u KB/s\r\n", throughput2);
         }
         if (optimized_time_us > 0) {
             u32 throughput3 = (total_bytes * 1000) / optimized_time_us;
-            xil_printf("Xil_In32 (sequential): %u KB/s\r\n", throughput3);
+            send_message("Xil_In32 (sequential): %u KB/s\r\n", throughput3);
         }
     }
     
-    xil_printf("\r\nNote: This represents reading 10 different packets\r\n");
-    xil_printf("sequentially, storing each in separate buffer space.\r\n");
-    xil_printf("=========================\r\n\r\n");
+    send_message("\r\nNote: This represents reading 10 different packets\r\n");
+    send_message("sequentially, storing each in separate buffer space.\r\n");
+    send_message("=========================\r\n\r\n");
 }
