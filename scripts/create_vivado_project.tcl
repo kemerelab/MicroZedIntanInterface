@@ -28,7 +28,7 @@ add_files -fileset constrs_1 [glob ./programmable_logic/constraints/*.xdc]
 
 # Create block design from exported TCL
 puts "Creating block design..."
-source programmable_logic/block_design/design_1_bd.tcl
+source programmable_logic/block_design/design_1.tcl
 
 # Make the block design wrapper
 puts "Creating HDL wrapper..."
