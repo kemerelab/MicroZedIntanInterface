@@ -37,39 +37,13 @@ logic reset_timestamp     = ctrl_regs_pl[0*32 + 1];
 // Loop count: number of 35-cycle frames to run (0 = infinite)
 logic [31:0] loop_count = ctrl_regs_pl[1*32 +: 32];
 
-// Reserved control registers for future use
-logic [31:0] ctrl_reg_2 = ctrl_regs_pl[2*32 +: 32];  // Reserved for future control
-logic [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
-logic [3:0] phase0 = ctrl_reg_2[3:0];
-logic [3:0] phase1 = ctrl_reg_2[7:4];
-logic debug_mode = ctrl_reg_2[8];
-logic [73:0] cipo0_4x;
-logic [73:0] cipo1_4x;
-logic [15:0] cipo0_out;
-logic [15:0] cipo1_out;
-logic [15:0] cipo0_ddr_out;
-logic [15:0] cipo1_ddr_out;
+logic [3:0] phase0 = ctrl_regs_pl[2*32 + 3 : 2*32 + 0]; // Cable length control word for CIPO0
+logic [3:0] phase1 = ctrl_regs_pl[2*32 + 7 : 2*32 + 4]; // Cable length control word for CIPO1
+logic debug_mode = ctrl_regs_pl[2*32 + 8]; // Send dummy data rather than real CIPO serial input
 
-CIPO_phase_selector cipo0_selector(
-    .phase_select(phase0),
-    .CIPO4x(cipo0_4x),
-    .CIPO(cipo0_out)
-);
-CIPO_phase_selector cipo1_selector(
-    .phase_select(phase1),
-    .CIPO4x(cipo1_4x),
-    .CIPO(cipo1_out)
-);
-CIPO_DDR_phase_selector cipo0_ddr_selector(
-    .phase_select(phase0),
-    .CIPO4x(cipo0_4x),
-    .CIPO(cipo0_ddr_out)
-);
-CIPO_DDR_phase_selector cipo1_ddr_selector(
-    .phase_select(phase1),
-    .CIPO4x(cipo1_4x),
-    .CIPO(cipo1_ddr_out)
-);
+// Reserved control registers for future use
+logic [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
+
 
 // Extract COPI message words from the last 18 registers (36 x 16-bit words)
 logic [15:0] copi_words [0:35];
@@ -82,10 +56,28 @@ generate
 endgenerate
 
 // CIPO received data storage (4 separate 16-bit registers per cycle)
-logic [15:0] cipo0a_data [0:34];  // CIPO0 line, register A
-logic [15:0] cipo0b_data [0:34];  // CIPO0 line, register B  
-logic [15:0] cipo1a_data [0:34];  // CIPO1 line, register A
-logic [15:0] cipo1b_data [0:34];  // CIPO1 line, register B
+logic [31:0] cipo0_data [0:34];  // CIPO0 line, register A (low 16 bits) and B (upper 16 bits)
+logic [31:0] cipo1_data [0:34];  // CIPO1 line, register A
+
+// Registers for COPI data from COPI 0 and COPI 1
+logic [73:0] cipo0_4x;
+logic [73:0] cipo1_4x;
+logic [31:0] cipo0_out;
+logic [31:0] cipo1_out;
+
+// Instantiate phase selector modules that correct for COPI delay because of long cables
+CIPO_combined_phase_selector cipo0_selector(
+    .phase_select(phase0),
+    .CIPO4x(cipo0_4x),
+    .CIPO(cipo0_out)
+);
+CIPO_combined_phase_selector cipo1_selector(
+    .phase_select(phase1),
+    .CIPO4x(cipo1_4x),
+    .CIPO(cipo1_out)
+);
+
+
 
 // Control counters
 logic [6:0] state_counter;
@@ -242,27 +234,20 @@ logic write_to_fifo = 0;
 // CIPO data sampling - 4 registers total (2 per input line)
 always_ff @(posedge clk) begin
     if (!rstn) begin
-        write_to_fifo <= 1'b0;
         // Reset all received data
         for (int j = 0; j < 35; j++) begin
-            cipo0a_data[j] <= 16'h0;
-            cipo0b_data[j] <= 16'h0;
-            cipo1a_data[j] <= 16'h0;
-            cipo1b_data[j] <= 16'h0;
+            cipo0_data[j] <= 32'h0;
+            cipo1_data[j] <= 32'h0;
         end
         cipo0_4x <= 74'h0;
         cipo1_4x <= 74'h0;
     end else begin
         if (transmission_active && (state_counter >= 7'd2) && (state_counter <= 75)) begin
-            write_to_fifo <= 1'b0;
             cipo0_4x[state_counter - 2] <= cipo0;
             cipo1_4x[state_counter - 2] <= cipo1;
         end else if(transmission_active && state_counter == 7'd76) begin
-            cipo0a_data[cycle_counter] <= cipo0_out;
-            cipo0b_data[cycle_counter] <= cipo0_ddr_out;
-            cipo1a_data[cycle_counter] <= cipo1_out;
-            cipo1b_data[cycle_counter] <= cipo1_ddr_out;
-            write_to_fifo <= 1'b1; // Stop writing to FIFO after last state
+            cipo0_data[cycle_counter] <= cipo0_out;
+            cipo1_data[cycle_counter] <= cipo1_out;
         end
     end
 end
@@ -318,12 +303,11 @@ always_ff @(posedge clk) begin
                 endcase
                 end
             end else begin
-                if(state_counter inside {7'd77, 7'd78, 7'd79}) begin
+                if(state_counter inside {7'd77, 7'd78}) begin
                 fifo_write_en <= 1'b1;
                 case (state_counter)
-                    7'd77: fifo_write_data <= {26'h0,cycle_counter};
-                    7'd78: fifo_write_data <= {cipo0a_data[cycle_counter], cipo0b_data[cycle_counter]};
-                    7'd79: fifo_write_data <= {cipo1a_data[cycle_counter], cipo1b_data[cycle_counter]};
+                    7'd77: fifo_write_data <= cipo0_data[cycle_counter];
+                    7'd78: fifo_write_data <= cipo1_data[cycle_counter];
                     default: fifo_write_data <= 32'h0;
                 endcase
                 end
