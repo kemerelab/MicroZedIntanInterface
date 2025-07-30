@@ -222,7 +222,7 @@ always_ff @(posedge clk) begin
             // COPI data transmission - MSB first, set on states 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60
             // Uses copi_words[cycle_counter] as the source for each cycle's transmission  
             // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
-            if ((state_counter % 7'd4 == 7'd0) && (state_counter <= 7'd60)) begin
+            if  (state_counter <= 7'd60) begin //removed part of conditional
                 logic [3:0] bit_index = ~state_counter[5:2];  // MSB first: ~0=15, ~1=14, ..., ~15=0
                 copi <= copi_words[cycle_counter][bit_index];
             end
