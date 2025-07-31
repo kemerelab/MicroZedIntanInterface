@@ -86,7 +86,23 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
             }
             
             pl_dump_bram_data(start_addr, word_count);
-            
+        } else if (strncmp(p->payload, "set_phase", 9) == 0) {
+            u32 phase0 = 0, phase1 = 0;
+            int args = parse_two_ints(p->payload, &phase0, &phase1);
+            if (args == 2) {
+                pl_set_phase_select(phase0, phase1);
+                send_message("Phase set to %u and %u\r\n", phase0, phase1);
+            } else {
+                send_message("Usage: set_phase <phase0> <phase1>\r\n");
+            }
+        } else if (strncmp(p->payload, "set_debug", 9) == 0) {
+            char* space_ptr = strchr(p->payload, ' ');
+            if (space_ptr) {
+                u32_t enable = atoi(space_ptr + 1);
+                pl_set_debug_mode(enable);
+            } else {
+                send_message("Usage: set_debug <0|1>\r\n");
+            }   
         // Help command
         } else if (strncmp(p->payload, "help", 4) == 0) {
             send_message("=== AVAILABLE TCP COMMANDS ===\r\n");
@@ -98,6 +114,8 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
             send_message("\r\nStatus Commands:\r\n");
             send_message("  status               - Show PL status\r\n");
             send_message("  dump_bram [start] [count] - Show BRAM contents\r\n");
+            send_message("  set_phase [phase0] [phase1] - Set phase delay for CIPO cable length");
+            send_message(" set_debug [enable]    - send dummy data rather than CIPO data");
             send_message("  help                 - Show this help\r\n");
             send_message("==============================\r\n");
             

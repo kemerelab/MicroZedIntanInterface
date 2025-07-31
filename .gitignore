@@ -23,6 +23,7 @@ vivado_project/
 .Xil/
 *.tmp
 *.xpr           # Optional: track if you use GUI workflows
+vitis_workspace/
 
 # SDK and Petalinux (if used)
 .sdk/

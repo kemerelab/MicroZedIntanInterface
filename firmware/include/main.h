@@ -42,6 +42,7 @@
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp
 #define CTRL_REG_1_OFFSET   (1 * 4)   // Loop count
+#define CTRL_REG_2_OFFSET   (2 * 4)   // phase select, debug mode(send dummy data)
 #define CTRL_REG_MOSI_START_OFFSET  (CTRL_REG_0_OFFSET + (4 * 4)) // Offset for MOSI control words
 
 // Status register offsets
@@ -56,6 +57,9 @@
 // Control register bits
 #define CTRL_ENABLE_TRANSMISSION (1 << 0)
 #define CTRL_RESET_TIMESTAMP     (1 << 1)
+#define CTRL_PHASE0_MASK         (0xF << 0) // phase0 [3:0]
+#define CTRL_PHASE1_MASK         (0xF << 4) // phase1 [7:4]
+#define CTRL_DEBUG_MODE          (1 << 8)   // Debug mode (send dummy data) [8]
 
 // Status register bits  
 #define STATUS_TRANSMISSION_ACTIVE   (1 << 0)
@@ -111,6 +115,8 @@ void network_maintenance_loop(void);
 void pl_set_transmission(int enable);
 void pl_reset_timestamp(void);
 void pl_set_loop_count(u32_t loop_count);
+void pl_set_phase_select(int phase0, int phase1);
+void pl_set_debug_mode(int enable);
 
 // Status reading
 u64_t pl_get_timestamp(void);

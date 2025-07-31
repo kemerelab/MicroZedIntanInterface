@@ -41,6 +41,32 @@ void pl_set_loop_count(u32_t loop_count) {
     send_message("PL loop count set to %u\r\n", loop_count);
 }
 
+void pl_set_phase_select(int phase0, int phase1) {
+    u32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
+    
+    ctrl_reg_2 &= ~(CTRL_PHASE0_MASK | CTRL_PHASE1_MASK); // Clear existing phase bits
+    
+    ctrl_reg_2 |= ((phase0 & 0xF) << 0); // Set phase0 bits
+    ctrl_reg_2 |= ((phase1 & 0xF) << 4);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
+    send_message("PL phase select set to phase0=%d, phase1=%d\r\n", phase0, phase1);
+}
+
+void pl_set_debug_mode(int enable) {
+    u32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
+    
+    if (enable) {
+        ctrl_reg_2 |= CTRL_DEBUG_MODE;
+        send_message("PL debug mode ENABLED\r\n");
+    } else {
+        ctrl_reg_2 &= ~CTRL_DEBUG_MODE;
+        send_message("PL debug mode DISABLED\r\n");
+    }
+    
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
+}
+
+
 // ============================================================================
 // PL STATUS READING FUNCTIONS
 // ============================================================================
