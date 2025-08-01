@@ -11,7 +11,7 @@
 
 int main() {
 
-    // Xil_SetTlbAttributes(SHARED_MEM_BASE, NORM_NONCACHE_SHARED); // Critical for coherency!
+    Xil_SetTlbAttributes(SHARED_MEM_BASE, NORM_NONCACHE_SHARED); // Critical for coherency!
 
     init_platform(); // Initialize platform for Core 1
 

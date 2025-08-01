@@ -151,11 +151,10 @@ void send_message(const char *format, ...) {
 
     // Format the message into a local buffer
     va_start(args, format);
-    int len = vsnprintf(buffer, PRINT_MSG_SIZE - 1, format, args);
+    int len = vsnprintf(buffer, PRINT_MSG_SIZE, format, args);
     va_end(args);
 
     if (len <= 0) return; // Handle empty or error cases
-    buffer[PRINT_MSG_SIZE - 1] = '\0'; // Ensure null termination
 
     // Wait if the buffer is full, with a timeout to prevent deadlock
     int timeout = 10000;
@@ -168,7 +167,7 @@ void send_message(const char *format, ...) {
     }
 
     uint32_t write_idx = print_buffer->write_idx;
-    strcpy(print_buffer->entries[write_idx].message, buffer);
+    memcpy(print_buffer->entries[write_idx].message, buffer, len);
     print_buffer->entries[write_idx].length = len;
     print_buffer->entries[write_idx].valid = 1;
     print_buffer->write_idx = (write_idx + 1) % MAX_PRINT_ENTRIES;
@@ -177,17 +176,85 @@ void send_message(const char *format, ...) {
 /**
  * @brief Main loop for the print handler.
  */
+
 void print_handler_loop(void) {
     xil_printf("Starting print_handler_loop.\r\n");
+
+    static char combined_buffer[MAX_PRINT_ENTRIES * PRINT_MSG_SIZE];
+
     while (1) {
         check_serial_input();
+
+        // Only process the buffer if there's data
         if (!is_buffer_empty(print_buffer)) {
-            uint32_t read_idx = print_buffer->read_idx;
-            if (print_buffer->entries[read_idx].valid) {
-                xil_printf("%s", print_buffer->entries[read_idx].message);
-                print_buffer->entries[read_idx].valid = 0;
-                print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
+            int total_length = 0;
+
+            // Process each valid entry
+            while (!is_buffer_empty(print_buffer)) {
+                uint32_t read_idx = print_buffer->read_idx;
+
+                if (print_buffer->entries[read_idx].valid) {
+                    int msg_len = print_buffer->entries[read_idx].length;
+                    if (msg_len > 0 && (total_length + msg_len < sizeof(combined_buffer))) {
+                        memcpy(combined_buffer + total_length,
+                               print_buffer->entries[read_idx].message,
+                               msg_len);
+                        total_length += msg_len;
+                    } else {
+                        if(msg_len > 0) break;
+                    }
+
+                    print_buffer->entries[read_idx].valid = 0;
+                    print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
+                } else {
+                    // Skip invalid entries
+                    print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
+                }
+            }
+
+            // Null-terminate and print combined message
+            combined_buffer[total_length] = '\0';
+
+            if (total_length > 0) {
+                xil_printf("%.*s", total_length, combined_buffer);
             }
         }
+
     }
 }
+
+// void print_handler_loop(void) {
+//     xil_printf("Starting print_handler_loop.\r\n");
+//     static char combined_buffer [MAX_PRINT_ENTRIES * PRINT_MSG_SIZE];
+//     while (1) {
+//         check_serial_input();
+//         if (!is_buffer_empty(print_buffer)) {
+//             combined_buffer[0] = '\0';
+//             int total_length = 0;
+//             while(!is_buffer_empty(print_buffer)){
+//                 uint32_t read_idx = print_buffer->read_idx;
+//                 if(print_buffer->entries[read_idx].valid){
+//                     int msg_len = strlen(print_buffer->entries[read_idx].message);
+//                     if(total_length + msg_len < sizeof(combined_buffer) - 1){
+//                         strcat(combined_buffer, print_buffer->entries[read_idx].message);
+//                         total_length += msg_len;
+//                     }
+//                     print_buffer->entries[read_idx].valid = 0;
+//                     print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
+//                 } else {
+//                     //Skip invalid print entries
+//                     print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
+//                 }
+//             }
+//             if(total_length > 0){
+//                 xil_printf("%s",combined_buffer);
+//             }
+//             uint32_t read_idx = print_buffer->read_idx;
+//             if (print_buffer->entries[read_idx].valid) {
+//                 xil_printf("%s", print_buffer->entries[read_idx].message);
+//                 print_buffer->entries[read_idx].valid = 0;
+//                 print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
+//             }
+//         }
+//     }
+// }

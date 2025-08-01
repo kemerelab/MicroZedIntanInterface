@@ -3,7 +3,7 @@ import threading
 import struct
 import time
 
-ZYNQ_IP = "192.168.1.10"  # IP of the Zynq board
+ZYNQ_IP = "192.168.18.10"  # IP of the Zynq board
 TCP_PORT = 6000  # Must match your board's TCP_PORT
 UDP_PORT = 5000  # Must match your board's UDP_PORT
 
