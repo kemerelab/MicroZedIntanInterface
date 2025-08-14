@@ -10,6 +10,8 @@
 *.backup.jou
 *.backup.log
 
+vivado_project/
+
 # Vitis
 .clangd
 

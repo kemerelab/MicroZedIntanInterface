@@ -245,6 +245,8 @@ proc create_root_design { parentCell } {
   set copi_0 [ create_bd_port -dir O -type data copi_0 ]
   set cipo0_0 [ create_bd_port -dir I -type data cipo0_0 ]
   set cipo1_0 [ create_bd_port -dir I -type data cipo1_0 ]
+  set UART1_TX_0 [ create_bd_port -dir O UART1_TX_0 ]
+  set UART1_RX_0 [ create_bd_port -dir I UART1_RX_0 ]
 
   # Create instance: processing_system7_0, and set properties
   set processing_system7_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7:5.5 processing_system7_0 ]
@@ -301,6 +303,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_EN_CLK3_PORT {0} \
     CONFIG.PCW_EN_DDR {1} \
     CONFIG.PCW_EN_EMIO_TTC0 {1} \
+    CONFIG.PCW_EN_EMIO_UART1 {1} \
     CONFIG.PCW_EN_ENET0 {1} \
     CONFIG.PCW_EN_GPIO {1} \
     CONFIG.PCW_EN_QSPI {1} \
@@ -485,9 +488,9 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_MIO_9_SLEW {slow} \
     CONFIG.PCW_MIO_PRIMITIVE {54} \
     CONFIG.PCW_MIO_TREE_PERIPHERALS {GPIO#Quad SPI Flash#Quad SPI Flash#Quad SPI Flash#Quad SPI Flash#Quad SPI Flash#Quad SPI Flash#USB Reset#Quad SPI Flash#GPIO#GPIO#GPIO#GPIO#GPIO#GPIO#GPIO#Enet 0#Enet\
-0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#GPIO#UART 1#UART 1#SD\
-0#GPIO#Enet 0#Enet 0} \
-    CONFIG.PCW_MIO_TREE_SIGNALS {gpio[0]#qspi0_ss_b#qspi0_io[0]#qspi0_io[1]#qspi0_io[2]#qspi0_io[3]/HOLD_B#qspi0_sclk#reset#qspi_fbclk#gpio[9]#gpio[10]#gpio[11]#gpio[12]#gpio[13]#gpio[14]#gpio[15]#tx_clk#txd[0]#txd[1]#txd[2]#txd[3]#tx_ctl#rx_clk#rxd[0]#rxd[1]#rxd[2]#rxd[3]#rx_ctl#data[4]#dir#stp#nxt#data[0]#data[1]#data[2]#data[3]#clk#data[5]#data[6]#data[7]#clk#cmd#data[0]#data[1]#data[2]#data[3]#cd#gpio[47]#tx#rx#wp#gpio[51]#mdc#mdio}\
+0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#Enet 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#GPIO#GPIO#GPIO#SD 0#GPIO#Enet\
+0#Enet 0} \
+    CONFIG.PCW_MIO_TREE_SIGNALS {gpio[0]#qspi0_ss_b#qspi0_io[0]#qspi0_io[1]#qspi0_io[2]#qspi0_io[3]/HOLD_B#qspi0_sclk#reset#qspi_fbclk#gpio[9]#gpio[10]#gpio[11]#gpio[12]#gpio[13]#gpio[14]#gpio[15]#tx_clk#txd[0]#txd[1]#txd[2]#txd[3]#tx_ctl#rx_clk#rxd[0]#rxd[1]#rxd[2]#rxd[3]#rx_ctl#data[4]#dir#stp#nxt#data[0]#data[1]#data[2]#data[3]#clk#data[5]#data[6]#data[7]#clk#cmd#data[0]#data[1]#data[2]#data[3]#cd#gpio[47]#gpio[48]#gpio[49]#wp#gpio[51]#mdc#mdio}\
 \
     CONFIG.PCW_PACKAGE_DDR_BOARD_DELAY0 {0.416} \
     CONFIG.PCW_PACKAGE_DDR_BOARD_DELAY1 {0.408} \
@@ -529,7 +532,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_TTC_PERIPHERAL_FREQMHZ {50} \
     CONFIG.PCW_UART1_GRP_FULL_ENABLE {0} \
     CONFIG.PCW_UART1_PERIPHERAL_ENABLE {1} \
-    CONFIG.PCW_UART1_UART1_IO {MIO 48 .. 49} \
+    CONFIG.PCW_UART1_UART1_IO {EMIO} \
     CONFIG.PCW_UART_PERIPHERAL_CLKSRC {IO PLL} \
     CONFIG.PCW_UART_PERIPHERAL_FREQMHZ {50} \
     CONFIG.PCW_UART_PERIPHERAL_VALID {1} \
@@ -692,6 +695,8 @@ proc create_root_design { parentCell } {
   connect_bd_intf_net -intf_net smartconnect_1_M00_AXI [get_bd_intf_pins axi_bram_ctrl_0/S_AXI] [get_bd_intf_pins smartconnect_1/M00_AXI]
 
   # Create port connections
+  connect_bd_net -net UART1_RX_0_1  [get_bd_ports UART1_RX_0] \
+  [get_bd_pins processing_system7_0/UART1_RX]
   connect_bd_net -net axi_lite_registers_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers/ctrl_regs_pl] \
   [get_bd_pins data_generator/ctrl_regs_pl]
   connect_bd_net -net cipo0_0_1  [get_bd_ports cipo0_0] \
@@ -741,6 +746,8 @@ proc create_root_design { parentCell } {
   [get_bd_pins clk_wiz_0_84M_175M/clk_in1]
   connect_bd_net -net processing_system7_0_FCLK_RESET0_N  [get_bd_pins processing_system7_0/FCLK_RESET0_N] \
   [get_bd_pins rst_ps7_0_100M/ext_reset_in]
+  connect_bd_net -net processing_system7_0_UART1_TX  [get_bd_pins processing_system7_0/UART1_TX] \
+  [get_bd_ports UART1_TX_0]
   connect_bd_net -net rst_ps7_0_100M_peripheral_reset  [get_bd_pins rst_ps7_0_100M/peripheral_reset] \
   [get_bd_pins clk_wiz_0_84M_175M/reset] \
   [get_bd_pins proc_sys_reset_0_84M/ext_reset_in] \
