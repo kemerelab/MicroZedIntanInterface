@@ -46,7 +46,7 @@ if { [string first $scripts_vivado_version $current_vivado_version] == -1 } {
 
 # The design that will be created by this Tcl script contains the following 
 # module references:
-# simple_dual_port_bram_wrapper, led_status_controller, axi_lite_registers, data_generator
+# simple_dual_port_bram_wrapper, led_status_controller, axi_lite_registers, data_generator, intan_spi_lvds_buffer
 
 # Please add the sources of those modules before sourcing this Tcl script.
 
@@ -170,6 +170,7 @@ simple_dual_port_bram_wrapper\
 led_status_controller\
 axi_lite_registers\
 data_generator\
+intan_spi_lvds_buffer\
 "
 
    set list_mods_missing ""
@@ -236,15 +237,12 @@ proc create_root_design { parentCell } {
 
   set FIXED_IO [ create_bd_intf_port -mode Master -vlnv xilinx.com:display_processing_system7:fixedio_rtl:1.0 FIXED_IO ]
 
+  set spi_lvds_0 [ create_bd_intf_port -mode Master -vlnv kemerelab.org:intan:intan_spi_diff_rtl:1.0 spi_lvds_0 ]
+
 
   # Create ports
   set led0 [ create_bd_port -dir O -type data led0 ]
   set led1 [ create_bd_port -dir O -type data led1 ]
-  set csn_0 [ create_bd_port -dir O -type data csn_0 ]
-  set sclk_0 [ create_bd_port -dir O -type clk sclk_0 ]
-  set copi_0 [ create_bd_port -dir O -type data copi_0 ]
-  set cipo0_0 [ create_bd_port -dir I -type data cipo0_0 ]
-  set cipo1_0 [ create_bd_port -dir I -type data cipo1_0 ]
   set UART1_TX_0 [ create_bd_port -dir O UART1_TX_0 ]
   set UART1_RX_0 [ create_bd_port -dir I UART1_RX_0 ]
 
@@ -684,9 +682,22 @@ proc create_root_design { parentCell } {
      return 1
    }
   
+  # Create instance: intan_spi_lvds_buffer_0, and set properties
+  set block_name intan_spi_lvds_buffer
+  set block_cell_name intan_spi_lvds_buffer_0
+  if { [catch {set intan_spi_lvds_buffer_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $intan_spi_lvds_buffer_0 eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+  
   # Create interface connections
   connect_bd_intf_net -intf_net axi_bram_ctrl_0_BRAM_PORTA [get_bd_intf_pins axi_bram_ctrl_0/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram/BRAM_PORTB]
   connect_bd_intf_net -intf_net data_generator_0_BRAM_PORTA [get_bd_intf_pins data_generator/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram/BRAM_PORTA]
+  connect_bd_intf_net -intf_net data_generator_intan_spi [get_bd_intf_pins data_generator/intan_spi] [get_bd_intf_pins intan_spi_lvds_buffer_0/intan_spi]
+  connect_bd_intf_net -intf_net intan_spi_lvds_buffer_0_spi_lvds [get_bd_intf_ports spi_lvds_0] [get_bd_intf_pins intan_spi_lvds_buffer_0/spi_lvds]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins smartconnect_0/S00_AXI]
@@ -699,15 +710,11 @@ proc create_root_design { parentCell } {
   [get_bd_pins processing_system7_0/UART1_RX]
   connect_bd_net -net axi_lite_registers_0_ctrl_regs_pl  [get_bd_pins axi_lite_registers/ctrl_regs_pl] \
   [get_bd_pins data_generator/ctrl_regs_pl]
-  connect_bd_net -net cipo0_0_1  [get_bd_ports cipo0_0] \
-  [get_bd_pins data_generator/cipo0]
-  connect_bd_net -net cipo1_0_1  [get_bd_ports cipo1_0] \
-  [get_bd_pins data_generator/cipo1]
   connect_bd_net -net clk_wiz_0_84M_clk_out1  [get_bd_pins clk_wiz_0_84M_175M/clk_out1] \
   [get_bd_pins proc_sys_reset_0_84M/slowest_sync_clk] \
   [get_bd_pins axi_lite_registers/pl_clk] \
-  [get_bd_pins data_generator/clk] \
-  [get_bd_pins led_status_controller/clk]
+  [get_bd_pins led_status_controller/clk] \
+  [get_bd_pins data_generator/clk]
   connect_bd_net -net clk_wiz_0_84M_clk_out2  [get_bd_pins clk_wiz_0_84M_175M/clk_out2] \
   [get_bd_pins smartconnect_0/aclk] \
   [get_bd_pins smartconnect_1/aclk] \
@@ -719,12 +726,6 @@ proc create_root_design { parentCell } {
   connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M_175M/locked] \
   [get_bd_pins proc_sys_reset_0_84M/dcm_locked] \
   [get_bd_pins proc_sys_reset_175MHz/dcm_locked]
-  connect_bd_net -net data_generator_0_copi  [get_bd_pins data_generator/copi] \
-  [get_bd_ports copi_0]
-  connect_bd_net -net data_generator_0_csn  [get_bd_pins data_generator/csn] \
-  [get_bd_ports csn_0]
-  connect_bd_net -net data_generator_0_sclk  [get_bd_pins data_generator/sclk] \
-  [get_bd_ports sclk_0]
   connect_bd_net -net data_generator_bram_0_status_regs_pl  [get_bd_pins data_generator/status_regs_pl] \
   [get_bd_pins axi_lite_registers/status_regs_pl] \
   [get_bd_pins led_status_controller/status_regs_pl]

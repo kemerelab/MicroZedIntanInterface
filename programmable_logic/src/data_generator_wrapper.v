@@ -37,25 +37,23 @@ module data_generator #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
     output wire [3:0]      bram_we,
     
+    
     // Serial interface signals
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CSN DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
     output wire            csn,         // Chip select (active low)
     
-    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 SCLK CLK" *)
-    (* X_INTERFACE_PARAMETER = "FREQ_HZ 1312500" *)
-    output wire            sclk,        // Serial clock (84MHz/64 = ~1.3MHz)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi sclk" *)
+    output wire            sclk,        // Serial clock (84MHz/4 = 24MHz)
     
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 COPI DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi copi" *)
     output wire            copi,         // Controller Out, Peripheral In
     
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CIPO0 DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi cipo0" *)
     input  wire        cipo0,      // Controller In, Peripheral Out 0
 
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CIPO1 DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi cipo1" *)
+    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF intan_spi, ASSOCIATED_RESET rst_n, ASSOCIATED_CLKEN clk" *)
     input  wire        cipo1       // Controller In, Peripheral Out 1
 
 );
