@@ -26,6 +26,10 @@ update_compile_order -fileset sources_1
 puts "Adding constraint files..."
 add_files -fileset constrs_1 [glob ./programmable_logic/constraints/*.xdc]
 
+# Add libraries
+set_property ip_repo_paths ./programmable_logic/ip/intan_spi_interface_lib [current_project]
+update_ip_catalog
+
 # Create block design from exported TCL
 puts "Creating block design..."
 source programmable_logic/block_design/design_1_bd.tcl
