@@ -5,10 +5,10 @@
 #==============================================================================
 # LVDS SPI Clock - Differential Pair
 #==============================================================================
-set_property IOSTANDARD LVDS_25 [get_ports spi_lvds_0_lvds_0_sclk_p]
-set_property IOSTANDARD LVDS_25 [get_ports spi_lvds_0_lvds_0_sclk_n]
-set_property PACKAGE_PIN E17 [get_ports spi_lvds_0_lvds_0_sclk_p]
-set_property PACKAGE_PIN D18 [get_ports spi_lvds_0_lvds_0_sclk_n]
+set_property IOSTANDARD LVDS_25 [get_ports spi_lvds_0_sclk_p]
+set_property IOSTANDARD LVDS_25 [get_ports spi_lvds_0_sclk_n]
+set_property PACKAGE_PIN E17 [get_ports spi_lvds_0_sclk_p]
+set_property PACKAGE_PIN D18 [get_ports spi_lvds_0_sclk_n]
 
 # Clock output timing constraints
 # SPI controller runs on 84MHz clock, so all outputs are relative to this clock
@@ -105,37 +105,6 @@ set_property LOC DIFF_PAIR_4 [get_ports {spi_lvds_0_lvds_0_cipo1_p spi_lvds_0_lv
 # Clock domain crossing constraints (if SPI clock is in different domain)
 # set_clock_groups -asynchronous -group [get_clocks spi_lvds_0_lvds_0_sclk] -group [get_clocks your_system_clock]
 
-#==============================================================================
-# Board-specific notes and pin assignment examples
-#==============================================================================
-
-# Example pin assignments for common Xilinx development boards:
-
-# For Zynq UltraScale+ MPSoC (ZCU102/ZCU104):
-# Bank 67 LVDS pins (HR I/O, supports LVDS_25)
-# set_property PACKAGE_PIN G26 [get_ports spi_lvds_0_lvds_0_sclk_p]    ; # Bank 67
-# set_property PACKAGE_PIN F26 [get_ports spi_lvds_0_lvds_0_sclk_n]    ; # Bank 67
-# set_property PACKAGE_PIN H26 [get_ports spi_lvds_0_lvds_0_csn_p]     ; # Bank 67
-# set_property PACKAGE_PIN H27 [get_ports spi_lvds_0_lvds_0_csn_n]     ; # Bank 67
-# set_property PACKAGE_PIN J25 [get_ports spi_lvds_0_lvds_0_copi_p]    ; # Bank 67
-# set_property PACKAGE_PIN J26 [get_ports spi_lvds_0_lvds_0_copi_n]    ; # Bank 67
-# set_property PACKAGE_PIN K25 [get_ports spi_lvds_0_lvds_0_cipo0_p]   ; # Bank 67
-# set_property PACKAGE_PIN K26 [get_ports spi_lvds_0_lvds_0_cipo0_n]   ; # Bank 67
-# set_property PACKAGE_PIN L25 [get_ports spi_lvds_0_lvds_0_cipo1_p]   ; # Bank 67
-# set_property PACKAGE_PIN L26 [get_ports spi_lvds_0_lvds_0_cipo1_n]   ; # Bank 67
-
-# For Kintex-7 (KC705):
-# Bank 16 LVDS pins
-# set_property PACKAGE_PIN AC19 [get_ports spi_lvds_0_lvds_0_sclk_p]   ; # Bank 16
-# set_property PACKAGE_PIN AD19 [get_ports spi_lvds_0_lvds_0_sclk_n]   ; # Bank 16
-# set_property PACKAGE_PIN AE18 [get_ports spi_lvds_0_lvds_0_csn_p]    ; # Bank 16
-# set_property PACKAGE_PIN AF18 [get_ports spi_lvds_0_lvds_0_csn_n]    ; # Bank 16
-# set_property PACKAGE_PIN AC18 [get_ports spi_lvds_0_lvds_0_copi_p]   ; # Bank 16
-# set_property PACKAGE_PIN AD18 [get_ports spi_lvds_0_lvds_0_copi_n]   ; # Bank 16
-# set_property PACKAGE_PIN AB17 [get_ports spi_lvds_0_lvds_0_cipo0_p]  ; # Bank 16
-# set_property PACKAGE_PIN AC17 [get_ports spi_lvds_0_lvds_0_cipo0_n]  ; # Bank 16
-# set_property PACKAGE_PIN AA17 [get_ports spi_lvds_0_lvds_0_cipo1_p]  ; # Bank 16
-# set_property PACKAGE_PIN AB16 [get_ports spi_lvds_0_lvds_0_cipo1_n]  ; # Bank 16
 
 #==============================================================================
 # Important Notes:
