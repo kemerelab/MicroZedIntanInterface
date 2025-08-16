@@ -65,7 +65,7 @@ logic [73:0] cipo1_4x_oversampled_oversampled;
 logic [31:0] cipo0_phase_selected;
 logic [31:0] cipo1_phase_selected;
 
-// Instantiate phase selector modules that correct for COPI delay because of long cablescipo1_4x
+// Instantiate phase selector modules that correct for COPI delay because of long cable length
 CIPO_combined_phase_selector cipo0_selector(
     .phase_select(phase0),
     .CIPO4x(cipo0_4x_oversampled),
@@ -230,7 +230,7 @@ always_ff @(posedge clk) begin
         end
     end
 end
-logic write_to_fifo = 0;
+
 // CIPO data sampling - 4 registers total (2 per input line)
 always_ff @(posedge clk) begin
     if (!rstn) begin
