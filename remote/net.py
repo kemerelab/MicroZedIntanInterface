@@ -10,8 +10,8 @@ UDP_PORT = 5000  # Must match your board's UDP_PORT
 # Updated data generator constants for your current implementation
 MAGIC_NUMBER_LOW = 0xDEADBEEF   # Lower 32 bits
 MAGIC_NUMBER_HIGH = 0xCAFEBABE  # Upper 32 bits
-EXPECTED_PACKET_SIZE = 576      # 144 words * 4 bytes = 576 bytes
-WORDS_PER_PACKET = 144          # 4 header + (35 cycles * 4 data words)
+EXPECTED_PACKET_SIZE = 296      # 74 words * 4 bytes = 296 bytes
+WORDS_PER_PACKET = 74           # 4 header + (35 cycles * 2 data words)
 
 class DataValidator:
     def __init__(self):
@@ -41,8 +41,8 @@ class DataValidator:
             return None
 
         try:
-            # Unpack as 144 32-bit little-endian words
-            words = struct.unpack('<144I', data)
+            # Unpack as 74 32-bit little-endian words
+            words = struct.unpack('<74I', data)
 
             # Check magic number (words 0 and 1)
             magic_combined = (words[1] << 32) | words[0]
@@ -67,8 +67,11 @@ class DataValidator:
                 total_rate = self.packet_count / elapsed if elapsed > 0 else 0
                 inst_rate = (self.packet_count - self.last_packet_count) / (now - self.last_stats_time) if (now - self.last_stats_time) > 0 else 0
                 
-                # Show some data words for verification
-                data_sample = f"Data: [0x{words[4]:08X}, 0x{words[5]:08X}, 0x{words[6]:08X}, 0x{words[7]:08X}]"
+                # Show some data words for verification (first few data words after header)
+                if len(words) >= 8:
+                    data_sample = f"Data: [0x{words[4]:08X}, 0x{words[5]:08X}, 0x{words[6]:08X}, 0x{words[7]:08X}]"
+                else:
+                    data_sample = f"Data: [packet too short for data display]"
                 
                 print(f"[INFO] Packet {self.packet_count}: Timestamp {timestamp}, "
                       f"Rate: {total_rate:.1f} pkt/s (avg), {inst_rate:.1f} pkt/s (inst), "
@@ -173,9 +176,16 @@ def tcp_control():
         print(f"    stop  - Stop data streaming") 
         print(f"    reset_timestamp - Reset timestamp to 0")
         print(f"    loop <count> - Set loop count (0=infinite)")
+        print(f"  COPI Command Sequences:")
+        print(f"    convert - Set normal data acquisition sequence (channels 0-31)")
+        print(f"    init    - Set chip initialization sequence")
+        print(f"    cable_test - Set cable length test sequence ('INTAN' pattern)")
+        print(f"    test_pattern - Set COPI test pattern (0x0000-0x0022)")
+        print(f"  Configuration:")
+        print(f"    set_phase <p0> <p1> - Set phase delay for CIPO cables")
+        print(f"    set_debug <0|1> - Send dummy data vs real CIPO data")
         print(f"  Status Commands:")
-        print(f"    status - Show PL status")
-        print(f"  Diagnostic Commands:")
+        print(f"    status - Show PL status and COPI info")
         print(f"    dump_bram [start] [count] - Show BRAM contents")
         print(f"  Utility:")
         print(f"    help - Show all commands")
@@ -192,9 +202,16 @@ def tcp_control():
                 if cmd == "reset_timestamp":
                     validator.last_timestamp = None  # Reset our tracking too
                     print("[TCP] Local timestamp tracking reset")
+            # New COPI sequence commands
+            elif cmd in ("convert", "init", "cable_test", "test_pattern"):
+                send_tcp_command(sock, cmd)
             elif cmd.startswith("loop "):
                 send_tcp_command(sock, cmd)
             elif cmd.startswith("dump_bram"):
+                send_tcp_command(sock, cmd)
+            elif cmd.startswith("set_phase "):
+                send_tcp_command(sock, cmd)
+            elif cmd.startswith("set_debug "):
                 send_tcp_command(sock, cmd)
             elif cmd == "stats":
                 validator.print_statistics()
@@ -258,12 +275,94 @@ def tcp_control():
                 send_tcp_command(sock, "status")
                 validator.print_statistics()
                 print("[TCP] 30-second benchmark complete")
+            
+            # NEW: Comprehensive workflow commands
+            elif cmd == "chip_init":
+                print("\n[TCP] Running complete chip initialization workflow...")
+                send_tcp_command(sock, "stop")  # Ensure stopped first
+                time.sleep(0.5)
+                
+                print("[TCP] Step 1: Loading initialization sequence")
+                send_tcp_command(sock, "init")
+                time.sleep(0.5)
+                
+                print("[TCP] Step 2: Starting initialization transmission")
+                send_tcp_command(sock, "start")
+                time.sleep(2)  # Let initialization run
+                
+                print("[TCP] Step 3: Stopping initialization")
+                send_tcp_command(sock, "stop")
+                time.sleep(0.5)
+                
+                print("[TCP] Step 4: Loading normal data acquisition sequence")
+                send_tcp_command(sock, "convert")
+                time.sleep(0.5)
+                
+                print("[TCP] Chip initialization complete. Ready for data acquisition.")
+                print("[TCP] Use 'start' to begin normal data streaming.")
+                
+            elif cmd == "cable_cal":
+                print("\n[TCP] Running cable calibration workflow...")
+                send_tcp_command(sock, "stop")  # Ensure stopped first
+                time.sleep(0.5)
+                
+                print("[TCP] Step 1: Loading cable test sequence")
+                send_tcp_command(sock, "cable_test")
+                time.sleep(0.5)
+                
+                print("[TCP] Step 2: Starting cable test (look for 'INTAN' patterns)")
+                validator.__init__()  # Reset stats to see fresh data
+                send_tcp_command(sock, "start")
+                
+                print("[TCP] Cable test running. Monitor UDP data for 'INTAN' patterns.")
+                print("[TCP] Use different 'set_phase' values to optimize signal quality.")
+                print("[TCP] Type 'stop' when done, then 'convert' to return to normal mode.")
+                
+            elif cmd == "full_test":
+                print("\n[TCP] Running full system test workflow...")
+                
+                # Step 1: Initialize chips
+                print("[TCP] Phase 1: Chip initialization")
+                send_tcp_command(sock, "stop")
+                time.sleep(0.5)
+                send_tcp_command(sock, "init")
+                time.sleep(0.5)
+                send_tcp_command(sock, "start")
+                time.sleep(3)  # Let init complete
+                send_tcp_command(sock, "stop")
+                time.sleep(0.5)
+                
+                # Step 2: Cable test
+                print("[TCP] Phase 2: Cable length test")
+                send_tcp_command(sock, "cable_test")
+                time.sleep(0.5)
+                validator.__init__()  # Reset stats
+                send_tcp_command(sock, "start")
+                time.sleep(5)  # Collect some cable test data
+                send_tcp_command(sock, "stop")
+                time.sleep(0.5)
+                
+                # Step 3: Normal data acquisition
+                print("[TCP] Phase 3: Normal data acquisition test")
+                send_tcp_command(sock, "convert")
+                time.sleep(0.5)
+                validator.__init__()  # Reset stats again
+                send_tcp_command(sock, "start")
+                time.sleep(10)  # Collect normal data
+                send_tcp_command(sock, "stop")
+                
+                send_tcp_command(sock, "status")
+                validator.print_statistics()
+                print("[TCP] Full system test complete!")
                 
             else:
                 print("[TCP] Invalid command. Available commands:")
-                print("  start, stop, reset_timestamp, status, help")
-                print("  loop <count>, dump_bram [start] [count]")
-                print("  test, quick_test, monitor, benchmark, stats, quit")
+                print("  Basic: start, stop, reset_timestamp, status, help")
+                print("  COPI: convert, init, cable_test, test_pattern")
+                print("  Config: loop <count>, set_phase <p0> <p1>, set_debug <0|1>")
+                print("  Utility: dump_bram [start] [count], stats, quit")
+                print("  Workflows: chip_init, cable_cal, full_test")
+                print("  Tests: test, quick_test, monitor, benchmark")
                 
     except ConnectionRefusedError:
         print(f"[TCP] Could not connect to {ZYNQ_IP}:{TCP_PORT}")

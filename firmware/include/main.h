@@ -25,12 +25,12 @@
 #define BRAM_BASE_ADDR          0x80000000
 
 // BRAM layout - matches FPGA configuration
-#define WORDS_PER_PACKET        144         // 4 header + (35 cycles * 4 data words)
-#define BYTES_PER_WORD          4           // 32-bit words
-#define BYTES_PER_PACKET        (WORDS_PER_PACKET * BYTES_PER_WORD)  // 576 bytes
+#define WORDS_PER_PACKET        74 // 4 header + (35 cycles * 2 data words)
+#define BYTES_PER_WORD          4  // 32-bit words
+#define BYTES_PER_PACKET        (WORDS_PER_PACKET * BYTES_PER_WORD)  // 296 bytes
 #define BRAM_SIZE_WORDS         16384       // 16384 x 32-bit words (64KB)
 #define BRAM_SIZE_BYTES         (BRAM_SIZE_WORDS * BYTES_PER_WORD)   // 64KB
-#define MAX_PACKETS_IN_BRAM     (BRAM_SIZE_WORDS / WORDS_PER_PACKET) // ~113 packets
+#define MAX_PACKETS_IN_BRAM     (BRAM_SIZE_WORDS / WORDS_PER_PACKET) // ~221 packets
 
 // ============================================================================
 // AXI LITE CONTROL INTERFACE
@@ -52,7 +52,14 @@
 #define STATUS_REG_3_OFFSET  (25 * 4)  // Packets sent
 #define STATUS_REG_4_OFFSET  (26 * 4)  // Timestamp low [31:0]
 #define STATUS_REG_5_OFFSET  (27 * 4)  // Timestamp high [63:32]
-#define STATUS_REG_6_OFFSET  (28 * 4)  // BRAM write address + FIFO count
+// Mirrored control registers in status space
+#define STATUS_REG_6_OFFSET  (28 * 4)  // Mirror of CTRL_REG_0 (enable, reset, etc.)
+#define STATUS_REG_7_OFFSET  (29 * 4)  // Mirror of CTRL_REG_1 (loop count)
+#define STATUS_REG_8_OFFSET  (30 * 4)  // Mirror of CTRL_REG_2 (phase select, debug mode)
+#define STATUS_REG_9_OFFSET  (31 * 4)  // Mirror of CTRL_REG_3 (reserved)
+#define STATUS_REG_10_OFFSET (32 * 4)  // BRAM write address + FIFO count (added by wrapper)
+
+
 
 // Control register bits
 #define CTRL_ENABLE_TRANSMISSION (1 << 0)
@@ -125,15 +132,26 @@ u32_t pl_get_packets_sent(void);
 int pl_is_loop_limit_reached(void);
 u32 pl_get_bram_write_address(void);
 
+u32_t pl_get_current_loop_count(void);
+int pl_get_current_phase_select(int *phase0, int *phase1);
+int pl_get_current_debug_mode(void);
+u32_t pl_get_current_control_flags(void);
+
 // Status display
 void pl_print_status(void);
 
 // Debug
 void pl_dump_bram_data(u32 start_addr, u32 word_count);
 
-
-void pl_set_mosi_channel_sequence(void);
+// COPI command management - NEW SECTION
 void pl_set_copi_commands(const u16 copi_array[35]);
+int pl_set_copi_commands_safe(const u16 copi_array[35], const char* sequence_name);
+
+// COPI sequence selection functions - NEW
+void pl_set_convert_sequence(void);
+void pl_set_initialization_sequence(void);
+void pl_set_cable_length_sequence(void);
+void pl_set_test_pattern_sequence(void);
 
 extern const u16 convert_cmd_sequence[35];
 extern const u16 initialization_cmd_sequence[35];

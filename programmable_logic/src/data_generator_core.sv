@@ -15,7 +15,7 @@ module data_generator_core (
     
     // Control and status interfaces
     input  logic [32*22-1:0] ctrl_regs_pl,
-    output logic [32*6-1:0]  status_regs_pl,  // Only 6 registers - wrapper adds 7th
+    output logic [32*10-1:0]  status_regs_pl,  // Only 10 registers, including mirroring 4 control - wrapper adds 11th
     
     // FIFO interface - simple and clean
     output logic        fifo_write_en,
@@ -60,10 +60,10 @@ logic [31:0] cipo0_data [0:34];  // CIPO0 line, register A (low 16 bits) and B (
 logic [31:0] cipo1_data [0:34];  // CIPO1 line, register A
 
 // Registers for COPI data from COPI 0 and COPI 1
-logic [73:0] cipo0_4x_oversampled;
-logic [73:0] cipo1_4x_oversampled_oversampled;
-logic [31:0] cipo0_phase_selected;
-logic [31:0] cipo1_phase_selected;
+reg [73:0] cipo0_4x_oversampled;
+reg [73:0] cipo1_4x_oversampled;
+reg [31:0] cipo0_phase_selected;
+reg [31:0] cipo1_phase_selected;
 
 // Instantiate phase selector modules that correct for COPI delay because of long cable length
 CIPO_combined_phase_selector cipo0_selector(
@@ -330,6 +330,11 @@ assign status_regs_pl[2*32 +: 32] = {26'd0, cycle_counter};
 assign status_regs_pl[3*32 +: 32] = packets_sent;
 assign status_regs_pl[4*32 +: 32] = timestamp[31:0];
 assign status_regs_pl[5*32 +: 32] = timestamp[63:32];
-// Status register 6 will be added by wrapper
+assign status_regs_pl[6*32 +: 32] = ctrl_regs_pl[0*32 +: 32];
+assign status_regs_pl[7*32 +: 32] = ctrl_regs_pl[1*32 +: 32];
+assign status_regs_pl[8*32 +: 32] = ctrl_regs_pl[2*32 +: 32];
+assign status_regs_pl[9*32 +: 32] = ctrl_regs_pl[3*32 +: 32];
+
+// Status register 11 will be added by wrapper
 
 endmodule
