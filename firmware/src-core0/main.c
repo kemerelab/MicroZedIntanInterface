@@ -244,6 +244,7 @@ int main() {
     // ========================================================================
     // NOTE: This applies to 1M of memory (see TRM - UG585)
     Xil_SetTlbAttributes(SHARED_MEM_BASE, NORM_NONCACHE_SHARED); // Critical for coherency!
+    // Xil_SetTlbAttributes(PL_CTRL_BASE_ADDR, NORM_NONCACHE_SHARED);
     // Prepare for second core by initializing shared structures
     init_print_buffer();
     memset((void *)command_flags, 0, sizeof(command_flags_t));
@@ -310,7 +311,7 @@ int main() {
         
         if (stream_enabled) {
             // Process all available packets with direct BRAM access and UDP transmission
-            while (packets_available() > 1) {  // Keep 1 packet buffer for safety
+            while (packets_available() > 0) {  // Keep 1 packet buffer for safety
                 process_packet_from_bram();
                 /*
                 if (!process_packet_from_bram()) {
