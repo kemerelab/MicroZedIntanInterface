@@ -8,7 +8,7 @@
 #include <xil_types.h>
 #include <xil_mmu.h>
 
-#define MAX_PRINT_ENTRIES 16
+#define MAX_PRINT_ENTRIES 64
 #define PRINT_MSG_SIZE 256
 // #define SHARED_MEM_BASE 0xFFFF0000UL
 #define SHARED_MEM_BASE 0x3F000000UL
@@ -17,7 +17,7 @@
 
 typedef struct {
     char message[PRINT_MSG_SIZE];
-    volatile uint32_t valid;
+    volatile uint32_t data_present;
     volatile uint32_t length;
 } print_entry_t;
 

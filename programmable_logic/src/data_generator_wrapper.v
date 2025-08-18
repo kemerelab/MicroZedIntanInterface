@@ -19,7 +19,7 @@ module data_generator #(
     
     // Control and status interfaces
     input  wire [32*22-1:0] ctrl_regs_pl,
-    output wire [32*7-1:0]  status_regs_pl,
+    output wire [32*11-1:0]  status_regs_pl,
     
     // BRAM Port A interface (32-bit)
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA CLK" *)
@@ -37,25 +37,23 @@ module data_generator #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
     output wire [3:0]      bram_we,
     
+    
     // Serial interface signals
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CSN DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
     output wire            csn,         // Chip select (active low)
     
-    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 SCLK CLK" *)
-    (* X_INTERFACE_PARAMETER = "FREQ_HZ 1312500" *)
-    output wire            sclk,        // Serial clock (84MHz/64 = ~1.3MHz)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi sclk" *)
+    output wire            sclk,        // Serial clock (84MHz/4 = 24MHz)
     
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 COPI DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi copi" *)
     output wire            copi,         // Controller Out, Peripheral In
     
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CIPO0 DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi cipo0" *)
     input  wire        cipo0,      // Controller In, Peripheral Out 0
 
-    (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 CIPO1 DATA" *)
-    (* X_INTERFACE_PARAMETER = "LAYERED_METADATA undef" *)
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi cipo1" *)
+    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF intan_spi, ASSOCIATED_RESET rst_n, ASSOCIATED_CLKEN clk" *)
     input  wire        cipo1       // Controller In, Peripheral Out 1
 
 );
@@ -82,14 +80,14 @@ module data_generator #(
     wire [13:0] current_bram_address;
     
     // Data generator status (only 6 registers - wrapper adds 7th)
-    wire [32*6-1:0] data_gen_status;
+    wire [32*10-1:0] data_gen_status;
 
     // Instantiate the data generator core
     data_generator_core data_gen_inst (
         .clk(clk),
         .rstn(rstn),
         .ctrl_regs_pl(ctrl_regs_pl),
-        .status_regs_pl(data_gen_status),  // Only 6 registers
+        .status_regs_pl(data_gen_status),  // Only 10 registers
         
         // FIFO interface
         .fifo_write_en(fifo_write_en),
@@ -139,6 +137,11 @@ module data_generator #(
     assign status_regs_pl[3*32 +: 32] = data_gen_status[3*32 +: 32];  // Generator status 3
     assign status_regs_pl[4*32 +: 32] = data_gen_status[4*32 +: 32];  // Generator status 4
     assign status_regs_pl[5*32 +: 32] = data_gen_status[5*32 +: 32];  // Generator status 5
-    assign status_regs_pl[6*32 +: 32] = {9'd0, fifo_count, current_bram_address}; // FIFO + BRAM status
+    assign status_regs_pl[6*32 +: 32] = data_gen_status[6*32 +: 32];  // Generator status 5
+    assign status_regs_pl[7*32 +: 32] = data_gen_status[7*32 +: 32];  // Generator status 5
+    assign status_regs_pl[8*32 +: 32] = data_gen_status[8*32 +: 32];  // Generator status 5
+    assign status_regs_pl[9*32 +: 32] = data_gen_status[9*32 +: 32];  // Generator status 5
+
+    assign status_regs_pl[10*32 +: 32] = {9'd0, fifo_count, current_bram_address}; // FIFO + BRAM status
 
 endmodule

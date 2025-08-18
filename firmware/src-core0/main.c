@@ -262,6 +262,7 @@ int main() {
     isb();  // Instruction Synchronization Barrier
     // ========================================================================
 
+    xil_printf("Kemere Lab Intan Interface v1.0.0.0\n\r\n\r\n\r");
 
     // Initialize network
     IP4_ADDR(&ipaddr, 192, 168, 18, 10);
@@ -281,6 +282,7 @@ int main() {
     xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
     sev(); // Send event to wake up ARM1
 
+    usleep(5000);
 
     send_message("Debug server up and running. \r\n");
     send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));

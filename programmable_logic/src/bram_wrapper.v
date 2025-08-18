@@ -23,6 +23,8 @@ module simple_dual_port_bram_wrapper #(
     
     // Port B - Read Only (AXI interface)
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB CLK" *)
+    // We're actually read only, but AXI block expects read write. Oops!
+    (* X_INTERFACE_PARAMETER = "MASTER_TYPE BRAM_CTRL,MEM_SIZE 65536,MEM_WIDTH 32,MEM_ECC NONE,READ_WRITE_MODE READ_WRITE" *)
     input  wire                    portb_clk,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB RST" *)
     input  wire                    portb_rst,

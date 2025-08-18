@@ -15,7 +15,7 @@ module data_generator_core (
     
     // Control and status interfaces
     input  logic [32*22-1:0] ctrl_regs_pl,
-    output logic [32*6-1:0]  status_regs_pl,  // Only 6 registers - wrapper adds 7th
+    output logic [32*10-1:0]  status_regs_pl,  // Only 10 registers, including mirroring 4 control - wrapper adds 11th
     
     // FIFO interface - simple and clean
     output logic        fifo_write_en,
@@ -37,9 +37,13 @@ logic reset_timestamp     = ctrl_regs_pl[0*32 + 1];
 // Loop count: number of 35-cycle frames to run (0 = infinite)
 logic [31:0] loop_count = ctrl_regs_pl[1*32 +: 32];
 
+logic [3:0] phase0 = ctrl_regs_pl[2*32 + 3 : 2*32 + 0]; // Cable length control word for CIPO0
+logic [3:0] phase1 = ctrl_regs_pl[2*32 + 7 : 2*32 + 4]; // Cable length control word for CIPO1
+logic debug_mode = ctrl_regs_pl[2*32 + 8]; // Send dummy data rather than real CIPO serial input
+
 // Reserved control registers for future use
-logic [31:0] ctrl_reg_2 = ctrl_regs_pl[2*32 +: 32];  // Reserved for future control
 logic [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
+
 
 // Extract COPI message words from the last 18 registers (36 x 16-bit words)
 logic [15:0] copi_words [0:35];
@@ -52,10 +56,28 @@ generate
 endgenerate
 
 // CIPO received data storage (4 separate 16-bit registers per cycle)
-logic [15:0] cipo0a_data [0:34];  // CIPO0 line, register A
-logic [15:0] cipo0b_data [0:34];  // CIPO0 line, register B  
-logic [15:0] cipo1a_data [0:34];  // CIPO1 line, register A
-logic [15:0] cipo1b_data [0:34];  // CIPO1 line, register B
+logic [31:0] cipo0_data [0:34];  // CIPO0 line, register A (low 16 bits) and B (upper 16 bits)
+logic [31:0] cipo1_data [0:34];  // CIPO1 line, register A
+
+// Registers for COPI data from COPI 0 and COPI 1
+reg [73:0] cipo0_4x_oversampled;
+reg [73:0] cipo1_4x_oversampled;
+reg [31:0] cipo0_phase_selected;
+reg [31:0] cipo1_phase_selected;
+
+// Instantiate phase selector modules that correct for COPI delay because of long cable length
+CIPO_combined_phase_selector cipo0_selector(
+    .phase_select(phase0),
+    .CIPO4x(cipo0_4x_oversampled),
+    .CIPO(cipo0_phase_selected)
+);
+CIPO_combined_phase_selector cipo1_selector(
+    .phase_select(phase1),
+    .CIPO4x(cipo1_4x_oversampled),
+    .CIPO(cipo1_phase_selected)
+);
+
+
 
 // Control counters
 logic [6:0] state_counter;
@@ -69,6 +91,7 @@ logic [63:0] timestamp;
 // Status tracking
 logic [31:0] packets_sent;
 logic        transmission_active;
+logic        loop_limit_reached;
 logic [31:0] loop_counter;
 
 // Dummy data for testing
@@ -84,7 +107,6 @@ end
 logic is_last_state = (state_counter == 7'd79);
 logic is_first_cycle = (cycle_counter == 6'd0);
 logic is_last_cycle = (cycle_counter == 6'd34);
-logic loop_limit_reached = (loop_count != 32'd0) && (loop_counter >= loop_count);
 
 // State machine and control logic 
 always_ff @(posedge clk) begin
@@ -93,7 +115,8 @@ always_ff @(posedge clk) begin
         cycle_counter <= 6'd0;
         timestamp <= 64'd0;
         transmission_active <= 1'b0;
-        loop_counter <= 32'd0;
+        loop_limit_reached <= 1'b0;
+        loop_counter <= 32'd1; // 1 indexed
     end else begin        
         // State machine goes from 0 to 79, then repeats
         if (is_last_state) begin
@@ -104,17 +127,27 @@ always_ff @(posedge clk) begin
                 if (!enable_transmission && reset_timestamp) begin
                     timestamp <= 64'd0;
                 end else begin
-                    timestamp <= timestamp + 1;
+                    timestamp <= timestamp + 1; // timestamp increments whether transmitting or not
+                end
+
+                if (!enable_transmission) begin // either this just happened or is still true
+                    transmission_active <= 1'b0;
+                    loop_limit_reached <= 1'b0; 
                 end
 
                 if (transmission_active) begin
+                    if (loop_limit_reached) begin
+                        transmission_active <= 1'b0;
+                    end
                     loop_counter <= loop_counter + 1;
-                end
+                    loop_limit_reached <= (loop_count != 32'd0) && (loop_counter >= loop_count);
 
-                if (enable_transmission && !loop_limit_reached) begin
-                    transmission_active <= 1'b1;
-                end else begin
-                    transmission_active <= 1'b0;
+                end else begin // transmission is not currently active
+                    if (enable_transmission && !loop_limit_reached) begin
+                        loop_counter <= 32'd1;  // Reset when starting new transmission
+                        loop_limit_reached <= (loop_count != 32'd0) && (loop_count <= 32'd1); // Catch the tricky single transmission case
+                        transmission_active <= 1'b1;
+                    end
                 end
 
             end else begin
@@ -125,6 +158,7 @@ always_ff @(posedge clk) begin
         end
     end
 end
+
 
 /*
 Complete Serial Protocol Timing (80-state machine):
@@ -173,7 +207,7 @@ Key Timing:
 - Inactive period: States 66-79 (14 states)
 */
 
-// Serial interface control - CSn, SCLK, and COPI generation
+// Serial interface control - CSn, SCLK, and COPI generation 
 always_ff @(posedge clk) begin
     if (!rstn) begin
         csn <= 1'b1;           // Default high (inactive)
@@ -200,10 +234,11 @@ always_ff @(posedge clk) begin
             // COPI data transmission - MSB first, set on states 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60
             // Uses copi_words[cycle_counter] as the source for each cycle's transmission  
             // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
-            if ((state_counter % 7'd4 == 7'd0) && (state_counter <= 7'd60)) begin
+            if  (state_counter <= 7'd63) begin //removed part of conditional
                 logic [3:0] bit_index = ~state_counter[5:2];  // MSB first: ~0=15, ~1=14, ..., ~15=0
                 copi <= copi_words[cycle_counter][bit_index];
             end
+            
         end
     end
 end
@@ -213,31 +248,18 @@ always_ff @(posedge clk) begin
     if (!rstn) begin
         // Reset all received data
         for (int j = 0; j < 35; j++) begin
-            cipo0a_data[j] <= 16'h0;
-            cipo0b_data[j] <= 16'h0;
-            cipo1a_data[j] <= 16'h0;
-            cipo1b_data[j] <= 16'h0;
+            cipo0_data[j] <= 32'h0;
+            cipo1_data[j] <= 32'h0;
         end
+        cipo0_4x_oversampled <= 74'h0;
+        cipo1_4x_oversampled <= 74'h0;
     end else begin
-        if (transmission_active && (state_counter <= 7'd65)) begin
-            // Sample CIPO A registers on rising edges (states 2,6,10,14... every 4 states starting at 2)
-            // Sample CIPO B registers 2 states later (states 4,8,12,16... every 4 states starting at 4)
-            
-            // Check if this is a CIPO A sampling state (2,6,10,14,18,22,26,30,34,38,42,46,50,54,58,62)
-            if ((state_counter >= 7'd2) && ((state_counter - 7'd2) % 7'd4 == 7'd0) && (state_counter <= 7'd62)) begin
-                // Calculate which bit position (15 down to 0)
-                logic [3:0] bit_index = 15 - ((state_counter - 7'd2) / 7'd4);
-                cipo0a_data[cycle_counter][bit_index] <= cipo0;
-                cipo1a_data[cycle_counter][bit_index] <= cipo1;
-            end
-            
-            // Check if this is a CIPO B sampling state (4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64)
-            if ((state_counter >= 7'd4) && ((state_counter - 7'd4) % 7'd4 == 7'd0) && (state_counter <= 7'd64)) begin
-                // Calculate which bit position (15 down to 0)
-                logic [3:0] bit_index = 15 - ((state_counter - 7'd4) / 7'd4);
-                cipo0b_data[cycle_counter][bit_index] <= cipo0;
-                cipo1b_data[cycle_counter][bit_index] <= cipo1;
-            end
+        if (transmission_active && (state_counter >= 7'd2) && (state_counter <= 75)) begin
+            cipo0_4x_oversampled[state_counter - 2] <= cipo0; // Latch data into the phase selector input
+            cipo1_4x_oversampled[state_counter - 2] <= cipo1;
+        end else if(transmission_active && state_counter == 7'd76) begin
+            cipo0_data[cycle_counter] <= cipo0_phase_selected; // Get the phase selector output
+            cipo1_data[cycle_counter] <= cipo1_phase_selected;
         end
     end
 end
@@ -266,8 +288,8 @@ always_ff @(posedge clk) begin
                     endcase
                 end
             end 
-            
-            if ( (state_counter inside {7'd4, 7'd5, 7'd6, 7'd7})) begin
+            if(debug_mode) begin
+                if ( (state_counter inside {7'd4, 7'd5, 7'd6, 7'd7})) begin
             // Data writes (every cycle)
                 fifo_write_en <= 1'b1;
                 case (state_counter)
@@ -291,8 +313,18 @@ always_ff @(posedge clk) begin
                     7'd7: fifo_write_data <= {16'h0007, cycle_counter, 10'h000};
                     default: fifo_write_data <= 32'h0;
                 endcase
+                end
+            end else begin
+                if(state_counter inside {7'd77, 7'd78}) begin
+                fifo_write_en <= 1'b1;
+                case (state_counter)
+                    7'd78: fifo_write_data <= cipo0_data[cycle_counter];
+                    7'd79: fifo_write_data <= cipo1_data[cycle_counter];
+                    default: fifo_write_data <= 32'h0;
+                endcase
+                end
             end
-                
+                    
             if (is_last_cycle) begin
                 if (is_last_state) begin
                     packets_sent <= packets_sent + 1;
@@ -310,6 +342,11 @@ assign status_regs_pl[2*32 +: 32] = {26'd0, cycle_counter};
 assign status_regs_pl[3*32 +: 32] = packets_sent;
 assign status_regs_pl[4*32 +: 32] = timestamp[31:0];
 assign status_regs_pl[5*32 +: 32] = timestamp[63:32];
-// Status register 6 will be added by wrapper
+assign status_regs_pl[6*32 +: 32] = ctrl_regs_pl[0*32 +: 32];
+assign status_regs_pl[7*32 +: 32] = ctrl_regs_pl[1*32 +: 32];
+assign status_regs_pl[8*32 +: 32] = ctrl_regs_pl[2*32 +: 32];
+assign status_regs_pl[9*32 +: 32] = ctrl_regs_pl[3*32 +: 32];
+
+// Status register 11 will be added by wrapper
 
 endmodule

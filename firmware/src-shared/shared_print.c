@@ -11,7 +11,8 @@ static int serial_cmd_index = 0;
 
 volatile command_flags_t *command_flags = (volatile command_flags_t *)SHARED_MEM_BASE;
 #define ALIGN4(x) (((x) + 3) & ~0x3)  // align to next multiple of 4
-#define PRINT_BUFFER_ADDRESS sizeof(SHARED_MEM_BASE + ALIGN4(sizeof(command_flags_t)))
+// #define PRINT_BUFFER_ADDRESS sizeof(SHARED_MEM_BASE + ALIGN4(sizeof(command_flags_t)))
+#define PRINT_BUFFER_ADDRESS (SHARED_MEM_BASE + ALIGN4(sizeof(command_flags_t)))
 
 volatile print_buffer_t *print_buffer = (volatile print_buffer_t*)PRINT_BUFFER_ADDRESS;
 void init_command_flags(void) {
@@ -29,7 +30,8 @@ void init_command_flags(void) {
 void check_serial_input(void) {
     if((command_flags->debug_debouncer == 1) && (command_flags->lock == 0)) {
         command_flags->debug_debouncer = 0; // Reset debouncer
-        send_message("debug> ");
+        // send_message("debug> ");
+        xil_printf("debug> ");
     }
     // Check if UART has data available
     if (XUartPs_IsReceiveData(STDIN_BASEADDRESS)) {
@@ -131,7 +133,7 @@ void init_print_buffer(void) {
         print_buffer->write_idx = 0;
         print_buffer->read_idx = 0;
         for (int i = 0; i < MAX_PRINT_ENTRIES; i++) {
-            print_buffer->entries[i].valid = 0; // Clear valid flags
+            print_buffer->entries[i].data_present = 0; // Clear data_present flags
         }
         print_buffer->initialized = 1;
         xil_printf("Shared print buffer initialized.\r\n");
@@ -157,9 +159,12 @@ void send_message(const char *format, ...) {
     if (len <= 0) return; // Handle empty or error cases
     buffer[PRINT_MSG_SIZE - 1] = '\0'; // Ensure null termination
 
+
+    // TODO: This feels very problematic if we're in the middle of receiving data, we could have a 10 ms timeout?!
     // Wait if the buffer is full, with a timeout to prevent deadlock
-    int timeout = 10000;
-    while (is_buffer_full(print_buffer) && timeout-- > 0) {
+    int timeout = 100;
+    uint32_t write_idx = print_buffer->write_idx;
+    while ((print_buffer->entries[write_idx].data_present == 1) && timeout -- > 0) { // Someone already wrote to this buffer!
         usleep(100); 
     }
 
@@ -167,10 +172,10 @@ void send_message(const char *format, ...) {
         return;
     }
 
-    uint32_t write_idx = print_buffer->write_idx;
     strcpy(print_buffer->entries[write_idx].message, buffer);
     print_buffer->entries[write_idx].length = len;
-    print_buffer->entries[write_idx].valid = 1;
+    dsb();  // Data Synchronization Barrier - make sure we write the message before we mark the buffer as ready
+    print_buffer->entries[write_idx].data_present = 1;
     print_buffer->write_idx = (write_idx + 1) % MAX_PRINT_ENTRIES;
 }
 
@@ -180,14 +185,14 @@ void send_message(const char *format, ...) {
 void print_handler_loop(void) {
     xil_printf("Starting print_handler_loop.\r\n");
     while (1) {
-        check_serial_input();
-        if (!is_buffer_empty(print_buffer)) {
-            uint32_t read_idx = print_buffer->read_idx;
-            if (print_buffer->entries[read_idx].valid) {
-                xil_printf("%s", print_buffer->entries[read_idx].message);
-                print_buffer->entries[read_idx].valid = 0;
-                print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
-            }
+        //check_serial_input();
+        uint32_t read_idx = print_buffer->read_idx;
+        if (print_buffer->entries[read_idx].data_present) {
+            xil_printf("> %s", print_buffer->entries[read_idx].message);
+            dsb();  // Data Synchronization Barrier - make sure we get the message before we mark the buffer as empty
+            print_buffer->entries[read_idx].data_present = 0;
+            print_buffer->read_idx = (read_idx + 1) % MAX_PRINT_ENTRIES;
+            // xil_printf("After update %d %d\r\n", print_buffer->write_idx, print_buffer->read_idx);
         }
     }
 }

@@ -15,7 +15,7 @@ module led_status_controller #(
     input  wire        rstn,
     
     // Status register input (7 registers from data generator)
-    input  wire [32*7-1:0] status_regs_pl,
+    input  wire [32*11-1:0] status_regs_pl,
     
     // LED outputs
     (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 LED0 DATA" *)

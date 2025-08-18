@@ -11,9 +11,11 @@
 
 int main() {
 
-    // Xil_SetTlbAttributes(SHARED_MEM_BASE, NORM_NONCACHE_SHARED); // Critical for coherency!
+    Xil_SetTlbAttributes(SHARED_MEM_BASE, NORM_NONCACHE_SHARED); // Critical for coherency!
+    // The claim was that this could just run on one core, but it really seems to need to be on both!?
 
     init_platform(); // Initialize platform for Core 1
+    
 
     xil_printf("Core 1 awake!!\r\n");
 

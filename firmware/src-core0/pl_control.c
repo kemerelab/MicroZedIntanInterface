@@ -41,6 +41,32 @@ void pl_set_loop_count(u32_t loop_count) {
     send_message("PL loop count set to %u\r\n", loop_count);
 }
 
+
+void pl_set_phase_select(int phase0, int phase1) {
+    u32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
+    
+    ctrl_reg_2 &= ~(CTRL_PHASE0_MASK | CTRL_PHASE1_MASK); // Clear existing phase bits
+    
+    ctrl_reg_2 |= ((phase0 & 0xF) << 0); // Set phase0 bits
+    ctrl_reg_2 |= ((phase1 & 0xF) << 4);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
+    send_message("PL phase select set to phase0=%d, phase1=%d\r\n", phase0, phase1);
+}
+
+void pl_set_debug_mode(int enable) {
+    u32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
+    
+    if (enable) {
+        ctrl_reg_2 |= CTRL_DEBUG_MODE;
+        send_message("PL debug mode ENABLED\r\n");
+    } else {
+        ctrl_reg_2 &= ~CTRL_DEBUG_MODE;
+        send_message("PL debug mode DISABLED\r\n");
+    }
+    
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
+}
+
 // ============================================================================
 // PL STATUS READING FUNCTIONS
 // ============================================================================
@@ -66,19 +92,44 @@ int pl_is_loop_limit_reached(void) {
 }
 
 u32 pl_get_bram_write_address(void) {
-    u32_t status6 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_6_OFFSET);
-    return status6 & 0x3FFF;  // Extract 14-bit BRAM address (0 to 16383)
+    u32_t status10 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET);  // Updated offset
+    return status10 & 0x3FFF;  // Extract 14-bit BRAM address (0 to 16383)
 }
 
-// Get FIFO count from status register 6
 static u32 pl_get_fifo_count(void) {
-    u32_t status6 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_6_OFFSET);
-    return (status6 >> 14) & 0x1FF;  // Extract 9-bit FIFO count
+    u32_t status10 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET);  // Updated offset
+    return (status10 >> 14) & 0x1FF;  // Extract 9-bit FIFO count
 }
+
+// ============================================================================
+// CONTROL REGISTER READBACK FUNCTIONS (from mirrored status registers)
+// ============================================================================
+
+u32_t pl_get_current_loop_count(void) {
+    return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_7_OFFSET);
+}
+
+int pl_get_current_phase_select(int *phase0, int *phase1) {
+    u32_t status8 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_8_OFFSET);
+    *phase0 = (status8 & CTRL_PHASE0_MASK) >> 0;  // Bits [3:0]
+    *phase1 = (status8 & CTRL_PHASE1_MASK) >> 4;  // Bits [7:4]
+    return (status8 & CTRL_DEBUG_MODE) ? 1 : 0;   // Return debug mode status
+}
+
+int pl_get_current_debug_mode(void) {
+    u32_t status8 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_8_OFFSET);
+    return (status8 & CTRL_DEBUG_MODE) ? 1 : 0;
+}
+
+u32_t pl_get_current_control_flags(void) {
+    return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_6_OFFSET);
+}
+
 
 // ============================================================================
 // STATUS DISPLAY FUNCTIONS
 // ============================================================================
+
 
 void pl_print_status(void) {
     u32_t status0 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_0_OFFSET);
@@ -95,8 +146,32 @@ void pl_print_status(void) {
     send_message("Timestamp: %llu\r\n", pl_get_timestamp());
     send_message("BRAM write address: %u\r\n", pl_get_bram_write_address());
     send_message("FIFO count: %u\r\n", pl_get_fifo_count());
-    send_message("==================\r\n");
+
+    
+    u32_t status6 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_6_OFFSET);
+    u32_t status7 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_7_OFFSET);
+    u32_t status8 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_8_OFFSET);
+    u32_t status9 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_9_OFFSET);
+    send_message("Mirroed Control flags 0: \r\n0x%08X\r\n0x%08X\r\n0x%08X\r\n0x%08X\r\n", status6, status7, status8, status9);
+
+
+    // NEW: Show current control settings from mirrored status registers
+    send_message("=== CURRENT CONTROL SETTINGS ===\r\n");
+    send_message("Loop count: %u\r\n", pl_get_current_loop_count());
+    
+    int phase0, phase1;
+    int debug_mode = pl_get_current_phase_select(&phase0, &phase1);
+    send_message("Phase select: CIPO0=%d, CIPO1=%d\r\n", phase0, phase1);
+    send_message("Debug mode: %s\r\n", debug_mode ? "ENABLED (dummy data)" : "DISABLED (real CIPO)");
+    
+    u32_t ctrl_flags = pl_get_current_control_flags();
+    send_message("Control flags: 0x%08X\r\n", ctrl_flags);
+    send_message("  Enable transmission: %s\r\n", (ctrl_flags & CTRL_ENABLE_TRANSMISSION) ? "SET" : "CLEAR");
+    send_message("  Reset timestamp: %s\r\n", (ctrl_flags & CTRL_RESET_TIMESTAMP) ? "SET" : "CLEAR");
+    
+    send_message("================================\r\n");
 }
+
 
 
 // Simple BRAM dump for debugging
@@ -142,13 +217,62 @@ void pl_set_copi_commands(const u16 copi_array[35]) {
     send_message("MOSI commands updated\r\n");
 }
 
+
+// ============================================================================
+// SAFE COPI COMMAND UPDATING
+// ============================================================================
+
+// Safely update COPI commands only when transmission is disabled
+int pl_set_copi_commands_safe(const u16 copi_array[35], const char* sequence_name) {
+    // Check if transmission is currently active
+    if (pl_is_transmission_active()) {
+        send_message("ERROR: Cannot update COPI commands while transmission is active\r\n");
+        send_message("       Stop transmission first with 'stop' command\r\n");
+        return 0;  // Failure
+    }
+    
+    // Safe to update - transmission is stopped
+    pl_set_copi_commands(copi_array);
+    send_message("COPI commands set to: %s\r\n", sequence_name);
+    return 1;  // Success
+}
+
+// ============================================================================
+// COPI SEQUENCE SELECTION FUNCTIONS
+// ============================================================================
+
+void pl_set_convert_sequence(void) {
+    if (pl_set_copi_commands_safe(convert_cmd_sequence, "CONVERT sequence (channels 0-31)")) {
+        send_message("Ready for normal data acquisition from channels 0-31\r\n");
+    }
+}
+
+void pl_set_initialization_sequence(void) {
+    if (pl_set_copi_commands_safe(initialization_cmd_sequence, "INITIALIZATION sequence")) {
+        send_message("Ready for chip initialization - run this before first data acquisition\r\n");
+    }
+}
+
+void pl_set_cable_length_sequence(void) {
+    if (pl_set_copi_commands_safe(cable_length_cmd_sequence, "CABLE LENGTH test sequence")) {
+        send_message("Ready for cable length calibration - look for 'INTAN' patterns in data\r\n");
+    }
+}
+
+void pl_set_test_pattern_sequence(void) {
+    if (pl_set_copi_commands_safe(mosi_test_pattern, "TEST PATTERN sequence")) {
+        send_message("Ready for COPI test pattern - incrementing values 0x0000-0x0022\r\n");
+    }
+}
+
+
 // ============================================================================
 // PREDEFINED MOSI COMMAND ARRAYS
 // ============================================================================
 // Notes:
 // Register WRITE is 10AA_AAAA VVVV_VVVV
 // Register READ is  11AA_AAAA 0000_0000
-// Convert is 00CC_CCCC 0000_000X, where X=1 is part of the fas-settle routine
+// Convert is 00CC_CCCC 0000_000X, where X=1 is part of the fast-settle routine
 
 
 // Channel conversion command sequence
@@ -193,11 +317,11 @@ const u16 initialization_cmd_sequence[35] = {
 // Channel conversion command sequence
 const u16 cable_length_cmd_sequence[35] = {
     0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // "Dummy reads" register 63 (chip id)   
-    0xA800, 0xA900, 0xAA00, 0xAB00, 0xAC00,  // Read registers 40-44 ("INTAN")
+    0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00,  // Read registers 40-44 ("INTAN")
     0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // "Dummy reads" register 63 (chip id)   
-    0xA800, 0xA900, 0xAA00, 0xAB00, 0xAC00,  // Read registers 40-44 ("INTAN")
+    0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00,  // Read registers 40-44 ("INTAN")
     0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // "Dummy reads" register 63 (chip id)   
-    0xA800, 0xA900, 0xAA00, 0xAB00, 0xAC00,  // Read registers 40-44 ("INTAN")
+    0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00,  // Read registers 40-44 ("INTAN")
     0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00   // "Dummy reads" register 63 (chip id)   
 };
 

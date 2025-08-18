@@ -10,6 +10,8 @@
 *.backup.jou
 *.backup.log
 
+vivado_project/
+
 # Vitis
 .clangd
 
@@ -22,6 +24,8 @@
 .Xil/
 *.tmp
 *.xpr           # Optional: track if you use GUI workflows
+
+vitis_project/
 
 # SDK and Petalinux (if used)
 .sdk/
