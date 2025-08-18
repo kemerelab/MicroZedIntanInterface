@@ -259,12 +259,12 @@ always_ff @(posedge clk) begin
             cipo1_4x_oversampled[state_counter - 2] <= cipo1;
         end else if(transmission_active && state_counter == 7'd76) begin
             cipo0_data[cycle_counter] <= cipo0_phase_selected; // Get the phase selector output
-            cipo1_data[cycle_counter] <= cipo1_phase_selected;
+            cipo1_data[cycle_counter] <= cipo1_phase_selected; // It's ready one clock cycle after being latched in
         end
     end
 end
 
-// Data generation logic - clean and focused
+// Data-to-BRAM processing
 always_ff @(posedge clk) begin
     if (!rstn) begin
         fifo_write_en <= 1'b0;
@@ -284,44 +284,41 @@ always_ff @(posedge clk) begin
                         7'd1: fifo_write_data <= MAGIC_NUMBER_HIGH;
                         7'd2: fifo_write_data <= timestamp[31:0];
                         7'd3: fifo_write_data <= timestamp[63:32];
-                        default: fifo_write_data <= 32'h0;
                     endcase
                 end
             end 
-            if(debug_mode) begin
-                if ( (state_counter inside {7'd4, 7'd5, 7'd6, 7'd7})) begin
-            // Data writes (every cycle)
-                fifo_write_en <= 1'b1;
-                case (state_counter)
-                    7'd4: begin
-                        case (cycle_counter)
-                            6'd0:  fifo_write_data <= {dummy_data[1], dummy_data[0]};
-                            6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
-                            6'd2:  fifo_write_data <= timestamp[31:0];
-                            default: fifo_write_data <= {cycle_counter, 6'h000, 6'h000, cycle_counter};
-                        endcase
-                    end
-                    7'd5: begin
-                        case (cycle_counter)
-                            6'd0:  fifo_write_data <= {dummy_data[3], dummy_data[2]};
-                            6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
-                            6'd2:  fifo_write_data <= timestamp[63:32];
-                            default: fifo_write_data <= {6'h000, cycle_counter, 6'h000, cycle_counter};
-                        endcase
-                    end
-                    7'd6: fifo_write_data <= {16'h0006, cycle_counter, 10'h000};
-                    7'd7: fifo_write_data <= {16'h0007, cycle_counter, 10'h000};
-                    default: fifo_write_data <= 32'h0;
-                endcase
+            if (!debug_mode) begin
+                if(state_counter inside {7'd77, 7'd78}) begin //
+                    fifo_write_en <= 1'b1;
+                    case (state_counter)
+                        7'd77: fifo_write_data <= cipo0_data[cycle_counter];
+                        7'd78: fifo_write_data <= cipo1_data[cycle_counter];
+                    endcase
                 end
             end else begin
-                if(state_counter inside {7'd77, 7'd78}) begin
-                fifo_write_en <= 1'b1;
-                case (state_counter)
-                    7'd78: fifo_write_data <= cipo0_data[cycle_counter];
-                    7'd79: fifo_write_data <= cipo1_data[cycle_counter];
-                    default: fifo_write_data <= 32'h0;
-                endcase
+                if ( (state_counter inside {7'd4, 7'd5, 7'd6, 7'd7})) begin
+                    // Data writes (every cycle)
+                    fifo_write_en <= 1'b1;
+                    case (state_counter)
+                        7'd4: begin
+                            case (cycle_counter)
+                                6'd0:  fifo_write_data <= {dummy_data[1], dummy_data[0]};
+                                6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
+                                6'd2:  fifo_write_data <= timestamp[31:0];
+                                default: fifo_write_data <= {cycle_counter, 6'h000, 6'h000, cycle_counter};
+                            endcase
+                        end
+                        7'd5: begin
+                            case (cycle_counter)
+                                6'd0:  fifo_write_data <= {dummy_data[3], dummy_data[2]};
+                                6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
+                                6'd2:  fifo_write_data <= timestamp[63:32];
+                                default: fifo_write_data <= {6'h000, cycle_counter, 6'h000, cycle_counter};
+                            endcase
+                        end
+                        7'd6: fifo_write_data <= {16'h0006, cycle_counter, 10'h000};
+                        7'd7: fifo_write_data <= {16'h0007, cycle_counter, 10'h000};
+                    endcase
                 end
             end
                     
