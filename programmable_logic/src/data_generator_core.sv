@@ -91,6 +91,7 @@ logic [63:0] timestamp;
 // Status tracking
 logic [31:0] packets_sent;
 logic        transmission_active;
+logic        loop_limit_reached;
 logic [31:0] loop_counter;
 
 // Dummy data for testing
@@ -106,7 +107,6 @@ end
 logic is_last_state = (state_counter == 7'd79);
 logic is_first_cycle = (cycle_counter == 6'd0);
 logic is_last_cycle = (cycle_counter == 6'd34);
-logic loop_limit_reached = (loop_count != 32'd0) && (loop_counter >= loop_count);
 
 // State machine and control logic 
 always_ff @(posedge clk) begin
@@ -115,7 +115,8 @@ always_ff @(posedge clk) begin
         cycle_counter <= 6'd0;
         timestamp <= 64'd0;
         transmission_active <= 1'b0;
-        loop_counter <= 32'd0;
+        loop_limit_reached <= 1'b0;
+        loop_counter <= 32'd1; // 1 indexed
     end else begin        
         // State machine goes from 0 to 79, then repeats
         if (is_last_state) begin
@@ -126,17 +127,27 @@ always_ff @(posedge clk) begin
                 if (!enable_transmission && reset_timestamp) begin
                     timestamp <= 64'd0;
                 end else begin
-                    timestamp <= timestamp + 1;
+                    timestamp <= timestamp + 1; // timestamp increments whether transmitting or not
+                end
+
+                if (!enable_transmission) begin // either this just happened or is still true
+                    transmission_active <= 1'b0;
+                    loop_limit_reached <= 1'b0; 
                 end
 
                 if (transmission_active) begin
+                    if (loop_limit_reached) begin
+                        transmission_active <= 1'b0;
+                    end
                     loop_counter <= loop_counter + 1;
-                end
+                    loop_limit_reached <= (loop_count != 32'd0) && (loop_counter >= loop_count);
 
-                if (enable_transmission && !loop_limit_reached) begin
-                    transmission_active <= 1'b1;
-                end else begin
-                    transmission_active <= 1'b0;
+                end else begin // transmission is not currently active
+                    if (enable_transmission && !loop_limit_reached) begin
+                        loop_counter <= 32'd1;  // Reset when starting new transmission
+                        loop_limit_reached <= (loop_count != 32'd0) && (loop_count <= 32'd1); // Catch the tricky single transmission case
+                        transmission_active <= 1'b1;
+                    end
                 end
 
             end else begin
@@ -147,6 +158,7 @@ always_ff @(posedge clk) begin
         end
     end
 end
+
 
 /*
 Complete Serial Protocol Timing (80-state machine):
