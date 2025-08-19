@@ -296,30 +296,38 @@ always_ff @(posedge clk) begin
                     endcase
                 end
             end else begin
-                if ( (state_counter inside {7'd4, 7'd5, 7'd6, 7'd7})) begin
-                    // Data writes (every cycle)
+                // Debug mode will now send same size as a single interface (two RHD2000 series chips on one cable)
+                if(state_counter inside {7'd77, 7'd78}) begin
                     fifo_write_en <= 1'b1;
                     case (state_counter)
-                        7'd4: begin
-                            case (cycle_counter)
-                                6'd0:  fifo_write_data <= {dummy_data[1], dummy_data[0]};
-                                6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
-                                6'd2:  fifo_write_data <= timestamp[31:0];
-                                default: fifo_write_data <= {cycle_counter, 6'h000, 6'h000, cycle_counter};
-                            endcase
-                        end
-                        7'd5: begin
-                            case (cycle_counter)
-                                6'd0:  fifo_write_data <= {dummy_data[3], dummy_data[2]};
-                                6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
-                                6'd2:  fifo_write_data <= timestamp[63:32];
-                                default: fifo_write_data <= {6'h000, cycle_counter, 6'h000, cycle_counter};
-                            endcase
-                        end
-                        7'd6: fifo_write_data <= {16'h0006, cycle_counter, 10'h000};
-                        7'd7: fifo_write_data <= {16'h0007, cycle_counter, 10'h000};
+                        7'd77: fifo_write_data <= {dummy_data[1], dummy_data[0]};
+                        7'd78: fifo_write_data <= {dummy_data[3], dummy_data[2]};
                     endcase
                 end
+                // if ( (state_counter inside {7'd4, 7'd5, 7'd6, 7'd7})) begin
+                //     // Data writes (every cycle)
+                //     fifo_write_en <= 1'b1;
+                //     case (state_counter)
+                //         7'd4: begin
+                //             case (cycle_counter)
+                //                 6'd0:  fifo_write_data <= {dummy_data[1], dummy_data[0]};
+                //                 6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
+                //                 6'd2:  fifo_write_data <= timestamp[31:0];
+                //                 default: fifo_write_data <= {cycle_counter, 6'h000, 6'h000, cycle_counter};
+                //             endcase
+                //         end
+                //         7'd5: begin
+                //             case (cycle_counter)
+                //                 6'd0:  fifo_write_data <= {dummy_data[3], dummy_data[2]};
+                //                 6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
+                //                 6'd2:  fifo_write_data <= timestamp[63:32];
+                //                 default: fifo_write_data <= {6'h000, cycle_counter, 6'h000, cycle_counter};
+                //             endcase
+                //         end
+                //         7'd6: fifo_write_data <= {16'h0006, cycle_counter, 10'h000};
+                //         7'd7: fifo_write_data <= {16'h0007, cycle_counter, 10'h000};
+                //     endcase
+                // end
             end
                     
             if (is_last_cycle) begin
