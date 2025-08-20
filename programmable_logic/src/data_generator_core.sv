@@ -59,13 +59,13 @@ endgenerate
 logic [31:0] cipo0_data [0:34];  // CIPO0 line, register A (low 16 bits) and B (upper 16 bits)
 logic [31:0] cipo1_data [0:34];  // CIPO1 line, register A
 
-// Registers for COPI data from COPI 0 and COPI 1
+// Registers for COPI data from CIPO 0 and CIPO 1
 reg [73:0] cipo0_4x_oversampled;
 reg [73:0] cipo1_4x_oversampled;
 reg [31:0] cipo0_phase_selected;
 reg [31:0] cipo1_phase_selected;
 
-// Instantiate phase selector modules that correct for COPI delay because of long cable length
+// Instantiate phase selector modules that correct for CIPO delay because of long cable length
 CIPO_combined_phase_selector cipo0_selector(
     .phase_select(phase0),
     .CIPO4x(cipo0_4x_oversampled),
@@ -163,10 +163,10 @@ end
 /*
 Complete Serial Protocol Timing (80-state machine):
 
-State 0:  CSn=0, SCLK=0, COPI=0 (default)
-State 1:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (setup bit 15)
-State 2:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (clock bit 15)
-State 3:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (hold)
+State 0:  CSn=0, SCLK=0, COPI=0 (default) [first of 35 cycles - fifo enqueue magic header LOW words]
+State 1:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (setup bit 15) [first of 35 cycles - fifo enqueue magic header HIGH words]
+State 2:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (clock bit 15) [first of 35 cycles - fifo enqueue timestamp LOW words]
+State 3:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (hold) [first of 35 cycles - fifo enqueue timestamp HIGH words]
 State 4:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (transition)
 State 5:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][14] (setup bit 14)
 State 6:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][14] (clock bit 14)
@@ -183,19 +183,19 @@ State 64: CSn=0, SCLK=0, COPI=copi_words[cycle_counter][0] (LAST FALLING EDGE)
 State 65: CSn=0, SCLK=0, COPI=copi_words[cycle_counter][0] (hold low)
 
 *** CSn GOES HIGH HERE ***
-State 66: CSn=1, SCLK=0, COPI=0 (inactive)
-State 67: CSn=1, SCLK=0, COPI=0 (inactive)
-State 68: CSn=1, SCLK=0, COPI=0 (inactive)
-State 69: CSn=1, SCLK=0, COPI=0 (inactive)
-State 70: CSn=1, SCLK=0, COPI=0 (inactive)
-State 71: CSn=1, SCLK=0, COPI=0 (inactive)
-State 72: CSn=1, SCLK=0, COPI=0 (inactive)
-State 73: CSn=1, SCLK=0, COPI=0 (inactive)
-State 74: CSn=1, SCLK=0, COPI=0 (inactive)
-State 75: CSn=1, SCLK=0, COPI=0 (inactive)
-State 76: CSn=1, SCLK=0, COPI=0 (inactive)
-State 77: CSn=1, SCLK=0, COPI=0 (inactive)
-State 78: CSn=1, SCLK=0, COPI=0 (inactive)
+State 66: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 67: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 68: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 69: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 70: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 71: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 72: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 73: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 74: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
+State 75: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO)  
+State 76: CSn=1, SCLK=0, COPI=0 (register buffer data from phase selector)
+State 77: CSn=1, SCLK=0, COPI=0 (inactive) [fifo enqueue 32b of CIPO0 data]
+State 78: CSn=1, SCLK=0, COPI=0 (inactive) [fifo enqueue 32b of CIPO1 data]
 State 79: CSn=1, SCLK=0, COPI=0 (inactive)
 
 Key Timing:
@@ -296,28 +296,12 @@ always_ff @(posedge clk) begin
                     endcase
                 end
             end else begin
-                if ( (state_counter inside {7'd4, 7'd5, 7'd6, 7'd7})) begin
-                    // Data writes (every cycle)
+                // Debug mode will now send same size as a single interface (two RHD2000 series chips on one cable)
+                if(state_counter inside {7'd77, 7'd78}) begin
                     fifo_write_en <= 1'b1;
                     case (state_counter)
-                        7'd4: begin
-                            case (cycle_counter)
-                                6'd0:  fifo_write_data <= {dummy_data[1], dummy_data[0]};
-                                6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
-                                6'd2:  fifo_write_data <= timestamp[31:0];
-                                default: fifo_write_data <= {cycle_counter, 6'h000, 6'h000, cycle_counter};
-                            endcase
-                        end
-                        7'd5: begin
-                            case (cycle_counter)
-                                6'd0:  fifo_write_data <= {dummy_data[3], dummy_data[2]};
-                                6'd1:  fifo_write_data <= {cycle_counter, 10'h000, cycle_counter, 10'h000};
-                                6'd2:  fifo_write_data <= timestamp[63:32];
-                                default: fifo_write_data <= {6'h000, cycle_counter, 6'h000, cycle_counter};
-                            endcase
-                        end
-                        7'd6: fifo_write_data <= {16'h0006, cycle_counter, 10'h000};
-                        7'd7: fifo_write_data <= {16'h0007, cycle_counter, 10'h000};
+                        7'd77: fifo_write_data <= {dummy_data[1], dummy_data[0]};
+                        7'd78: fifo_write_data <= {dummy_data[3], dummy_data[2]};
                     endcase
                 end
             end
