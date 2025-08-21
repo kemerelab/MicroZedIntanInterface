@@ -2,8 +2,8 @@
 // Verilog wrapper for Vivado compatibility
 module simple_dual_port_bram_wrapper #(
     parameter integer ADDR_WIDTH = 16,
-    parameter integer DATA_WIDTH = 32,
-    parameter integer DEPTH = 16384
+    parameter integer DATA_WIDTH = 64,
+    parameter integer DEPTH = 8192
 )(
     // Port A - Write Only (data generator)
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA CLK" *)
@@ -13,7 +13,7 @@ module simple_dual_port_bram_wrapper #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA EN" *)
     input  wire                    porta_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
-    input  wire [3:0]              porta_we,
+    input  wire [7:0]              porta_we,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA ADDR" *)
     input  wire [ADDR_WIDTH-1:0]   porta_addr,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA DIN" *)
@@ -24,14 +24,14 @@ module simple_dual_port_bram_wrapper #(
     // Port B - Read Only (AXI interface)
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB CLK" *)
     // We're actually read only, but AXI block expects read write. Oops!
-    (* X_INTERFACE_PARAMETER = "MASTER_TYPE BRAM_CTRL,MEM_SIZE 65536,MEM_WIDTH 32,MEM_ECC NONE,READ_WRITE_MODE READ_WRITE" *)
+    (* X_INTERFACE_PARAMETER = "MASTER_TYPE BRAM_CTRL,MEM_SIZE 65536,MEM_WIDTH 64,MEM_ECC NONE,READ_WRITE_MODE READ_WRITE" *)
     input  wire                    portb_clk,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB RST" *)
     input  wire                    portb_rst,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB EN" *)
     input  wire                    portb_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB WE" *)
-    input  wire [3:0]              portb_we,
+    input  wire [7:0]              portb_we,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB ADDR" *)
     input  wire [ADDR_WIDTH-1:0]   portb_addr,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB DIN" *)
