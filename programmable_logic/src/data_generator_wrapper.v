@@ -6,8 +6,8 @@
 module data_generator #(
     // BRAM configuration parameters
     parameter integer BRAM_ADDR_WIDTH = 16,        // Byte address width  
-    parameter integer BRAM_DATA_WIDTH = 32,        // Data width
-    parameter integer BRAM_DEPTH_WORDS = 16384,   // BRAM depth in words (64KB / 4 = 16K words)
+    parameter integer BRAM_DATA_WIDTH = 64,        // Data width
+    parameter integer BRAM_DEPTH_WORDS = 8192,   // BRAM depth in words (64KB / 8 = 8K words)
     parameter integer FIFO_DEPTH = 256            // FIFO depth (entries)
 )(
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK CLK" *)
@@ -35,7 +35,7 @@ module data_generator #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA EN" *)
     output wire            bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
-    output wire [3:0]      bram_we,
+    output wire [7:0]      bram_we,
     
     
     // Serial interface signals
@@ -74,10 +74,10 @@ module data_generator #(
     
     // FIFO interface signals
     wire        fifo_write_en;
-    wire [31:0] fifo_write_data;
+    wire [63:0] fifo_write_data;
     wire        fifo_full;
     wire [8:0]  fifo_count;
-    wire [13:0] current_bram_address;
+    wire [12:0] current_bram_address;
     
     // Data generator status (only 6 registers - wrapper adds 7th)
     wire [32*10-1:0] data_gen_status;

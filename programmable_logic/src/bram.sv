@@ -4,14 +4,14 @@
 
 module simple_dual_port_bram #(
     parameter int ADDR_WIDTH = 16,    // Byte address width
-    parameter int DATA_WIDTH = 32,    // Data width
-    parameter int DEPTH = 16384       // Memory depth (64KB / 4 bytes = 16K words)
+    parameter int DATA_WIDTH = 64,    // Data width
+    parameter int DEPTH = 8192       // Memory depth (64KB / 8 bytes = 8K words)
 )(
     // Port A - Write Only (for data generator)
     input  logic                    porta_clk,
     input  logic                    porta_rst,
     input  logic                    porta_en,
-    input  logic [3:0]              porta_we,
+    input  logic [7:0]              porta_we,
     input  logic [ADDR_WIDTH-1:0]   porta_addr,   // Byte address
     input  logic [DATA_WIDTH-1:0]   porta_din,
     output logic [DATA_WIDTH-1:0]   porta_dout,   // Not used (write-only)
@@ -20,7 +20,7 @@ module simple_dual_port_bram #(
     input  logic                    portb_clk,
     input  logic                    portb_rst,
     input  logic                    portb_en,
-    input  logic [3:0]              portb_we,     // Ignored (read-only)
+    input  logic [7:0]              portb_we,     // Ignored (read-only)
     input  logic [ADDR_WIDTH-1:0]   portb_addr,   // Byte address
     input  logic [DATA_WIDTH-1:0]   portb_din,    // Ignored (read-only)
     output logic [DATA_WIDTH-1:0]   portb_dout
@@ -30,8 +30,8 @@ module simple_dual_port_bram #(
 logic [DATA_WIDTH-1:0] memory [0:DEPTH-1];
 
 // Convert byte addresses to word addresses
-logic [$clog2(DEPTH)-1:0] porta_word_addr = porta_addr[ADDR_WIDTH-1:2];
-logic [$clog2(DEPTH)-1:0] portb_word_addr = portb_addr[ADDR_WIDTH-1:2];
+logic [$clog2(DEPTH)-1:0] porta_word_addr = porta_addr[ADDR_WIDTH-1:3];
+logic [$clog2(DEPTH)-1:0] portb_word_addr = portb_addr[ADDR_WIDTH-1:3];
 
 // Port A - Write Only (for data generator writes)  
 always_ff @(posedge porta_clk) begin
@@ -59,7 +59,7 @@ assign porta_dout = '0;
 // Initialize memory for testing (optional)
 initial begin
     for (int i = 0; i < DEPTH; i++) begin
-        memory[i] = i * 4;  // Each word contains its byte address
+        memory[i] = i * 8;  // Each word contains its byte address
     end
 end
 

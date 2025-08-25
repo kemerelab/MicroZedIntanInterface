@@ -19,7 +19,7 @@ module data_generator_core (
     
     // FIFO interface - simple and clean
     output logic        fifo_write_en,
-    output logic [31:0] fifo_write_data,
+    output logic [63:0] fifo_write_data,
     input  logic        fifo_full,
     input  logic [8:0]  fifo_count,
     
@@ -268,7 +268,7 @@ end
 always_ff @(posedge clk) begin
     if (!rstn) begin
         fifo_write_en <= 1'b0;
-        fifo_write_data <= 32'h0;
+        fifo_write_data <= 64'h0;
         packets_sent <= 32'd0;
     end else begin
         // Default: no FIFO write
@@ -276,32 +276,28 @@ always_ff @(posedge clk) begin
         
         if (transmission_active && !fifo_full) begin
             // Header writes (first cycle only)
-            if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3}) begin
+            if (state_counter inside {7'd0, 7'd1}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
                     case (state_counter)
-                        7'd0: fifo_write_data <= MAGIC_NUMBER_LOW;
-                        7'd1: fifo_write_data <= MAGIC_NUMBER_HIGH;
-                        7'd2: fifo_write_data <= timestamp[31:0];
-                        7'd3: fifo_write_data <= timestamp[63:32];
+                        7'd0: fifo_write_data <= {MAGIC_NUMBER_HIGH, MAGIC_NUMBER_LOW};
+                        7'd1: fifo_write_data <= timestamp;
                     endcase
                 end
             end 
             if (!debug_mode) begin
-                if(state_counter inside {7'd77, 7'd78}) begin //
+                if(state_counter inside {7'd77}) begin //
                     fifo_write_en <= 1'b1;
                     case (state_counter)
-                        7'd77: fifo_write_data <= cipo0_data[cycle_counter];
-                        7'd78: fifo_write_data <= cipo1_data[cycle_counter];
+                        7'd77: fifo_write_data <= {cipo1_data[cycle_counter], cipo0_data[cycle_counter]};
                     endcase
                 end
             end else begin
                 // Debug mode will now send same size as a single interface (two RHD2000 series chips on one cable)
-                if(state_counter inside {7'd77, 7'd78}) begin
+                if(state_counter inside {7'd77}) begin
                     fifo_write_en <= 1'b1;
                     case (state_counter)
-                        7'd77: fifo_write_data <= {dummy_data[1], dummy_data[0]};
-                        7'd78: fifo_write_data <= {dummy_data[3], dummy_data[2]};
+                        7'd77: fifo_write_data <= {dummy_data[3], dummy_data[2], dummy_data[1], dummy_data[0]};
                     endcase
                 end
             end
