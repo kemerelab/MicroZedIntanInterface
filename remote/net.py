@@ -13,6 +13,9 @@ MAGIC_NUMBER_HIGH = 0xCAFEBABE  # Upper 32 bits
 EXPECTED_PACKET_SIZE = 296      # 74 words * 4 bytes = 296 bytes
 WORDS_PER_PACKET = 74           # 4 header + (35 cycles * 2 data words)
 
+# Cable test globals
+cable_test_mode = False
+cable_test_packets_captured = 0
 class DataValidator:
     def __init__(self):
         self.last_timestamp = None
@@ -26,10 +29,40 @@ class DataValidator:
         self.last_packet_count = 0
         self.last_packet_raw = None  # Store raw bytes
         self.last_packet_words = None  # Store unpacked words
+
+    def start_cable_test_capture(self):
+        """Start capturing cable test packets"""
+        global cable_test_mode, cable_test_packets_captured
+        cable_test_mode = True
+        cable_test_packets_captured = 0
+        print("Starting cable test packet capture...")
         
     def validate_packet(self, data):
+        global cable_test_mode, cable_test_packets_captured
         self.packet_count += 1
         self.last_packet_raw = data  # Store raw packet data
+
+        # Handle cable test mode
+        if cable_test_mode:
+            if cable_test_packets_captured < 17:
+                # Process cable test packet
+                if len(data) == EXPECTED_PACKET_SIZE:
+                    words = struct.unpack('<74I', data)
+                    self.last_packet_words = words  # Store the words for hex command
+                    if cable_test_packets_captured == 0:
+                        print(f"Packet {cable_test_packets_captured + 1} (Init): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
+                    else:
+                        phase1 = cable_test_packets_captured - 1
+                        print(f"Packet {cable_test_packets_captured + 1} (Phase1={phase1}): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
+                cable_test_packets_captured += 1
+                
+                if cable_test_packets_captured >= 17:
+                    cable_test_mode = False
+                    print("Cable test capture complete.")
+                
+                return None  # Don't process as normal packet
+            else:
+                cable_test_mode = False
 
         if self.start_time is None:
             self.start_time = time.time()
@@ -201,6 +234,7 @@ def tcp_control():
         print(f"    init    - Set chip initialization sequence")
         print(f"    cable_test - Set cable length test sequence")
         print(f"    test_pattern - Set COPI test pattern")
+        print(f"    full_cable_test - Run automated cable test")
         print(f"  Configuration:")
         print(f"    set_phase <p0> <p1> - Set phase delay for CIPO cables")
         print(f"    set_debug <0|1> - Send dummy data vs real CIPO data")
@@ -226,6 +260,9 @@ def tcp_control():
             # New COPI sequence commands
             elif cmd in ("convert", "init", "cable_test", "test_pattern"):
                 send_tcp_command(sock, cmd)
+            elif cmd == "full_cable_test":
+                validator.start_cable_test_capture()
+                send_tcp_command(sock, "full_cable_test")
             elif cmd.startswith("loop "):
                 send_tcp_command(sock, cmd)
             elif cmd.startswith("dump_bram"):
@@ -241,7 +278,7 @@ def tcp_control():
             else:
                 print("[TCP] Invalid command. Available commands:")
                 print("  Basic: start, stop, reset_timestamp, status, help, loop <count>")
-                print("  COPI: convert, init, cable_test, test_pattern")
+                print("  COPI: convert, init, cable_test, test_pattern, full_cable_test")
                 print("  Config: set_phase <p0> <p1>, set_debug <0|1>")
                 print("  Status/Debug: dump_bram [start] [count], stats, hex")
                 print("  Utility: quit")

@@ -52,6 +52,7 @@ typedef struct {
     volatile int pl_print_flag;
     volatile int bram_benchmark_flag;
     volatile int dump_bram_flag;
+    volatile int cable_test_flag;
     volatile u32 start_bram_addr;
     volatile u32 word_count;
 } command_flags_t;

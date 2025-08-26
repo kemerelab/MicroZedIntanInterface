@@ -339,3 +339,61 @@ const u16 mosi_test_pattern[35] = {
     0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F,
     0x0020, 0x0021, 0x0022
 };
+
+
+// ============================================================================
+// ADMain cable test implementation
+// ============================================================================
+
+void pl_run_full_cable_test(void) {
+    send_message("=== STARTING FULL CABLE LENGTH TEST ===\r\n");
+    
+    // Check if streaming is active - must be stopped for this test
+    if (pl_is_transmission_active()) {
+        send_message("ERROR: Cannot run cable test while transmission is active\r\n");
+        send_message("       Stop transmission first with 'stop' command\r\n");
+        return;
+    }
+    
+    // Set loop count to 1 for single packet acquisitions
+    pl_set_loop_count(1);
+    usleep(10000);  // 10ms delay
+    
+    // Step 1: Run initialization sequence (1 packet)
+    send_message("Running initialization sequence...\r\n");
+    pl_set_copi_commands(initialization_cmd_sequence);
+    
+    // Enable transmission for init
+    pl_set_transmission(1);
+    usleep(100000);  // Wait 100ms for init to complete
+    pl_set_transmission(0);
+    usleep(10000);  // 10ms delay to ensure packet is in BRAM
+    
+    // Step 2: Set cable test sequence
+    send_message("Setting cable test sequence...\r\n");
+    pl_set_copi_commands(cable_length_cmd_sequence);
+
+    // Step 3: Generate cable test packets for all phase combinations
+    send_message("Generating cable test packets...\r\n");
+    
+    for (int phase = 0; phase < 16; phase++) {  // Vary phase from 0-15
+
+        send_message("Testing phase0=%d, phase1=%d\r\n", phase, phase);
+        
+        // Set phase values
+        pl_set_phase_select(phase, phase);
+        usleep(10000);  // 10ms delay for settings to take effect
+        
+        // Acquire one packet
+        pl_set_transmission(1);
+        usleep(10000);  // Wait 10ms for one packet
+        pl_set_transmission(0);
+        usleep(5000);   // 5ms delay between acquisitions
+    }
+    
+    send_message("\r\n=== CABLE TEST DATA ACQUISITION COMPLETE ===\r\n");
+    send_message("\r\nTo analyze results:\r\n");
+    send_message("  1. Check received packets for 'INTAN' pattern\r\n");
+    send_message("  2. Look for 0x0049 ('I') in word indices 8,9\r\n");
+    send_message("  3. Use optimal phase settings found\r\n");
+}

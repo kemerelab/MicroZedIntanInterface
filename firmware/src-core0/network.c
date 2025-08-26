@@ -75,6 +75,10 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
             
         } else if (strncmp(p->payload, "cable_test", 10) == 0) {
             pl_set_cable_length_sequence();
+
+        } else if (strncmp(p->payload, "full_cable_test", 15) == 0) {
+            command_flags->cable_test_flag = 1;
+            send_message("TCP Command: Full cable test requested\r\n");
             
         } else if (strncmp(p->payload, "test_pattern", 12) == 0) {
             pl_set_test_pattern_sequence();
@@ -126,6 +130,7 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
             send_message("  init                 - Set chip initialization sequence\r\n");
             send_message("  cable_test           - Set cable length test sequence\r\n");
             send_message("  test_pattern         - Set COPI test pattern\r\n");
+            send_message("  full_cable_test      - Run complete cable length test\r\n");
             send_message("\r\nConfiguration:\r\n");
             send_message("  set_phase <p0> <p1>  - Set phase delay for CIPO cables\r\n");
             send_message("  set_debug <0|1>      - Send dummy data vs real CIPO data\r\n");

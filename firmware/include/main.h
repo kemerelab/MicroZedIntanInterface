@@ -87,6 +87,7 @@ extern u32_t packets_received_count;
 extern volatile int enable_streaming_flag;
 extern volatile int disable_streaming_flag;
 extern volatile int reset_timestamp_flag;
+extern volatile int cable_test_flag;
 
 // BRAM state tracking
 extern u32 ps_read_address;              // Current PS read position (word address)
@@ -143,15 +144,19 @@ void pl_print_status(void);
 // Debug
 void pl_dump_bram_data(u32 start_addr, u32 word_count);
 
-// COPI command management - NEW SECTION
+// COPI command management
 void pl_set_copi_commands(const u16 copi_array[35]);
 int pl_set_copi_commands_safe(const u16 copi_array[35], const char* sequence_name);
 
-// COPI sequence selection functions - NEW
+// COPI sequence selection functions
 void pl_set_convert_sequence(void);
 void pl_set_initialization_sequence(void);
 void pl_set_cable_length_sequence(void);
 void pl_set_test_pattern_sequence(void);
+
+// Command to go through all possible cable lengths for cable optimization
+void pl_run_full_cable_test(void);
+
 
 extern const u16 convert_cmd_sequence[35];
 extern const u16 initialization_cmd_sequence[35];

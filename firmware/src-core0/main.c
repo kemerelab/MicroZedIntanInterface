@@ -21,6 +21,7 @@ u32_t packets_received_count = 0;
 volatile int enable_streaming_flag = 0;
 volatile int disable_streaming_flag = 0;
 volatile int reset_timestamp_flag = 0;
+volatile int cable_test_flag = 0;
 
 // BRAM state tracking
 u32 ps_read_address = 0;              // Current PS read position (word address)
@@ -213,6 +214,12 @@ void process_command_flags(void) {
     if(command_flags->dump_bram_flag) {
         command_flags->dump_bram_flag = 0;
         pl_dump_bram_data(command_flags->start_bram_addr, command_flags->word_count);
+        command_flags->lock = 0;
+    }
+    if (command_flags->cable_test_flag) {
+        command_flags->cable_test_flag = 0;
+        pl_run_full_cable_test();
+        handle_enable_streaming();
         command_flags->lock = 0;
     }
 }
