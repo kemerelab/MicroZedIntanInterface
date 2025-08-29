@@ -75,6 +75,7 @@ module data_generator #(
     // FIFO interface signals
     wire        fifo_write_en;
     wire [31:0] fifo_write_data;
+    wire        fifo_packet_end_flag;
     wire        fifo_full;
     wire [8:0]  fifo_count;
     wire [13:0] current_bram_address;
@@ -94,6 +95,7 @@ module data_generator #(
         .fifo_write_data(fifo_write_data),
         .fifo_full(fifo_full),
         .fifo_count(fifo_count),
+        .fifo_packet_end_flag(fifo_packet_end_flag),
         
         // Serial interface
         .csn(csn),
@@ -118,6 +120,7 @@ module data_generator #(
         .fifo_write_data(fifo_write_data),
         .fifo_full(fifo_full),
         .fifo_count(fifo_count),
+        .fifo_packet_end_flag(fifo_packet_end_flag),
         .current_bram_address(current_bram_address),
         
         // BRAM interface

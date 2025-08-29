@@ -23,6 +23,8 @@ module data_generator_core (
     input  logic        fifo_full,
     input  logic [8:0]  fifo_count,
     
+    output logic        fifo_packet_end_flag, // gets written with each word. 1 if it's the last word in a packet
+        
     // Serial interface signals
     output logic        csn,        // Chip select (active low)
     output logic        sclk,       // Serial clock
@@ -270,6 +272,7 @@ always_ff @(posedge clk) begin
         fifo_write_en <= 1'b0;
         fifo_write_data <= 32'h0;
         packets_sent <= 32'd0;
+        fifo_packet_end_flag <= 1'b0;
     end else begin
         // Default: no FIFO write
         fifo_write_en <= 1'b0;
@@ -279,6 +282,7 @@ always_ff @(posedge clk) begin
             if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
+                    fifo_packet_end_flag <= 1'b0; // none of these are at the end
                     case (state_counter)
                         7'd0: fifo_write_data <= MAGIC_NUMBER_LOW;
                         7'd1: fifo_write_data <= MAGIC_NUMBER_HIGH;
@@ -290,6 +294,7 @@ always_ff @(posedge clk) begin
             if (!debug_mode) begin
                 if(state_counter inside {7'd77, 7'd78}) begin //
                     fifo_write_en <= 1'b1;
+                    fifo_packet_end_flag <= (state_counter == 7'd78) && is_last_cycle; // mostly 0 except at end
                     case (state_counter)
                         7'd77: fifo_write_data <= cipo0_data[cycle_counter];
                         7'd78: fifo_write_data <= cipo1_data[cycle_counter];
@@ -299,6 +304,7 @@ always_ff @(posedge clk) begin
                 // Debug mode will now send same size as a single interface (two RHD2000 series chips on one cable)
                 if(state_counter inside {7'd77, 7'd78}) begin
                     fifo_write_en <= 1'b1;
+                    fifo_packet_end_flag <= (state_counter == 7'd78) && is_last_cycle; // mostly 0 except at end
                     case (state_counter)
                         7'd77: fifo_write_data <= {dummy_data[1], dummy_data[0]};
                         7'd78: fifo_write_data <= {dummy_data[3], dummy_data[2]};

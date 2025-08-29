@@ -16,6 +16,7 @@ module fifo_bram_interface #(
     input  logic [31:0] fifo_write_data,
     output logic        fifo_full,
     output logic [8:0]  fifo_count,
+    input logic         fifo_packet_end_flag, // this travels along with every fifo word
     
     // Status output for PS monitoring
     output logic [13:0] current_bram_address,
@@ -46,7 +47,7 @@ localparam int FIFO_COUNT_WIDTH = $clog2(FIFO_DEPTH + 1);
 localparam int BRAM_WORD_ADDR_WIDTH = $clog2(BRAM_DEPTH_WORDS);
 
 // FIFO storage
-logic [31:0] write_fifo [0:FIFO_DEPTH-1];
+logic [BRAM_DATA_WIDTH-1+1:0] write_fifo [0:FIFO_DEPTH-1]; // +1 for the fifo_packet_end_flag
 logic [FIFO_PTR_WIDTH-1:0] fifo_write_ptr;
 logic [FIFO_PTR_WIDTH-1:0] fifo_read_ptr;
 
@@ -55,10 +56,11 @@ assign fifo_full = (fifo_count == FIFO_DEPTH);
 
 // BRAM interface registers
 logic [15:0] bram_addr_reg;
-logic [31:0] bram_din_reg;
+logic [BRAM_DATA_WIDTH-1:0] bram_din_reg;
 logic        bram_en_reg;
 logic [3:0]  bram_we_reg;
 logic [BRAM_WORD_ADDR_WIDTH-1:0] write_address;
+logic [BRAM_WORD_ADDR_WIDTH-1:0] packet_boundary_address;
 
 // Connect BRAM interface
 assign bram_addr = bram_addr_reg;
@@ -69,7 +71,7 @@ assign bram_clk  = clk;
 assign bram_rst  = ~rstn;
 
 // Export current write address for PS monitoring
-assign current_bram_address = write_address;
+assign current_bram_address = packet_boundary_address;
 
 // Registered FIFO write signals (1 cycle latency)
 logic fifo_write_en_reg;
@@ -95,6 +97,7 @@ always_ff @(posedge clk) begin
         bram_en_reg <= 1'b0;
         bram_we_reg <= 4'h0;
         write_address <= '0;
+        packet_boundary_address <= '0;
     end else begin
         
         // ====================================================================
@@ -110,7 +113,7 @@ always_ff @(posedge clk) begin
         
         // Perform FIFO write operation
         if (fifo_write_this_cycle) begin
-            write_fifo[fifo_write_ptr] <= fifo_write_data_reg;
+            write_fifo[fifo_write_ptr] <= {fifo_packet_end_flag, fifo_write_data_reg};
             fifo_write_ptr <= fifo_write_ptr + 1;
         end
         
@@ -127,20 +130,26 @@ always_ff @(posedge clk) begin
         
         // Perform FIFO read and BRAM write operation (single cycle!)
         if (fifo_read_this_cycle) begin
+            logic [32:0] fifo_entry = write_fifo[fifo_read_ptr];
+            logic is_packet_end_flag = fifo_entry[32];
+            logic [31:0] data_word = fifo_entry[31:0];
+            logic [BRAM_WORD_ADDR_WIDTH-1:0] next_write_address;
+            
             // Set up BRAM write
             bram_addr_reg <= {write_address, 2'b00};
-            bram_din_reg <= write_fifo[fifo_read_ptr];
+            bram_din_reg <= data_word;
             bram_en_reg <= 1'b1;
             bram_we_reg <= 4'hF;
             
             // Consume FIFO entry and advance BRAM address
-            fifo_read_ptr <= fifo_read_ptr + 1;
-            write_address <= write_address + 1;
-            
-            // Handle address wrap
-            if (write_address >= (BRAM_DEPTH_WORDS - 1)) begin
-                write_address <= '0;
+            fifo_read_ptr <= fifo_read_ptr + 1; // this auto modulo's based on the power of 2 depth of the FIFO
+            next_write_address = (write_address >= (BRAM_DEPTH_WORDS - 1)) ? '0 : (write_address + 1);
+            write_address  <= next_write_address;
+
+            if (is_packet_end_flag) begin
+                packet_boundary_address <= next_write_address;  // Point to next packet start
             end
+
         end
         
         // ====================================================================
