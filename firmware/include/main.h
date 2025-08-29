@@ -152,7 +152,6 @@ int pl_set_copi_commands_safe(const u16 copi_array[35], const char* sequence_nam
 void pl_set_convert_sequence(void);
 void pl_set_initialization_sequence(void);
 void pl_set_cable_length_sequence(void);
-void pl_set_test_pattern_sequence(void);
 
 // Command to go through all possible cable lengths for cable optimization
 void pl_run_full_cable_test(void);
@@ -161,7 +160,7 @@ void pl_run_full_cable_test(void);
 extern const u16 convert_cmd_sequence[35];
 extern const u16 initialization_cmd_sequence[35];
 extern const u16 cable_length_cmd_sequence[35];
-extern const u16 mosi_test_pattern[35];
+
 
 // ============================================================================
 // DEBUG FUNCTIONS

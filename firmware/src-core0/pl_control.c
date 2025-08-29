@@ -168,7 +168,7 @@ void pl_print_status(void) {
     send_message("Control flags: 0x%08X\r\n", ctrl_flags);
     send_message("  Enable transmission: %s\r\n", (ctrl_flags & CTRL_ENABLE_TRANSMISSION) ? "SET" : "CLEAR");
     send_message("  Reset timestamp: %s\r\n", (ctrl_flags & CTRL_RESET_TIMESTAMP) ? "SET" : "CLEAR");
-    
+
     send_message("================================\r\n");
 }
 
@@ -259,13 +259,6 @@ void pl_set_cable_length_sequence(void) {
     }
 }
 
-void pl_set_test_pattern_sequence(void) {
-    if (pl_set_copi_commands_safe(mosi_test_pattern, "TEST PATTERN sequence")) {
-        send_message("Ready for COPI test pattern - incrementing values 0x0000-0x0022\r\n");
-    }
-}
-
-
 // ============================================================================
 // PREDEFINED MOSI COMMAND ARRAYS
 // ============================================================================
@@ -330,16 +323,6 @@ const u16 cable_length_cmd_sequence[35] = {
 //    60 - // Die revision
 //    59 - // MISO A/B (different data on A and B)
 //    48, 49, 50, 51, 52, 53, 54, 55 - could be string version of chip name
-
-// Test pattern with incrementing values
-const u16 mosi_test_pattern[35] = {
-    0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007,
-    0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F,
-    0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017,
-    0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F,
-    0x0020, 0x0021, 0x0022
-};
-
 
 // ============================================================================
 // ADMain cable test implementation

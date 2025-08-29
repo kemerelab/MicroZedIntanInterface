@@ -83,7 +83,7 @@ static int process_packet_from_bram(void) {
     
         error_count++;  // ERROR TO TRACK
 
-        return 0;  // Packet validation failed
+        return 0;  // Packet validation failed; TODO - Catch up more extremely
     }
 
     // TODO: If we are in an error state, we could track how long we stay there
@@ -140,7 +140,6 @@ void handle_enable_streaming(void) {
     
     // Reset state
     packets_received_count = 0;
-    ps_read_address = 0;
     error_count = 0;
     udp_packets_sent = 0;
     udp_send_errors = 0;
@@ -175,7 +174,6 @@ void handle_disable_streaming(void) {
 
 void handle_reset_timestamp(void) {
     packets_received_count = 0;
-    ps_read_address = 0;
     error_count = 0;
     udp_packets_sent = 0;
     udp_send_errors = 0;
@@ -308,7 +306,7 @@ int main() {
 
     // benchmark_bram_reads();
 
-    pl_set_copi_commands(mosi_test_pattern);
+    pl_set_copi_commands(initialization_cmd_sequence);
     
     send_message("debug> ");
     
