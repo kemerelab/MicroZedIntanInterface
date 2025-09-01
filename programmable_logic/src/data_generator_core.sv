@@ -1,3 +1,4 @@
+// Modified for 64-bit FIFO interface
 // Implemented as 3 major always blocks.
 // 1. Run the master cycled state machine. Maintain the timestamp consistently
 //    regardless of whether we acquiring/transmitting data. Process control data 
@@ -17,9 +18,9 @@ module data_generator_core (
     input  logic [32*22-1:0] ctrl_regs_pl,
     output logic [32*10-1:0]  status_regs_pl,  // Only 10 registers, including mirroring 4 control - wrapper adds 11th
     
-    // FIFO interface - simple and clean
+    // FIFO interface (64-bit, gets converted to 32-bit for BRAM)
     output logic        fifo_write_en,
-    output logic [31:0] fifo_write_data,
+    output logic [63:0] fifo_write_data,
     input  logic        fifo_full,
     input  logic [8:0]  fifo_count,
     
@@ -45,7 +46,6 @@ logic debug_mode = ctrl_regs_pl[2*32 + 8]; // Send dummy data rather than real C
 
 // Reserved control registers for future use
 logic [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
-
 
 // Extract COPI message words from the last 18 registers (36 x 16-bit words)
 logic [15:0] copi_words [0:35];
@@ -78,8 +78,6 @@ CIPO_combined_phase_selector cipo1_selector(
     .CIPO4x(cipo1_4x_oversampled),
     .CIPO(cipo1_phase_selected)
 );
-
-
 
 // Control counters
 logic [6:0] state_counter;
@@ -161,14 +159,13 @@ always_ff @(posedge clk) begin
     end
 end
 
-
 /*
 Complete Serial Protocol Timing (80-state machine):
 
-State 0:  CSn=0, SCLK=0, COPI=0 (default) [first of 35 cycles - fifo enqueue magic header LOW words]
-State 1:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (setup bit 15) [first of 35 cycles - fifo enqueue magic header HIGH words]
-State 2:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (clock bit 15) [first of 35 cycles - fifo enqueue timestamp LOW words]
-State 3:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (hold) [first of 35 cycles - fifo enqueue timestamp HIGH words]
+State 0:  CSn=0, SCLK=0, COPI=0 (default) [first of 35 cycles - fifo enqueue magic header words]
+State 1:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (setup bit 15) 
+State 2:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (clock bit 15) [first of 35 cycles - fifo enqueue timestamp words]
+State 3:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (hold)
 State 4:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (transition)
 State 5:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][14] (setup bit 14)
 State 6:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][14] (clock bit 14)
@@ -196,8 +193,8 @@ State 73: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO)
 State 74: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO) 
 State 75: CSn=1, SCLK=0, COPI=0 (continue to read in data from CIPO)  
 State 76: CSn=1, SCLK=0, COPI=0 (register buffer data from phase selector)
-State 77: CSn=1, SCLK=0, COPI=0 (inactive) [fifo enqueue 32b of CIPO0 data]
-State 78: CSn=1, SCLK=0, COPI=0 (inactive) [fifo enqueue 32b of CIPO1 data]
+State 77: CSn=1, SCLK=0, COPI=0 (inactive) [fifo enqueue 64b of combined CIPO data]
+State 78: CSn=1, SCLK=0, COPI=0 (inactive)
 State 79: CSn=1, SCLK=0, COPI=0 (inactive)
 
 Key Timing:
@@ -270,7 +267,7 @@ end
 always_ff @(posedge clk) begin
     if (!rstn) begin
         fifo_write_en <= 1'b0;
-        fifo_write_data <= 32'h0;
+        fifo_write_data <= 64'h0;
         packets_sent <= 32'd0;
         fifo_packet_end_flag <= 1'b0;
     end else begin
@@ -279,36 +276,28 @@ always_ff @(posedge clk) begin
         
         if (transmission_active && !fifo_full) begin
             // Header writes (first cycle only)
-            if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3}) begin
+            if (state_counter inside {7'd0, 7'd1}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
-                    fifo_packet_end_flag <= 1'b0; // none of these are at the end
+                    fifo_packet_end_flag <= 1'b0; // Header words are never at the end
                     case (state_counter)
-                        7'd0: fifo_write_data <= MAGIC_NUMBER_LOW;
-                        7'd1: fifo_write_data <= MAGIC_NUMBER_HIGH;
-                        7'd2: fifo_write_data <= timestamp[31:0];
-                        7'd3: fifo_write_data <= timestamp[63:32];
+                        7'd0: fifo_write_data <= {MAGIC_NUMBER_HIGH, MAGIC_NUMBER_LOW}; // magic number
+                        7'd1: fifo_write_data <= timestamp;
                     endcase
                 end
             end 
-            if (!debug_mode) begin
-                if(state_counter inside {7'd77, 7'd78}) begin //
-                    fifo_write_en <= 1'b1;
-                    fifo_packet_end_flag <= (state_counter == 7'd78) && is_last_cycle; // mostly 0 except at end
-                    case (state_counter)
-                        7'd77: fifo_write_data <= cipo0_data[cycle_counter];
-                        7'd78: fifo_write_data <= cipo1_data[cycle_counter];
-                    endcase
-                end
-            end else begin
-                // Debug mode will now send same size as a single interface (two RHD2000 series chips on one cable)
-                if(state_counter inside {7'd77, 7'd78}) begin
-                    fifo_write_en <= 1'b1;
-                    fifo_packet_end_flag <= (state_counter == 7'd78) && is_last_cycle; // mostly 0 except at end
-                    case (state_counter)
-                        7'd77: fifo_write_data <= {dummy_data[1], dummy_data[0]};
-                        7'd78: fifo_write_data <= {dummy_data[3], dummy_data[2]};
-                    endcase
+            
+            // Data writes - Pack both CIPO lines into single 64-bit write
+            if (state_counter == 7'd77) begin
+                fifo_write_en <= 1'b1;
+                fifo_packet_end_flag <= is_last_cycle; // Only last cycle's data word ends the packet
+                
+                if (!debug_mode) begin
+                    // Pack real CIPO data: CIPO1 in upper 32 bits, CIPO0 in lower 32 bits
+                    fifo_write_data <= {cipo1_data[cycle_counter], cipo0_data[cycle_counter]};
+                end else begin
+                    // Pack dummy data for debug mode
+                    fifo_write_data <= {{dummy_data[3], dummy_data[2]}, {dummy_data[1], dummy_data[0]}};
                 end
             end
                     

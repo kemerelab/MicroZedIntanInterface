@@ -1,6 +1,6 @@
 // File: fifo_bram_interface.sv
-// Dedicated FIFO to BRAM interface with single-cycle BRAM writes
-// Much simpler design thanks to single-cycle BRAM capability
+// FIFO stores 64-bit words, BRAM writes 32-bit words
+// Simple interface with 2-state FSM for BRAM writes
 
 module fifo_bram_interface #(
     parameter int BRAM_ADDR_WIDTH = 16,        // Byte address width
@@ -13,9 +13,9 @@ module fifo_bram_interface #(
     
     // FIFO interface (input side)
     input  logic        fifo_write_en,
-    input  logic [31:0] fifo_write_data,
+    input  logic [63:0] fifo_write_data,      // 64-bit
     output logic        fifo_full,
-    output logic [8:0]  fifo_count,
+    output logic [8:0]  fifo_count,           // Count of 64-bit entries
     input logic         fifo_packet_end_flag, // this travels along with every fifo word
     
     // Status output for PS monitoring
@@ -47,7 +47,7 @@ localparam int FIFO_COUNT_WIDTH = $clog2(FIFO_DEPTH + 1);
 localparam int BRAM_WORD_ADDR_WIDTH = $clog2(BRAM_DEPTH_WORDS);
 
 // FIFO storage
-logic [BRAM_DATA_WIDTH-1+1:0] write_fifo [0:FIFO_DEPTH-1]; // +1 for the fifo_packet_end_flag
+logic [64:0] write_fifo [0:FIFO_DEPTH-1]; // 64-bit data + 1-bit packet_end_flag
 logic [FIFO_PTR_WIDTH-1:0] fifo_write_ptr;
 logic [FIFO_PTR_WIDTH-1:0] fifo_read_ptr;
 
@@ -75,7 +75,17 @@ assign current_bram_address = packet_boundary_address;
 
 // Registered FIFO write signals (1 cycle latency)
 logic fifo_write_en_reg;
-logic [31:0] fifo_write_data_reg;
+logic [63:0] fifo_write_data_reg;
+
+// State machine for 64-bit FIFO to 32-bit BRAM conversion
+typedef enum logic {
+    WRITE_LOW,  // Write lower 32 bits of 64-bit FIFO data
+    WRITE_HIGH  // Write upper 32 bits of 64-bit FIFO data
+} bram_write_state_t;
+
+bram_write_state_t bram_state;
+logic [63:0] current_64bit_data;
+logic current_packet_end_flag;
 
 // Logical entities used for updating count register
 logic fifo_write_this_cycle;
@@ -87,7 +97,7 @@ always_ff @(posedge clk) begin
         // FIFO write side
         fifo_write_ptr <= '0;
         fifo_write_en_reg <= 1'b0;
-        fifo_write_data_reg <= 32'h0;
+        fifo_write_data_reg <= 64'h0;
         
         // FIFO read side and BRAM interface
         fifo_read_ptr <= '0;
@@ -98,6 +108,11 @@ always_ff @(posedge clk) begin
         bram_we_reg <= 4'h0;
         write_address <= '0;
         packet_boundary_address <= '0;
+        
+        // State machine
+        bram_state <= WRITE_LOW;
+        current_64bit_data <= 64'h0;
+        current_packet_end_flag <= 1'b0;
     end else begin
         
         // ====================================================================
@@ -118,39 +133,63 @@ always_ff @(posedge clk) begin
         end
         
         // ====================================================================
-        // FIFO READ SIDE and BRAM WRITE (FIFO → BRAM)
+        // FIFO READ SIDE and BRAM WRITE (FIFO → BRAM) with State Machine
         // ====================================================================
         
         // Default: no BRAM write
         bram_en_reg <= 1'b0;
         bram_we_reg <= 4'h0;
         
-        // Determine if FIFO read/BRAM write will happen this cycle
-        fifo_read_this_cycle = (fifo_count > 0);
-        
-        // Perform FIFO read and BRAM write operation (single cycle!)
-        if (fifo_read_this_cycle) begin
-            logic [32:0] fifo_entry = write_fifo[fifo_read_ptr];
-            logic is_packet_end_flag = fifo_entry[32];
-            logic [31:0] data_word = fifo_entry[31:0];
-            logic [BRAM_WORD_ADDR_WIDTH-1:0] next_write_address;
-            
-            // Set up BRAM write
-            bram_addr_reg <= {write_address, 2'b00};
-            bram_din_reg <= data_word;
-            bram_en_reg <= 1'b1;
-            bram_we_reg <= 4'hF;
-            
-            // Consume FIFO entry and advance BRAM address
-            fifo_read_ptr <= fifo_read_ptr + 1; // this auto modulo's based on the power of 2 depth of the FIFO
-            next_write_address = (write_address >= (BRAM_DEPTH_WORDS - 1)) ? '0 : (write_address + 1);
-            write_address  <= next_write_address;
-
-            if (is_packet_end_flag) begin
-                packet_boundary_address <= next_write_address;  // Point to next packet start
+        case (bram_state)
+            WRITE_LOW: begin
+                // Can only read from FIFO if data is available
+                if (fifo_count > 0) begin
+                    // Read 64-bit data from FIFO and extract packet end flag
+                    logic [64:0] fifo_entry = write_fifo[fifo_read_ptr];
+                    current_packet_end_flag <= fifo_entry[64];
+                    current_64bit_data <= fifo_entry[63:0];
+                    
+                    // Write lower 32 bits to BRAM
+                    bram_addr_reg <= {write_address, 2'b00};
+                    bram_din_reg <= fifo_entry[31:0];
+                    bram_en_reg <= 1'b1;
+                    bram_we_reg <= 4'hF;
+                    
+                    // Consume FIFO entry and advance BRAM address
+                    fifo_read_ptr <= fifo_read_ptr + 1;
+                    write_address <= (write_address >= (BRAM_DEPTH_WORDS - 1)) ? '0 : (write_address + 1);
+                    
+                    // Move to next state to write upper 32 bits
+                    bram_state <= WRITE_HIGH;
+                    fifo_read_this_cycle = 1'b1;
+                end else begin
+                    fifo_read_this_cycle = 1'b0;
+                end
             end
-
-        end
+            
+            WRITE_HIGH: begin
+                // Write upper 32 bits to BRAM (no FIFO read required)
+                logic [BRAM_WORD_ADDR_WIDTH-1:0] next_write_address;
+                
+                bram_addr_reg <= {write_address, 2'b00};
+                bram_din_reg <= current_64bit_data[63:32]; // Upper 32 bits
+                bram_en_reg <= 1'b1;
+                bram_we_reg <= 4'hF;
+                
+                // Advance BRAM address
+                next_write_address = (write_address >= (BRAM_DEPTH_WORDS - 1)) ? '0 : (write_address + 1);
+                write_address <= next_write_address;
+                
+                // Check for packet boundary (only on the second write of the 64-bit word)
+                if (current_packet_end_flag) begin
+                    packet_boundary_address <= next_write_address;  // Point to next packet start
+                end
+                
+                // Return to first state for next 64-bit word
+                bram_state <= WRITE_LOW;
+                fifo_read_this_cycle = 1'b0; // No FIFO read in this state
+            end
+        endcase
         
         // ====================================================================
         // FIFO COUNT MANAGEMENT
@@ -159,7 +198,7 @@ always_ff @(posedge clk) begin
         // Update FIFO count based on operations (perfectly synchronized!)
         case ({fifo_write_this_cycle, fifo_read_this_cycle})
             2'b00: fifo_count <= fifo_count;        // No operations
-            2'b01: fifo_count <= fifo_count - 1;    // Read only
+            2'b01: fifo_count <= fifo_count - 1;    // Read only (happens in WRITE_LOW state)
             2'b10: fifo_count <= fifo_count + 1;    // Write only
             2'b11: fifo_count <= fifo_count;        // Both: +1-1 = 0
         endcase

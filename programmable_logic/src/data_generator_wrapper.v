@@ -1,14 +1,12 @@
 // File: data_generator_bram_blk.v
 // Clean Verilog wrapper that combines data generator and FIFO-BRAM interface
-// Now with proper parameter support and serial interface
-
 
 module data_generator #(
     // BRAM configuration parameters
     parameter integer BRAM_ADDR_WIDTH = 16,        // Byte address width  
     parameter integer BRAM_DATA_WIDTH = 32,        // Data width
     parameter integer BRAM_DEPTH_WORDS = 16384,   // BRAM depth in words (64KB / 4 = 16K words)
-    parameter integer FIFO_DEPTH = 256            // FIFO depth (entries)
+    parameter integer FIFO_DEPTH = 256            // FIFO depth (64-bit entries)
 )(
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK CLK" *)
     //(* X_INTERFACE_PARAMETER = "FREQ_HZ 84000000" *)
@@ -37,9 +35,7 @@ module data_generator #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
     output wire [3:0]      bram_we,
     
-    
     // Serial interface signals
-    
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
     output wire            csn,         // Chip select (active low)
     
@@ -64,8 +60,10 @@ module data_generator #(
             $error("BRAM_DEPTH_WORDS (%d) exceeds address space (%d words)", 
                    BRAM_DEPTH_WORDS, (1 << (BRAM_ADDR_WIDTH - 2)));
         end
-        if (FIFO_DEPTH < 144) begin  // Hardcode the packet size check
-            $warning("FIFO_DEPTH (%d) is smaller than typical packet size (144 words) - may cause flow control issues", 
+        // Note: Packet size is 37 64-bit words (2 header + 35 data)
+        // which equals 74 32-bit BRAM words, 
+        if (FIFO_DEPTH < 37) begin  // Updated to 64-bit word count
+            $warning("FIFO_DEPTH (%d) is smaller than typical packet size (37 x 64-bit words) - may cause flow control issues", 
                      FIFO_DEPTH);
         end
     end
@@ -74,13 +72,13 @@ module data_generator #(
     
     // FIFO interface signals
     wire        fifo_write_en;
-    wire [31:0] fifo_write_data;
+    wire [63:0] fifo_write_data;
     wire        fifo_packet_end_flag;
     wire        fifo_full;
     wire [8:0]  fifo_count;
     wire [13:0] current_bram_address;
     
-    // Data generator status (only 6 registers - wrapper adds 7th)
+    // Data generator status (only 10 registers - wrapper adds 11th)
     wire [32*10-1:0] data_gen_status;
 
     // Instantiate the data generator core
@@ -92,9 +90,9 @@ module data_generator #(
         
         // FIFO interface
         .fifo_write_en(fifo_write_en),
-        .fifo_write_data(fifo_write_data),
+        .fifo_write_data(fifo_write_data),      // 64-bit
         .fifo_full(fifo_full),
-        .fifo_count(fifo_count),
+        .fifo_count(fifo_count),                // Count of 64-bit entries
         .fifo_packet_end_flag(fifo_packet_end_flag),
         
         // Serial interface
@@ -115,15 +113,15 @@ module data_generator #(
         .clk(clk),
         .rstn(rstn),
         
-        // FIFO interface
+        // FIFO interface - now 64-bit
         .fifo_write_en(fifo_write_en),
-        .fifo_write_data(fifo_write_data),
+        .fifo_write_data(fifo_write_data),      // 64-bit
         .fifo_full(fifo_full),
-        .fifo_count(fifo_count),
+        .fifo_count(fifo_count),                // Count of 64-bit entries
         .fifo_packet_end_flag(fifo_packet_end_flag),
         .current_bram_address(current_bram_address),
         
-        // BRAM interface
+        // BRAM interface (stays 32-bit)
         .bram_addr(bram_addr),
         .bram_din(bram_din),
         .bram_en(bram_en),
@@ -133,17 +131,17 @@ module data_generator #(
     );
     
     // Combine status registers in wrapper
-    // Clean separation: data generator owns 0-5, wrapper adds FIFO/BRAM status as 6
-    assign status_regs_pl[0*32 +: 32] = data_gen_status[0*32 +: 32];  // Generator status 0 (includes clock_counter)
+    // Clean separation: data generator owns 0-9, wrapper adds FIFO/BRAM status as 10
+    assign status_regs_pl[0*32 +: 32] = data_gen_status[0*32 +: 32];  // Generator status 0 
     assign status_regs_pl[1*32 +: 32] = data_gen_status[1*32 +: 32];  // Generator status 1  
     assign status_regs_pl[2*32 +: 32] = data_gen_status[2*32 +: 32];  // Generator status 2
     assign status_regs_pl[3*32 +: 32] = data_gen_status[3*32 +: 32];  // Generator status 3
     assign status_regs_pl[4*32 +: 32] = data_gen_status[4*32 +: 32];  // Generator status 4
     assign status_regs_pl[5*32 +: 32] = data_gen_status[5*32 +: 32];  // Generator status 5
-    assign status_regs_pl[6*32 +: 32] = data_gen_status[6*32 +: 32];  // Generator status 5
-    assign status_regs_pl[7*32 +: 32] = data_gen_status[7*32 +: 32];  // Generator status 5
-    assign status_regs_pl[8*32 +: 32] = data_gen_status[8*32 +: 32];  // Generator status 5
-    assign status_regs_pl[9*32 +: 32] = data_gen_status[9*32 +: 32];  // Generator status 5
+    assign status_regs_pl[6*32 +: 32] = data_gen_status[6*32 +: 32];  // Generator status 6
+    assign status_regs_pl[7*32 +: 32] = data_gen_status[7*32 +: 32];  // Generator status 7
+    assign status_regs_pl[8*32 +: 32] = data_gen_status[8*32 +: 32];  // Generator status 8
+    assign status_regs_pl[9*32 +: 32] = data_gen_status[9*32 +: 32];  // Generator status 9
 
     assign status_regs_pl[10*32 +: 32] = {9'd0, fifo_count, current_bram_address}; // FIFO + BRAM status
 
