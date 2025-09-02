@@ -94,14 +94,21 @@ logic        transmission_active;
 logic        loop_limit_reached;
 logic [31:0] loop_counter;
 
-// Dummy data for testing
-logic [15:0] dummy_data [3:0];
+// Debug mode sine wave table index
+logic [8:0] dummy_data_index;
+// Debug mode 512-entry sine lookup table (signed 16-bit values)
+logic [15:0] sine_lut [0:511];
+
+// Initialize sine lookup table
 initial begin
-    dummy_data[0] = 16'h1234;
-    dummy_data[1] = 16'h5678;
-    dummy_data[2] = 16'h9ABC;
-    dummy_data[3] = 16'hDEF0;
+    // Generate 512-point sine wave (signed 16-bit, ±32767 range)
+    for (int i = 0; i < 512; i++) begin
+        real angle = 2.0 * 3.14159265359 * i / 512.0;
+        real sine_real = 32767.0 * $sin(angle);
+        sine_lut[i] = $rtoi(sine_real);
+    end
 end
+
 
 // Helper signals for state machine logic
 logic is_last_state = (state_counter == 7'd79);
@@ -270,6 +277,8 @@ always_ff @(posedge clk) begin
         fifo_write_data <= 64'h0;
         packets_sent <= 32'd0;
         fifo_packet_end_flag <= 1'b0;
+
+        dummy_data_index <= 9'd0;
     end else begin
         // Default: no FIFO write
         fifo_write_en <= 1'b0;
@@ -296,8 +305,26 @@ always_ff @(posedge clk) begin
                     // Pack real CIPO data: CIPO1 in upper 32 bits, CIPO0 in lower 32 bits
                     fifo_write_data <= {cipo1_data[cycle_counter], cipo0_data[cycle_counter]};
                 end else begin
-                    // Pack dummy data for debug mode
-                    fifo_write_data <= {{dummy_data[3], dummy_data[2]}, {dummy_data[1], dummy_data[0]}};
+                
+                    // Load debug data with sine wave data
+                    logic [5:0] channel_offset;  // Only needs 6 bits for values 0-32
+                    logic [15:0] cipo0_regular_val, cipo0_ddr_val, cipo1_regular_val, cipo1_ddr_val;
+                    logic [8:0] base_phase;         // index into 512-entry LUT
+                    
+                    // Calculate base sample index (0-32 for cycles 2-34)
+                    channel_offset = (cycle_counter >= 6'd2) ? (cycle_counter - 6'd2) : 6'd0;
+                    
+                    // Base phase for this sample (9 bits total)
+                    base_phase = dummy_data_index + channel_offset;
+                    
+                    // Generate sine values with frequency multiplication using left shifts
+                    cipo0_regular_val = sine_lut[base_phase];                       // 1× = 58.6 Hz
+                    cipo0_ddr_val     = sine_lut[(base_phase << 1) & 9'h1FF];       // 2× = 117.2 Hz  
+                    cipo1_regular_val = sine_lut[(base_phase << 2) & 9'h1FF];       // 4× = 234.4 Hz
+                    cipo1_ddr_val     = sine_lut[(base_phase << 3) & 9'h1FF];       // 8× = 468.8 Hz
+                    
+                    // Pack debug data: CIPO1 in upper 32 bits, CIPO0 in lower 32 bits
+                    fifo_write_data <= {{cipo1_ddr_val, cipo1_regular_val}, {cipo0_ddr_val, cipo0_regular_val}};
                 end
             end
                     
