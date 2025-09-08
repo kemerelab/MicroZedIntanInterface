@@ -3,7 +3,7 @@ import threading
 import struct
 import time
 import random
-import queue  # <-- added
+import queue
 
 ZYNQ_IP = "192.168.18.10"  # IP of the Zynq board
 TCP_PORT = 6000  # Must match your board's TCP_PORT
@@ -12,8 +12,8 @@ UDP_PORT = 5000  # Must match your board's UDP_PORT
 # Updated data generator constants for your current implementation
 MAGIC_NUMBER_LOW = 0xDEADBEEF   # Lower 32 bits
 MAGIC_NUMBER_HIGH = 0xCAFEBABE  # Upper 32 bits
-EXPECTED_PACKET_SIZE = 296      # 74 words * 4 bytes = 296 bytes
-WORDS_PER_PACKET = 74           # 4 header + (35 cycles * 2 data words)
+# EXPECTED_PACKET_SIZE = 296      # 74 words * 4 bytes = 296 bytes
+# WORDS_PER_PACKET = 74           # 4 header + (35 cycles * 2 data words)
 
 # Binary command protocol constants
 CMD_MAGIC = 0xDEADBEEF
@@ -27,6 +27,7 @@ CMD_RESET_TIMESTAMP = 0x03
 CMD_SET_LOOP_COUNT = 0x10
 CMD_SET_PHASE = 0x11
 CMD_SET_DEBUG_MODE = 0x12
+CMD_SET_CHANNEL_ENABLE = 0x13
 CMD_LOAD_CONVERT = 0x20
 CMD_LOAD_INIT = 0x21
 CMD_LOAD_CABLE_TEST = 0x22
@@ -49,6 +50,46 @@ manual_cable_test_mode = False
 manual_cable_test_packets = []      # kept for compatibility; not used after fix
 manual_cable_test_waiting = False   # kept for compatibility; not used after fix
 
+def calculate_data_words(channel_enable):
+    """Calculate number of 32-bit data words based on channel enable setting"""
+    num_channels = 0
+    
+    # Count enabled channels
+    if channel_enable & 0x01: num_channels += 1  # CIPO0 regular
+    if channel_enable & 0x02: num_channels += 1  # CIPO0 DDR
+    if channel_enable & 0x04: num_channels += 1  # CIPO1 regular  
+    if channel_enable & 0x08: num_channels += 1  # CIPO1 DDR
+    
+    if num_channels == 0:
+        print("WARNING: No channels enabled, defaulting to all channels")
+        return 70  # Default to maximum (4 channels × 35 cycles ÷ 2)
+    
+    # Calculate 32-bit words needed for the data
+    # Each cycle produces num_channels × 16-bit words
+    # Total 16-bit words = 35 × num_channels
+    # Convert to 32-bit words with proper rounding up
+    total_16bit_words = 35 * num_channels
+    data_32bit_words = (total_16bit_words + 1) // 2  # Round up division
+    
+    return data_32bit_words
+
+def calculate_packet_size(channel_enable):
+    """Calculate total packet size in words (header + data)"""
+    PACKET_HEADER_WORDS = 4  # Magic number + timestamp
+    return PACKET_HEADER_WORDS + calculate_data_words(channel_enable)
+
+def channel_enable_to_string(channel_enable):
+    """Convert channel enable bits to human readable string"""
+    channels = []
+    if channel_enable & 0x01: channels.append("CIPO0_REG")
+    if channel_enable & 0x02: channels.append("CIPO0_DDR")
+    if channel_enable & 0x04: channels.append("CIPO1_REG")
+    if channel_enable & 0x08: channels.append("CIPO1_DDR")
+    
+    if not channels:
+        return "NONE"
+    return ", ".join(channels)
+
 class DataValidator:
     def __init__(self):
         self.last_timestamp = None
@@ -63,9 +104,24 @@ class DataValidator:
         self.last_packet_raw = None  # Store raw bytes
         self.last_packet_words = None  # Store unpacked words
 
+        # Channel enable tracking
+        self.current_channel_enable = 0x0F  # Default: all channels enabled
+        self.expected_packet_size_bytes = calculate_packet_size(self.current_channel_enable) * 4
+        self.expected_packet_size_words = calculate_packet_size(self.current_channel_enable)
+
         # ---- added: thread-safe synchronization for manual mode ----
         self._manual_queue = queue.Queue()
         self._manual_lock = threading.Lock()
+
+    def set_channel_enable(self, channel_enable):
+        """Update channel enable setting and recalculate packet sizes"""
+        self.current_channel_enable = channel_enable
+        self.expected_packet_size_words = calculate_packet_size(channel_enable)
+        self.expected_packet_size_bytes = self.expected_packet_size_words * 4
+        
+        print(f"[INFO] Channel enable updated to 0x{channel_enable:X}")
+        print(f"[INFO] Enabled channels: {channel_enable_to_string(channel_enable)}")
+        print(f"[INFO] Expected packet size: {self.expected_packet_size_words} words ({self.expected_packet_size_bytes} bytes)")
 
     def start_cable_test_capture(self):
         """Start capturing cable test packets"""
@@ -118,9 +174,10 @@ class DataValidator:
         # Handle cable test mode
         if cable_test_mode:
             if cable_test_packets_captured < 17:
-                # Process cable test packet
-                if len(data) == EXPECTED_PACKET_SIZE:
-                    words = struct.unpack('<74I', data)
+                # Process cable test packet (cable tests use all channels enabled)
+                expected_size = calculate_packet_size(0x0F) * 4  # All channels for cable test
+                if len(data) == expected_size:
+                    words = struct.unpack(f'<{calculate_packet_size(0x0F)}I', data)
                     self.last_packet_words = words  # Store the words for hex command
                     if cable_test_packets_captured == 0:
                         print(f"Packet {cable_test_packets_captured + 1} (Init): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
@@ -139,8 +196,9 @@ class DataValidator:
 
         # Handle manual cable test mode  
         if manual_cable_test_mode:
-            if len(data) == EXPECTED_PACKET_SIZE:
-                words = struct.unpack('<74I', data)
+            expected_size = calculate_packet_size(0x0F) * 4  # All channels for cable test
+            if len(data) == expected_size:
+                words = struct.unpack(f'<{calculate_packet_size(0x0F)}I', data)
                 # enqueue to wake the waiting TCP/command thread
                 try:
                     self._manual_queue.put_nowait(words)
@@ -153,22 +211,30 @@ class DataValidator:
             self.start_time = time.time()
             self.last_stats_time = self.start_time
 
-        if len(data) != EXPECTED_PACKET_SIZE:
+        if len(data) != self.expected_packet_size_bytes:
             self.size_errors += 1
             self.error_count += 1
-            print(f"[ERROR] Packet {self.packet_count}: Wrong size {len(data)}, expected {EXPECTED_PACKET_SIZE}")
+            print(f"[ERROR] Packet {self.packet_count}: Wrong size {len(data)}, expected {self.expected_packet_size_bytes}")
+            print(f"[ERROR] Current channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
             hex_dump = ' '.join(f'{b:02X}' for b in data[:32])
             print(f"[DEBUG] First 32 bytes: {hex_dump}")
             return None
 
         try:
-            # Unpack as 74 32-bit little-endian words
-            words = struct.unpack('<74I', data)
+            # Unpack as 32-bit little-endian words
+            words = struct.unpack(f'<{self.expected_packet_size_words}I', data)
             self.last_packet_words = words  # Store unpacked words
 
             # Check magic number (words 0 and 1)
             magic_combined = (words[1] << 32) | words[0]
             expected_magic = (MAGIC_NUMBER_HIGH << 32) | MAGIC_NUMBER_LOW
+
+            if magic_combined != expected_magic:
+                self.magic_errors += 1
+                self.error_count += 1
+                print(f"[ERROR] Packet {self.packet_count}: Magic number mismatch")
+                print(f"[ERROR] Expected: 0x{expected_magic:016X}, Got: 0x{magic_combined:016X}")
+                return None            
             
             # Extract timestamp (words 2 and 3)
             timestamp = (words[3] << 32) | words[2]
@@ -190,6 +256,7 @@ class DataValidator:
                       f"Rate: {total_rate:.1f} pkt/s (avg), {inst_rate:.1f} pkt/s (inst), "
                       f"Errors: {self.error_count}")
                 print(f"       {data_sample}")
+                print(f"       Channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
                 
                 self.last_stats_time = now
                 self.last_packet_count = self.packet_count
@@ -199,6 +266,7 @@ class DataValidator:
         except struct.error as e:
             self.error_count += 1
             print(f"[ERROR] Packet {self.packet_count}: Failed to unpack data: {e}")
+            print(f"[ERROR] Expected {self.expected_packet_size_words} words, got {len(data)} bytes")
             hex_dump = ' '.join(f'{b:02X}' for b in data[:64])
             print(f"[DEBUG] First 64 bytes: {hex_dump}")
             return None
@@ -210,6 +278,8 @@ class DataValidator:
             return
             
         print(f"\n=== LAST PACKET - HEX DUMP ===")
+        print(f"Channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
+        print(f"Packet size: {len(self.last_packet_words)} words")
         words = self.last_packet_words
         
         for i in range(0, len(words), words_per_line):
@@ -222,6 +292,8 @@ class DataValidator:
         rate = self.packet_count / elapsed if elapsed > 0 else 0
         
         print(f"\n=== STATISTICS ===")
+        print(f"Channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
+        print(f"Expected packet size: {self.expected_packet_size_words} words ({self.expected_packet_size_bytes} bytes)")
         print(f"Total packets received: {self.packet_count}")
         print(f"Total errors: {self.error_count}")
         print(f"  - Timestamp errors: {self.timestamp_errors}")
@@ -230,7 +302,7 @@ class DataValidator:
         print(f"Elapsed time: {elapsed:.1f}s")
         print(f"Average rate: {rate:.1f} packets/second")
         if rate > 0:
-            print(f"Data rate: {(rate * EXPECTED_PACKET_SIZE * 8 / 1000000):.1f} Mbps")
+            print(f"Data rate: {(rate * self.expected_packet_size_bytes * 8 / 1000000):.1f} Mbps")
         print(f"Last timestamp: {self.last_timestamp}")
         
         if self.error_count == 0 and self.packet_count > 0:
@@ -248,8 +320,9 @@ def udp_listener():
     sock.bind(("", UDP_PORT))
     sock.settimeout(1.0)
     print(f"[UDP] Listening on port {UDP_PORT}...")
-    print(f"[UDP] Expected packet size: {EXPECTED_PACKET_SIZE} bytes ({WORDS_PER_PACKET} words)")
+    print(f"[UDP] Expected packet size: {validator.expected_packet_size_bytes} bytes ({validator.expected_packet_size_words} words)")
     print(f"[UDP] Magic number: 0x{MAGIC_NUMBER_HIGH:08X}{MAGIC_NUMBER_LOW:08X}")
+    print(f"[UDP] Channel enable: 0x{validator.current_channel_enable:X} ({channel_enable_to_string(validator.current_channel_enable)})")
 
     last_timestamp = None
 
@@ -259,13 +332,12 @@ def udp_listener():
                 data, addr = sock.recvfrom(4096)
                 total_len = len(data)
 
-                if total_len % EXPECTED_PACKET_SIZE != 0:
-                    print(f"[WARN] Received {total_len} bytes, not a multiple of {EXPECTED_PACKET_SIZE}")
+                if total_len % validator.expected_packet_size_bytes != 0:
+                    print(f"[WARN] Received {total_len} bytes, not a multiple of {validator.expected_packet_size_bytes}")
 
-                for offset in range(0, total_len - EXPECTED_PACKET_SIZE + 1, EXPECTED_PACKET_SIZE):
-                    chunk = data[offset:offset + EXPECTED_PACKET_SIZE]
+                for offset in range(0, total_len - validator.expected_packet_size_bytes + 1, validator.expected_packet_size_bytes):
+                    chunk = data[offset:offset + validator.expected_packet_size_bytes]
                     timestamp = validator.validate_packet(chunk)
-                    print(f'Validate {total_len}, {offset}, {total_len - EXPECTED_PACKET_SIZE + 1}')
                     if timestamp is not None:
                         if last_timestamp is not None and timestamp != last_timestamp + 1:
                             validator.timestamp_errors += 1
@@ -330,6 +402,13 @@ def manual_cable_test(sock):
     """Manual cable test using existing UDP infrastructure"""
     
     print("Manual cable test starting...")
+
+    # Enable all channels for cable testing
+    print("Setting all channels enabled for cable test...")
+    if not send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F):  # All channels
+        print("Failed to set channel enable")
+        return
+    time.sleep(0.1)
     
     # Start manual cable test mode
     validator.start_manual_cable_test()
@@ -439,6 +518,7 @@ def tcp_control():
         print(f"  Configuration:")
         print(f"    set_phase <p0> <p1> - Set phase delay for CIPO cables")
         print(f"    set_debug <0|1> - Send dummy data vs real CIPO data")
+        print(f"    set_channels <hex> - Set channel enable (0x1=CIPO0_REG, 0x2=CIPO0_DDR, 0x4=CIPO1_REG, 0x8=CIPO1_DDR)")
         print(f"  Status/Debug:")
         print(f"    status - Show PL status")
         print(f"    dump_bram [start] [count] - Show BRAM contents")
@@ -470,8 +550,12 @@ def tcp_control():
             elif cmd == "test_pattern":
                 send_binary_command(sock, CMD_LOAD_TEST_PATTERN)
             elif cmd == "full_cable_test":
-                validator.start_cable_test_capture()
-                send_binary_command(sock, CMD_FULL_CABLE_TEST)
+                # Enable all channels for cable test
+                if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F):
+                    validator.start_cable_test_capture()
+                    send_binary_command(sock, CMD_FULL_CABLE_TEST)
+                else:
+                    print("Failed to enable all channels for cable test")
             elif cmd == "manual_cable_test":
                 manual_cable_test(sock)
             elif cmd == "status":
@@ -509,6 +593,30 @@ def tcp_control():
                         print("Usage: set_debug <0|1>")
                 except ValueError:
                     print("Invalid debug value")
+            elif cmd.startswith("set_channels "):
+                try:
+                    parts = cmd.split()
+                    if len(parts) == 2:
+                        # Support both hex (0xF) and decimal (15) input
+                        if parts[1].lower().startswith('0x'):
+                            channel_enable = int(parts[1], 16)
+                        else:
+                            channel_enable = int(parts[1])
+                        
+                        if 0 <= channel_enable <= 15:
+                            if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, channel_enable):
+                                validator.set_channel_enable(channel_enable)
+                            else:
+                                print("Failed to set channel enable on device")
+                        else:
+                            print("Channel enable must be 0-15 (0x0-0xF)")
+                    else:
+                        print("Usage: set_channels <0x0-0xF>")
+                        print("  0x1 = CIPO0 regular, 0x2 = CIPO0 DDR")
+                        print("  0x4 = CIPO1 regular, 0x8 = CIPO1 DDR")
+                        print(f"  Current: 0x{validator.current_channel_enable:X} ({channel_enable_to_string(validator.current_channel_enable)})")
+                except ValueError:
+                    print("Invalid channel enable value")
             elif cmd.startswith("dump_bram"):
                 try:
                     parts = cmd.split()
@@ -525,7 +633,7 @@ def tcp_control():
                 print("[TCP] Invalid command. Available commands:")
                 print("  Basic: start, stop, reset_timestamp, status, help, loop <count>")
                 print("  COPI: convert, init, cable_test, test_pattern, full_cable_test, manual_cable_test")
-                print("  Config: set_phase <p0> <p1>, set_debug <0|1>")
+                print("  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x0-0xF>")
                 print("  Status/Debug: dump_bram [start] [count], stats, hex")
                 print("  Utility: quit")
                 
@@ -540,7 +648,7 @@ def tcp_control():
 if __name__ == "__main__":
     print("=== Zynq BRAM Data Generator Validator ===")
     print("This program validates data from your BRAM-based Zynq data generator.")
-    print(f"Expecting {WORDS_PER_PACKET}-word packets ({EXPECTED_PACKET_SIZE} bytes)")
+    print(f"Default: {validator.expected_packet_size_words}-word packets ({validator.expected_packet_size_bytes} bytes)")
     print(f"Magic number: 0x{MAGIC_NUMBER_HIGH:08X}{MAGIC_NUMBER_LOW:08X}")
     print("Using binary TCP command protocol")
     print("Press Ctrl+C to stop.\n")
@@ -552,3 +660,4 @@ if __name__ == "__main__":
     
     # Give UDP thread a moment to print final stats
     time.sleep(0.5)
+    

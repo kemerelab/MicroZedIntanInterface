@@ -1,4 +1,3 @@
-// Modified for 64-bit FIFO interface
 // Implemented as 3 major always blocks.
 // 1. Run the master cycled state machine. Maintain the timestamp consistently
 //    regardless of whether we acquiring/transmitting data. Process control data 
@@ -21,6 +20,8 @@ module data_generator_core (
     // FIFO interface (64-bit, gets converted to 32-bit for BRAM)
     output logic        fifo_write_en,
     output logic [63:0] fifo_write_data,
+    output logic [3:0]  fifo_channel_mask,     // Which 16-bit segments are valid
+
     input  logic        fifo_full,
     input  logic [8:0]  fifo_count,
     
@@ -36,26 +37,52 @@ module data_generator_core (
 
 // Extract control bits
 logic enable_transmission = ctrl_regs_pl[0*32 + 0];
-logic reset_timestamp     = ctrl_regs_pl[0*32 + 1];
-// Loop count: number of 35-cycle frames to run (0 = infinite)
-logic [31:0] loop_count = ctrl_regs_pl[1*32 +: 32];
 
-logic [3:0] phase0 = ctrl_regs_pl[2*32 + 3 : 2*32 + 0]; // Cable length control word for CIPO0
-logic [3:0] phase1 = ctrl_regs_pl[2*32 + 7 : 2*32 + 4]; // Cable length control word for CIPO1
-logic debug_mode = ctrl_regs_pl[2*32 + 8]; // Send dummy data rather than real CIPO serial input
+// Safe control registers - only updated when transmission is not active
+logic reset_timestamp_reg;
+logic debug_mode_reg;
+logic [31:0] loop_count_reg;
+logic [3:0] phase0_reg;
+logic [3:0] phase1_reg; 
+logic [3:0] channel_enable_reg;
+// Protected COPI message words (36 x 16-bit words) - only updated when transmission inactive
+logic [15:0] copi_words_reg [0:35];
 
 // Reserved control registers for future use
 logic [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
 
-// Extract COPI message words from the last 18 registers (36 x 16-bit words)
-logic [15:0] copi_words [0:35];
-genvar i;
-generate
-    for (i = 0; i < 18; i = i + 1) begin : unpack_copi_words
-        assign copi_words[2*i]     = ctrl_regs_pl[(i+4)*32 +: 16];      // Low 16 bits
-        assign copi_words[2*i + 1] = ctrl_regs_pl[(i+4)*32 + 16 +: 16]; // High 16 bits
+// Safe control register updates - only when transmission is not active
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        reset_timestamp_reg <= 1'b0;
+        debug_mode_reg <= 1'b0;
+        loop_count_reg <= 32'd0;
+        phase0_reg <= 4'd0;
+        phase1_reg <= 4'd0;
+        channel_enable_reg <= 4'b1111;  // Default: all channels enabled
+        
+        // Initialize COPI words to safe defaults
+        for (int j = 0; j < 36; j++) begin
+            copi_words_reg[j] <= 16'h0;
+        end
+    end else begin
+        // Only update control registers when transmission is not active
+        if (!transmission_active) begin
+            reset_timestamp_reg <= ctrl_regs_pl[0*32 + 1];
+            debug_mode_reg <= ctrl_regs_pl[0*32 + 3];
+            loop_count_reg <= ctrl_regs_pl[1*32 +: 32];
+            phase0_reg <= ctrl_regs_pl[2*32 + 3 : 2*32 + 0];
+            phase1_reg <= ctrl_regs_pl[2*32 + 7 : 2*32 + 4];
+            channel_enable_reg <= ctrl_regs_pl[2*32 + 11 : 2*32 + 8];
+            
+            // Update COPI words from control registers 4-21 (18 registers total)
+            for (int j = 0; j < 18; j++) begin
+                copi_words_reg[2*j]     <= ctrl_regs_pl[(j+4)*32 +: 16];      // Low 16 bits
+                copi_words_reg[2*j + 1] <= ctrl_regs_pl[(j+4)*32 + 16 +: 16]; // High 16 bits
+            end
+        end
     end
-endgenerate
+end
 
 // CIPO received data storage (4 separate 16-bit registers per cycle)
 logic [31:0] cipo0_data [0:34];  // CIPO0 line, register A (low 16 bits) and B (upper 16 bits)
@@ -69,12 +96,12 @@ reg [31:0] cipo1_phase_selected;
 
 // Instantiate phase selector modules that correct for CIPO delay because of long cable length
 CIPO_combined_phase_selector cipo0_selector(
-    .phase_select(phase0),
+    .phase_select(phase0_reg),
     .CIPO4x(cipo0_4x_oversampled),
     .CIPO(cipo0_phase_selected)
 );
 CIPO_combined_phase_selector cipo1_selector(
-    .phase_select(phase1),
+    .phase_select(phase1_reg),
     .CIPO4x(cipo1_4x_oversampled),
     .CIPO(cipo1_phase_selected)
 );
@@ -109,7 +136,6 @@ initial begin
     end
 end
 
-
 // Helper signals for state machine logic
 logic is_last_state = (state_counter == 7'd79);
 logic is_first_cycle = (cycle_counter == 6'd0);
@@ -131,7 +157,7 @@ always_ff @(posedge clk) begin
             if (is_last_cycle) begin
                 cycle_counter <= 6'd0;
 
-                if (!enable_transmission && reset_timestamp) begin
+                if (!enable_transmission && reset_timestamp_reg) begin
                     timestamp <= 64'd0;
                 end else begin
                     timestamp <= timestamp + 1; // timestamp increments whether transmitting or not
@@ -147,12 +173,12 @@ always_ff @(posedge clk) begin
                         transmission_active <= 1'b0;
                     end
                     loop_counter <= loop_counter + 1;
-                    loop_limit_reached <= (loop_count != 32'd0) && (loop_counter >= loop_count);
+                    loop_limit_reached <= (loop_count_reg != 32'd0) && (loop_counter >= loop_count_reg);
 
                 end else begin // transmission is not currently active
                     if (enable_transmission && !loop_limit_reached) begin
                         loop_counter <= 32'd1;  // Reset when starting new transmission
-                        loop_limit_reached <= (loop_count != 32'd0) && (loop_count <= 32'd1); // Catch the tricky single transmission case
+                        loop_limit_reached <= (loop_count_reg != 32'd0) && (loop_count_reg <= 32'd1); // Catch the tricky single transmission case
                         transmission_active <= 1'b1;
                     end
                 end
@@ -238,11 +264,11 @@ always_ff @(posedge clk) begin
             end
                 
             // COPI data transmission - MSB first, set on states 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60
-            // Uses copi_words[cycle_counter] as the source for each cycle's transmission  
+            // Uses copi_words_reg[cycle_counter] as the source for each cycle's transmission  
             // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
             if  (state_counter <= 7'd63) begin //removed part of conditional
                 logic [3:0] bit_index = ~state_counter[5:2];  // MSB first: ~0=15, ~1=14, ..., ~15=0
-                copi <= copi_words[cycle_counter][bit_index];
+                copi <= copi_words_reg[cycle_counter][bit_index];
             end
             
         end
@@ -275,6 +301,7 @@ always_ff @(posedge clk) begin
     if (!rstn) begin
         fifo_write_en <= 1'b0;
         fifo_write_data <= 64'h0;
+        fifo_channel_mask <= 4'h0;
         packets_sent <= 32'd0;
         fifo_packet_end_flag <= 1'b0;
 
@@ -284,11 +311,12 @@ always_ff @(posedge clk) begin
         fifo_write_en <= 1'b0;
         
         if (transmission_active && !fifo_full) begin
-            // Header writes (first cycle only)
+            // Header writes (first cycle only) - always fully valid
             if (state_counter inside {7'd0, 7'd1}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
-                    fifo_packet_end_flag <= 1'b0; // Header words are never at the end
+                    fifo_channel_mask <= 4'b1111;  // Header is always fully valid
+                    fifo_packet_end_flag <= 1'b0;  // Header words are never at the end
                     case (state_counter)
                         7'd0: fifo_write_data <= {MAGIC_NUMBER_HIGH, MAGIC_NUMBER_LOW}; // magic number
                         7'd1: fifo_write_data <= timestamp;
@@ -296,16 +324,16 @@ always_ff @(posedge clk) begin
                 end
             end 
             
-            // Data writes - Pack both CIPO lines into single 64-bit write
+            // Data writes - Pack both CIPO lines into single 64-bit write with channel mask
             if (state_counter == 7'd77) begin
                 fifo_write_en <= 1'b1;
-                fifo_packet_end_flag <= is_last_cycle; // Only last cycle's data word ends the packet
+                fifo_channel_mask <= channel_enable_reg;  // Use current channel enable settings
+                fifo_packet_end_flag <= is_last_cycle;    // Only last cycle's data word ends the packet
                 
-                if (!debug_mode) begin
+                if (!debug_mode_reg) begin
                     // Pack real CIPO data: CIPO1 in upper 32 bits, CIPO0 in lower 32 bits
                     fifo_write_data <= {cipo1_data[cycle_counter], cipo0_data[cycle_counter]};
                 end else begin
-                
                     // Load debug data with sine wave data
                     logic [5:0] channel_offset;  // Only needs 6 bits for values 0-32
                     logic [15:0] cipo0_regular_val, cipo0_ddr_val, cipo1_regular_val, cipo1_ddr_val;
@@ -331,6 +359,8 @@ always_ff @(posedge clk) begin
             if (is_last_cycle) begin
                 if (is_last_state) begin
                     packets_sent <= packets_sent + 1;
+                    // Increment dummy data index for continuous sine wave across packets
+                    dummy_data_index <= dummy_data_index + 9'd1;
                 end
             end
 
@@ -338,17 +368,39 @@ always_ff @(posedge clk) begin
     end
 end
 
-// Pack status signals - only data generator's own status
-assign status_regs_pl[0*32 +: 32] = {30'd0, loop_limit_reached, transmission_active};
-assign status_regs_pl[1*32 +: 32] = {25'd0, state_counter};
-assign status_regs_pl[2*32 +: 32] = {26'd0, cycle_counter};
-assign status_regs_pl[3*32 +: 32] = packets_sent;
-assign status_regs_pl[4*32 +: 32] = timestamp[31:0];
-assign status_regs_pl[5*32 +: 32] = timestamp[63:32];
-assign status_regs_pl[6*32 +: 32] = ctrl_regs_pl[0*32 +: 32];
-assign status_regs_pl[7*32 +: 32] = ctrl_regs_pl[1*32 +: 32];
-assign status_regs_pl[8*32 +: 32] = ctrl_regs_pl[2*32 +: 32];
-assign status_regs_pl[9*32 +: 32] = ctrl_regs_pl[3*32 +: 32];
+// Pack status signals
+// Status Register 0: Dynamic status and counters (locally generated)
+assign status_regs_pl[0*32 +: 32] = {
+    15'd0,                // [31:17] - reserved for future flags
+    cycle_counter,        // [16:11] - 6 bits
+    1'b0,                 // [10] - reserved  
+    state_counter,        // [9:3] - 7 bits
+    1'b0,                 // [2] - reserved for future flags
+    loop_limit_reached,   // [1] - 1 bit
+    transmission_active   // [0] - 1 bit
+};
+
+// Status Register 1: Reflected control parameters (registered versions)
+assign status_regs_pl[1*32 +: 32] = {
+    8'd0,                 // [31:24] - reserved
+    channel_enable_reg,   // [23:20] - 4 bits
+    phase1_reg,           // [19:16] - 4 bits
+    phase0_reg,           // [15:12] - 4 bits  
+    8'd0,                 // [11:4] - reserved
+    debug_mode_reg,       // [3] - 1 bit
+    1'b0,                 // [2] - reserved
+    reset_timestamp_reg,  // [1] - 1 bit
+    enable_transmission   // [0] - 1 bit (current value, not registered)
+};
+
+assign status_regs_pl[2*32 +: 32] = packets_sent;
+assign status_regs_pl[3*32 +: 32] = timestamp[31:0];
+assign status_regs_pl[4*32 +: 32] = timestamp[63:32];
+assign status_regs_pl[5*32 +: 32] = loop_count_reg;
+assign status_regs_pl[6*32 +: 32] = ctrl_regs_pl[0*32 +: 32]; // reflected
+assign status_regs_pl[7*32 +: 32] = ctrl_regs_pl[1*32 +: 32]; // reflected
+assign status_regs_pl[8*32 +: 32] = ctrl_regs_pl[2*32 +: 32]; // reflected
+assign status_regs_pl[9*32 +: 32] = ctrl_regs_pl[3*32 +: 32]; // reflected
 
 // Status register 11 will be added by wrapper
 

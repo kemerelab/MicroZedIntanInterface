@@ -23,6 +23,7 @@ ID   | Command          | Param1              | Param2
 0x10 | SET_LOOP_COUNT   | loop_count          | unused
 0x11 | SET_PHASE        | phase0              | phase1
 0x12 | SET_DEBUG_MODE   | enable (0/1)        | unused
+0x13 | SET_CHANNEL_ENABLE | 4 bits            | unused
 0x20 | LOAD_CONVERT     | unused              | unused
 0x21 | LOAD_INIT        | unused              | unused  
 0x22 | LOAD_CABLE_TEST  | unused              | unused
@@ -40,6 +41,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_SET_LOOP_COUNT  0x10
 #define CMD_SET_PHASE       0x11
 #define CMD_SET_DEBUG_MODE  0x12
+#define CMD_SET_CHANNEL_ENABLE 0x13
 #define CMD_LOAD_CONVERT    0x20
 #define CMD_LOAD_INIT       0x21
 #define CMD_LOAD_CABLE_TEST 0x22
@@ -52,25 +54,25 @@ ID   | Command          | Param1              | Param2
 #define ACK_ERROR           0x15
 
 typedef struct {
-    u32 magic;
-    u32 cmd_id;
-    u32 ack_id;
-    u32 param1;
-    u32 param2;
+    uint32_t magic;
+    uint32_t cmd_id;
+    uint32_t ack_id;
+    uint32_t param1;
+    uint32_t param2;
 } cmd_packet_t;
 
 // Static receive buffer for handling partial commands
-static u8 recv_buffer[CMD_PACKET_SIZE];
-static u16 recv_buffer_pos = 0;
+static uint8_t recv_buffer[CMD_PACKET_SIZE];
+static uint16_t recv_buffer_pos = 0;
 
-u32_t sys_now(void) {
+uint32_t sys_now(void) {
     XTime now;
     XTime_GetTime(&now);
-    return (u32_t)(now / (XPAR_CPU_CORE_CLOCK_FREQ_HZ / 1000U));
+    return (uint32_t)(now / (XPAR_CPU_CORE_CLOCK_FREQ_HZ / 1000U));
 }
 
-static void send_ack(struct tcp_pcb *tpcb, u32 ack_id, u8 status) {
-    u8 response[3];
+static void send_ack(struct tcp_pcb *tpcb, uint32_t ack_id, uint8_t status) {
+    uint8_t response[3];
     response[0] = (ack_id >> 8) & 0xFF;  // High byte
     response[1] = ack_id & 0xFF;         // Low byte  
     response[2] = status;
@@ -79,7 +81,7 @@ static void send_ack(struct tcp_pcb *tpcb, u32 ack_id, u8 status) {
 }
 
 static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
-    u8 status = ACK_SUCCESS;
+    uint8_t status = ACK_SUCCESS;
     
     switch (cmd->cmd_id) {
         case CMD_START:
@@ -107,7 +109,12 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             send_message("Binary Command: SET_PHASE %u %u\r\n", 
                         cmd->param1 & 0xFF, cmd->param2 & 0xFF);
             break;
-            
+
+        case CMD_SET_CHANNEL_ENABLE:
+            pl_set_channel_enable(cmd->param1 & 0xF);
+            send_message("Binary Command: SET_CHANNEL_ENABLE 0x%X\r\n", cmd->param1 & 0xF);
+            break;
+
         case CMD_SET_DEBUG_MODE:
             pl_set_debug_mode(cmd->param1 ? 1 : 0);
             send_message("Binary Command: SET_DEBUG_MODE %u\r\n", cmd->param1 ? 1 : 0);
@@ -164,14 +171,14 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
         return ERR_OK;
     }
     
-    u8 *data = (u8 *)p->payload;
-    u16 data_len = p->len;
-    u16 data_pos = 0;
+    uint8_t *data = (uint8_t *)p->payload;
+    uint16_t data_len = p->len;
+    uint16_t data_pos = 0;
     
     // First, handle any incomplete command from previous packet
     if (recv_buffer_pos > 0) {
-        u16 bytes_needed = CMD_PACKET_SIZE - recv_buffer_pos;
-        u16 bytes_available = data_len < bytes_needed ? data_len : bytes_needed;
+        uint16_t bytes_needed = CMD_PACKET_SIZE - recv_buffer_pos;
+        uint16_t bytes_available = data_len < bytes_needed ? data_len : bytes_needed;
         
         memcpy(&recv_buffer[recv_buffer_pos], data, bytes_available);
         recv_buffer_pos += bytes_available;
@@ -200,7 +207,7 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     }
     
     // Copy any remaining partial command to recv_buffer
-    u16 remaining_bytes = data_len - data_pos;
+    uint16_t remaining_bytes = data_len - data_pos;
     if (remaining_bytes > 0) {
         memcpy(recv_buffer, &data[data_pos], remaining_bytes);
         recv_buffer_pos = remaining_bytes;

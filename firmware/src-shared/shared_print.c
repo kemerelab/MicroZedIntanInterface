@@ -98,7 +98,7 @@ void process_serial_command(const char* cmd) {
     } else if (strncmp(cmd, "dump", 4) == 0) {
         // Parse dump command: "dump [start] [count]"
         
-        sscanf(cmd, "dump %u %u", &(command_flags->start_bram_addr), &(command_flags->word_count));
+        sscanf(cmd, "dump %lu %lu", &(command_flags->start_bram_addr), &(command_flags->word_count));
         
         xil_printf("Serial command: Dumping BRAM from %u, count %u\r\n", command_flags->start_bram_addr, command_flags->word_count);
         command_flags->dump_bram_flag = 1;

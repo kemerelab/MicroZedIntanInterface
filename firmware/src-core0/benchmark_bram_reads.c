@@ -4,10 +4,12 @@
 #include <string.h>
 #include "shared_print.h"
 
+#define BYTES_PER_PACKET (MAX_WORDS_PER_PACKET * BYTES_PER_WORD)
+
 // BRAM read performance benchmark
 void benchmark_bram_reads(void) {
     const u32 num_packets = 10;
-    const u32 total_words = num_packets * WORDS_PER_PACKET;
+    const u32 total_words = num_packets * MAX_WORDS_PER_PACKET;
     XTime start_time, end_time;
     
     send_message("\r\n=== BRAM READ BENCHMARK ===\r\n");
@@ -15,7 +17,7 @@ void benchmark_bram_reads(void) {
               num_packets, total_words, total_words * 4);
     
     // Test buffer to hold all 10 packets
-    static u32 benchmark_buffer[10 * WORDS_PER_PACKET] __attribute__((aligned(64)));
+    static u32 benchmark_buffer[10 * MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
     
     // Starting position for sequential reads
     u32 start_packet_addr = 0;  // Start at beginning of BRAM
@@ -29,10 +31,10 @@ void benchmark_bram_reads(void) {
     XTime_GetTime(&start_time);
     
     for (u32 packet = 0; packet < num_packets; packet++) {
-        u32 packet_start_addr = start_packet_addr + (packet * WORDS_PER_PACKET);
-        u32 *packet_buffer = &benchmark_buffer[packet * WORDS_PER_PACKET];
+        u32 packet_start_addr = start_packet_addr + (packet * MAX_WORDS_PER_PACKET);
+        u32 *packet_buffer = &benchmark_buffer[packet * MAX_WORDS_PER_PACKET];
         
-        for (int i = 0; i < WORDS_PER_PACKET; i++) {
+        for (int i = 0; i < MAX_WORDS_PER_PACKET; i++) {
             u32 word_offset = (packet_start_addr + i) % BRAM_SIZE_WORDS;
             u32 safe_addr = BRAM_BASE_ADDR + (word_offset * 4);
             packet_buffer[i] = Xil_In32(safe_addr);
@@ -51,18 +53,18 @@ void benchmark_bram_reads(void) {
     XTime_GetTime(&start_time);
     
     for (u32 packet = 0; packet < num_packets; packet++) {
-        u32 packet_start_addr = start_packet_addr + (packet * WORDS_PER_PACKET);
+        u32 packet_start_addr = start_packet_addr + (packet * MAX_WORDS_PER_PACKET);
         u32 bram_addr = BRAM_BASE_ADDR + (packet_start_addr * 4);
-        u32 *packet_buffer = &benchmark_buffer[packet * WORDS_PER_PACKET];
+        u32 *packet_buffer = &benchmark_buffer[packet * MAX_WORDS_PER_PACKET];
         
         // Check if packet crosses BRAM boundary
-        if ((packet_start_addr + WORDS_PER_PACKET) <= BRAM_SIZE_WORDS) {
+        if ((packet_start_addr + MAX_WORDS_PER_PACKET) <= BRAM_SIZE_WORDS) {
             // Packet doesn't wrap - single memcpy
             memcpy(packet_buffer, (void*)bram_addr, BYTES_PER_PACKET);
         } else {
             // Packet wraps - two memcpy calls
             u32 words_before_wrap = BRAM_SIZE_WORDS - packet_start_addr;
-            u32 words_after_wrap = WORDS_PER_PACKET - words_before_wrap;
+            u32 words_after_wrap = MAX_WORDS_PER_PACKET - words_before_wrap;
             
             memcpy(packet_buffer, (void*)bram_addr, words_before_wrap * 4);
             memcpy(&packet_buffer[words_before_wrap], (void*)BRAM_BASE_ADDR, words_after_wrap * 4);
@@ -81,19 +83,19 @@ void benchmark_bram_reads(void) {
     XTime_GetTime(&start_time);
     
     for (u32 packet = 0; packet < num_packets; packet++) {
-        u32 packet_start_addr = start_packet_addr + (packet * WORDS_PER_PACKET);
+        u32 packet_start_addr = start_packet_addr + (packet * MAX_WORDS_PER_PACKET);
         u32 bram_addr = BRAM_BASE_ADDR + (packet_start_addr * 4);
-        u32 *packet_buffer = &benchmark_buffer[packet * WORDS_PER_PACKET];
+        u32 *packet_buffer = &benchmark_buffer[packet * MAX_WORDS_PER_PACKET];
         
         // Sequential reads when possible (faster than modulo calculations)
-        if ((packet_start_addr + WORDS_PER_PACKET) <= BRAM_SIZE_WORDS) {
+        if ((packet_start_addr + MAX_WORDS_PER_PACKET) <= BRAM_SIZE_WORDS) {
             // No wrap - sequential reads (fastest)
-            for (int i = 0; i < WORDS_PER_PACKET; i++) {
+            for (int i = 0; i < MAX_WORDS_PER_PACKET; i++) {
                 packet_buffer[i] = Xil_In32(bram_addr + (i * 4));
             }
         } else {
             // Handle wrap case with modulo
-            for (int i = 0; i < WORDS_PER_PACKET; i++) {
+            for (int i = 0; i < MAX_WORDS_PER_PACKET; i++) {
                 u32 word_offset = (packet_start_addr + i) % BRAM_SIZE_WORDS;
                 u32 safe_addr = BRAM_BASE_ADDR + (word_offset * 4);
                 packet_buffer[i] = Xil_In32(safe_addr);

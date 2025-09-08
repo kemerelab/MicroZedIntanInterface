@@ -6,7 +6,8 @@ module data_generator #(
     parameter integer BRAM_ADDR_WIDTH = 16,        // Byte address width  
     parameter integer BRAM_DATA_WIDTH = 32,        // Data width
     parameter integer BRAM_DEPTH_WORDS = 16384,   // BRAM depth in words (64KB / 4 = 16K words)
-    parameter integer FIFO_DEPTH = 256            // FIFO depth (64-bit entries)
+    parameter integer FIFO_DEPTH = 256,           // FIFO depth (64-bit entries)
+    parameter integer BUFFER_DEPTH = 16           // Segment buffer depth for selective copying
 )(
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK CLK" *)
     //(* X_INTERFACE_PARAMETER = "FREQ_HZ 84000000" *)
@@ -60,11 +61,18 @@ module data_generator #(
             $error("BRAM_DEPTH_WORDS (%d) exceeds address space (%d words)", 
                    BRAM_DEPTH_WORDS, (1 << (BRAM_ADDR_WIDTH - 2)));
         end
-        // Note: Packet size is 37 64-bit words (2 header + 35 data)
-        // which equals 74 32-bit BRAM words, 
-        if (FIFO_DEPTH < 37) begin  // Updated to 64-bit word count
-            $warning("FIFO_DEPTH (%d) is smaller than typical packet size (37 x 64-bit words) - may cause flow control issues", 
+        // Note: Packet size is variable depending on channel enable settings
+        // Minimum: 2 header + 17 data words (if only 1 channel active) = 19 x 64-bit words 
+        // Maximum: 2 header + 35 data words (if all channels active) = 37 x 64-bit words
+        if (FIFO_DEPTH < 37) begin  
+            $warning("FIFO_DEPTH (%d) is smaller than maximum packet size (37 x 64-bit words) - may cause flow control issues", 
                      FIFO_DEPTH);
+        end
+        if ((BUFFER_DEPTH & (BUFFER_DEPTH - 1)) != 0) begin
+            $error("BUFFER_DEPTH (%d) must be power of 2", BUFFER_DEPTH);
+        end
+        if (BUFFER_DEPTH < 16) begin
+            $warning("BUFFER_DEPTH (%d) may be too small for worst-case buffering", BUFFER_DEPTH);
         end
     end
 
@@ -73,7 +81,8 @@ module data_generator #(
     // FIFO interface signals
     wire        fifo_write_en;
     wire [63:0] fifo_write_data;
-    wire        fifo_packet_end_flag;
+    wire [3:0]  fifo_channel_mask;      // Channel metadata for selective copying
+    wire        fifo_packet_end_flag;   // Channel metadata for tagging packets
     wire        fifo_full;
     wire [8:0]  fifo_count;
     wire [13:0] current_bram_address;
@@ -90,9 +99,10 @@ module data_generator #(
         
         // FIFO interface
         .fifo_write_en(fifo_write_en),
-        .fifo_write_data(fifo_write_data),      // 64-bit
+        .fifo_write_data(fifo_write_data),          // 64-bit data
+        .fifo_channel_mask(fifo_channel_mask),      // 4-bit channel metadata
         .fifo_full(fifo_full),
-        .fifo_count(fifo_count),                // Count of 64-bit entries
+        .fifo_count(fifo_count),                    // Count of 64-bit entries
         .fifo_packet_end_flag(fifo_packet_end_flag),
         
         // Serial interface
@@ -113,11 +123,12 @@ module data_generator #(
         .clk(clk),
         .rstn(rstn),
         
-        // FIFO interface - now 64-bit
+        // FIFO interface - 64-bit with additional metadata
         .fifo_write_en(fifo_write_en),
-        .fifo_write_data(fifo_write_data),      // 64-bit
+        .fifo_write_data(fifo_write_data),          // 64-bit data
+        .fifo_channel_mask(fifo_channel_mask),      // 4-bit channel metadata
         .fifo_full(fifo_full),
-        .fifo_count(fifo_count),                // Count of 64-bit entries
+        .fifo_count(fifo_count),                    // Count of 64-bit entries
         .fifo_packet_end_flag(fifo_packet_end_flag),
         .current_bram_address(current_bram_address),
         
