@@ -4,16 +4,15 @@ import struct
 import time
 import random
 import queue
+import ipaddress
 
 ZYNQ_IP = "192.168.18.10"  # IP of the Zynq board
 TCP_PORT = 6000  # Must match your board's TCP_PORT
 UDP_PORT = 5000  # Must match your board's UDP_PORT
 
-# Updated data generator constants for your current implementation
-MAGIC_NUMBER_LOW = 0xDEADBEEF   # Lower 32 bits
-MAGIC_NUMBER_HIGH = 0xCAFEBABE  # Upper 32 bits
-# EXPECTED_PACKET_SIZE = 296      # 74 words * 4 bytes = 296 bytes
-# WORDS_PER_PACKET = 74           # 4 header + (35 cycles * 2 data words)
+# Updated data generator constants
+MAGIC_NUMBER_LOW = 0xDEADBEEF
+MAGIC_NUMBER_HIGH = 0xCAFEBABE
 
 # Binary command protocol constants
 CMD_MAGIC = 0xDEADBEEF
@@ -31,11 +30,10 @@ CMD_SET_CHANNEL_ENABLE = 0x13
 CMD_LOAD_CONVERT = 0x20
 CMD_LOAD_INIT = 0x21
 CMD_LOAD_CABLE_TEST = 0x22
-CMD_LOAD_TEST_PATTERN = 0x23
 CMD_FULL_CABLE_TEST = 0x30
 CMD_GET_STATUS = 0x40
 CMD_DUMP_BRAM = 0x41
-CMD_HELP = 0x42
+CMD_SET_UDP_DEST = 0x50
 
 # ACK status codes
 ACK_SUCCESS = 0x06
@@ -44,39 +42,19 @@ ACK_ERROR = 0x15
 # Cable test globals
 cable_test_mode = False
 cable_test_packets_captured = 0
-
-# Manual cable test globals
 manual_cable_test_mode = False
-manual_cable_test_packets = []      # kept for compatibility; not used after fix
-manual_cable_test_waiting = False   # kept for compatibility; not used after fix
 
 def calculate_data_words(channel_enable):
     """Calculate number of 32-bit data words based on channel enable setting"""
-    num_channels = 0
-    
-    # Count enabled channels
-    if channel_enable & 0x01: num_channels += 1  # CIPO0 regular
-    if channel_enable & 0x02: num_channels += 1  # CIPO0 DDR
-    if channel_enable & 0x04: num_channels += 1  # CIPO1 regular  
-    if channel_enable & 0x08: num_channels += 1  # CIPO1 DDR
-    
+    num_channels = bin(channel_enable & 0x0F).count('1')
     if num_channels == 0:
-        print("WARNING: No channels enabled, defaulting to all channels")
-        return 70  # Default to maximum (4 channels × 35 cycles ÷ 2)
-    
-    # Calculate 32-bit words needed for the data
-    # Each cycle produces num_channels × 16-bit words
-    # Total 16-bit words = 35 × num_channels
-    # Convert to 32-bit words with proper rounding up
+        return 70
     total_16bit_words = 35 * num_channels
-    data_32bit_words = (total_16bit_words + 1) // 2  # Round up division
-    
-    return data_32bit_words
+    return (total_16bit_words + 1) // 2
 
 def calculate_packet_size(channel_enable):
     """Calculate total packet size in words (header + data)"""
-    PACKET_HEADER_WORDS = 4  # Magic number + timestamp
-    return PACKET_HEADER_WORDS + calculate_data_words(channel_enable)
+    return 4 + calculate_data_words(channel_enable)
 
 def channel_enable_to_string(channel_enable):
     """Convert channel enable bits to human readable string"""
@@ -85,10 +63,19 @@ def channel_enable_to_string(channel_enable):
     if channel_enable & 0x02: channels.append("CIPO0_DDR")
     if channel_enable & 0x04: channels.append("CIPO1_REG")
     if channel_enable & 0x08: channels.append("CIPO1_DDR")
-    
-    if not channels:
-        return "NONE"
-    return ", ".join(channels)
+    return ", ".join(channels) if channels else "NONE"
+
+def get_local_ip():
+    """Get the local IP address that can reach the Zynq"""
+    try:
+        # Create a socket to determine which interface would be used
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((ZYNQ_IP, TCP_PORT))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except:
+        return "127.0.0.1"
 
 class DataValidator:
     def __init__(self):
@@ -101,15 +88,11 @@ class DataValidator:
         self.size_errors = 0
         self.last_stats_time = None
         self.last_packet_count = 0
-        self.last_packet_raw = None  # Store raw bytes
-        self.last_packet_words = None  # Store unpacked words
-
-        # Channel enable tracking
-        self.current_channel_enable = 0x0F  # Default: all channels enabled
-        self.expected_packet_size_bytes = calculate_packet_size(self.current_channel_enable) * 4
-        self.expected_packet_size_words = calculate_packet_size(self.current_channel_enable)
-
-        # ---- added: thread-safe synchronization for manual mode ----
+        self.last_packet_raw = None
+        self.last_packet_words = None
+        self.current_channel_enable = 0x0F
+        self.expected_packet_size_bytes = calculate_packet_size(0x0F) * 4
+        self.expected_packet_size_words = calculate_packet_size(0x0F)
         self._manual_queue = queue.Queue()
         self._manual_lock = threading.Lock()
 
@@ -118,23 +101,19 @@ class DataValidator:
         self.current_channel_enable = channel_enable
         self.expected_packet_size_words = calculate_packet_size(channel_enable)
         self.expected_packet_size_bytes = self.expected_packet_size_words * 4
-        
         print(f"[INFO] Channel enable updated to 0x{channel_enable:X}")
         print(f"[INFO] Enabled channels: {channel_enable_to_string(channel_enable)}")
         print(f"[INFO] Expected packet size: {self.expected_packet_size_words} words ({self.expected_packet_size_bytes} bytes)")
 
     def start_cable_test_capture(self):
-        """Start capturing cable test packets"""
         global cable_test_mode, cable_test_packets_captured
         cable_test_mode = True
         cable_test_packets_captured = 0
         print("Starting cable test packet capture...")
 
     def start_manual_cable_test(self):
-        """Start manual cable test mode"""
         global manual_cable_test_mode
         manual_cable_test_mode = True
-        # clear any stale packets from previous runs
         with self._manual_lock:
             while not self._manual_queue.empty():
                 try:
@@ -144,15 +123,12 @@ class DataValidator:
         print("Manual cable test mode started")
 
     def wait_for_manual_packet(self, timeout=5.0):
-        """Block until one manual-test packet arrives; return unpacked words or None on timeout."""
         try:
-            words = self._manual_queue.get(timeout=timeout)
-            return words
+            return self._manual_queue.get(timeout=timeout)
         except queue.Empty:
             return None
 
     def get_manual_test_packets(self):
-        """Drain collected manual test packets and exit manual mode"""
         global manual_cable_test_mode
         packets = []
         with self._manual_lock:
@@ -165,47 +141,38 @@ class DataValidator:
         return packets
         
     def validate_packet(self, data):
-        global cable_test_mode, cable_test_packets_captured
-        global manual_cable_test_mode, manual_cable_test_packets, manual_cable_test_waiting
+        global cable_test_mode, cable_test_packets_captured, manual_cable_test_mode
         
         self.packet_count += 1
-        self.last_packet_raw = data  # Store raw packet data
+        self.last_packet_raw = data
 
-        # Handle cable test mode
         if cable_test_mode:
             if cable_test_packets_captured < 17:
-                # Process cable test packet (cable tests use all channels enabled)
-                expected_size = calculate_packet_size(0x0F) * 4  # All channels for cable test
+                expected_size = calculate_packet_size(0x0F) * 4
                 if len(data) == expected_size:
                     words = struct.unpack(f'<{calculate_packet_size(0x0F)}I', data)
-                    self.last_packet_words = words  # Store the words for hex command
+                    self.last_packet_words = words
                     if cable_test_packets_captured == 0:
                         print(f"Packet {cable_test_packets_captured + 1} (Init): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
                     else:
                         phase1 = cable_test_packets_captured - 1
                         print(f"Packet {cable_test_packets_captured + 1} (Phase1={phase1}): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
                 cable_test_packets_captured += 1
-                
                 if cable_test_packets_captured >= 17:
                     cable_test_mode = False
                     print("Cable test capture complete.")
-                
-                return None  # Don't process as normal packet
-            else:
-                cable_test_mode = False
+                return None
 
-        # Handle manual cable test mode  
         if manual_cable_test_mode:
-            expected_size = calculate_packet_size(0x0F) * 4  # All channels for cable test
+            expected_size = calculate_packet_size(0x0F) * 4
             if len(data) == expected_size:
                 words = struct.unpack(f'<{calculate_packet_size(0x0F)}I', data)
-                # enqueue to wake the waiting TCP/command thread
                 try:
                     self._manual_queue.put_nowait(words)
                 except queue.Full:
                     pass
                 print("Captured manual test packet")
-            return None  # Don't process as normal packet
+            return None
 
         if self.start_time is None:
             self.start_time = time.time()
@@ -215,17 +182,12 @@ class DataValidator:
             self.size_errors += 1
             self.error_count += 1
             print(f"[ERROR] Packet {self.packet_count}: Wrong size {len(data)}, expected {self.expected_packet_size_bytes}")
-            print(f"[ERROR] Current channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
-            hex_dump = ' '.join(f'{b:02X}' for b in data[:32])
-            print(f"[DEBUG] First 32 bytes: {hex_dump}")
             return None
 
         try:
-            # Unpack as 32-bit little-endian words
             words = struct.unpack(f'<{self.expected_packet_size_words}I', data)
-            self.last_packet_words = words  # Store unpacked words
+            self.last_packet_words = words
 
-            # Check magic number (words 0 and 1)
             magic_combined = (words[1] << 32) | words[0]
             expected_magic = (MAGIC_NUMBER_HIGH << 32) | MAGIC_NUMBER_LOW
 
@@ -233,30 +195,25 @@ class DataValidator:
                 self.magic_errors += 1
                 self.error_count += 1
                 print(f"[ERROR] Packet {self.packet_count}: Magic number mismatch")
-                print(f"[ERROR] Expected: 0x{expected_magic:016X}, Got: 0x{magic_combined:016X}")
                 return None            
             
-            # Extract timestamp (words 2 and 3)
             timestamp = (words[3] << 32) | words[2]
 
-            # Show periodic stats
             now = time.time()
             if self.packet_count % 30000 == 0 or (now - self.last_stats_time) >= 5.0:
                 elapsed = now - self.start_time
                 total_rate = self.packet_count / elapsed if elapsed > 0 else 0
                 inst_rate = (self.packet_count - self.last_packet_count) / (now - self.last_stats_time) if (now - self.last_stats_time) > 0 else 0
                 
-                # Show some data words for verification (first few data words after header)
                 if len(words) >= 8:
                     data_sample = f"Data: [0x{words[4]:08X}, 0x{words[5]:08X}, 0x{words[6]:08X}, 0x{words[7]:08X}]"
                 else:
-                    data_sample = f"Data: [packet too short for data display]"
+                    data_sample = f"Data: [packet too short]"
                 
                 print(f"[INFO] Packet {self.packet_count}: Timestamp {timestamp}, "
                       f"Rate: {total_rate:.1f} pkt/s (avg), {inst_rate:.1f} pkt/s (inst), "
                       f"Errors: {self.error_count}")
                 print(f"       {data_sample}")
-                print(f"       Channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
                 
                 self.last_stats_time = now
                 self.last_packet_count = self.packet_count
@@ -265,20 +222,15 @@ class DataValidator:
 
         except struct.error as e:
             self.error_count += 1
-            print(f"[ERROR] Packet {self.packet_count}: Failed to unpack data: {e}")
-            print(f"[ERROR] Expected {self.expected_packet_size_words} words, got {len(data)} bytes")
-            hex_dump = ' '.join(f'{b:02X}' for b in data[:64])
-            print(f"[DEBUG] First 64 bytes: {hex_dump}")
+            print(f"[ERROR] Packet {self.packet_count}: Failed to unpack: {e}")
             return None
 
     def print_last_packet_hex(self, words_per_line=8):
-        """Print the most recent packet in hex format"""
         if self.last_packet_words is None:
             print("[INFO] No packets received yet")
             return
             
         print(f"\n=== LAST PACKET - HEX DUMP ===")
-        print(f"Channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
         print(f"Packet size: {len(self.last_packet_words)} words")
         words = self.last_packet_words
         
@@ -292,26 +244,12 @@ class DataValidator:
         rate = self.packet_count / elapsed if elapsed > 0 else 0
         
         print(f"\n=== STATISTICS ===")
-        print(f"Channel enable: 0x{self.current_channel_enable:X} ({channel_enable_to_string(self.current_channel_enable)})")
-        print(f"Expected packet size: {self.expected_packet_size_words} words ({self.expected_packet_size_bytes} bytes)")
-        print(f"Total packets received: {self.packet_count}")
+        print(f"Total packets: {self.packet_count}")
         print(f"Total errors: {self.error_count}")
-        print(f"  - Timestamp errors: {self.timestamp_errors}")
-        print(f"  - Magic number errors: {self.magic_errors}")
-        print(f"  - Size errors: {self.size_errors}")
         print(f"Elapsed time: {elapsed:.1f}s")
         print(f"Average rate: {rate:.1f} packets/second")
         if rate > 0:
             print(f"Data rate: {(rate * self.expected_packet_size_bytes * 8 / 1000000):.1f} Mbps")
-        print(f"Last timestamp: {self.last_timestamp}")
-        
-        if self.error_count == 0 and self.packet_count > 0:
-            print("All packets validated successfully!")
-        elif self.packet_count == 0:
-            print("No packets received")
-        else:
-            error_rate = (self.error_count / self.packet_count) * 100 if self.packet_count > 0 else 0
-            print(f"Error rate: {error_rate:.2f}%")
 
 validator = DataValidator()
 
@@ -320,20 +258,13 @@ def udp_listener():
     sock.bind(("", UDP_PORT))
     sock.settimeout(1.0)
     print(f"[UDP] Listening on port {UDP_PORT}...")
-    print(f"[UDP] Expected packet size: {validator.expected_packet_size_bytes} bytes ({validator.expected_packet_size_words} words)")
-    print(f"[UDP] Magic number: 0x{MAGIC_NUMBER_HIGH:08X}{MAGIC_NUMBER_LOW:08X}")
-    print(f"[UDP] Channel enable: 0x{validator.current_channel_enable:X} ({channel_enable_to_string(validator.current_channel_enable)})")
 
     last_timestamp = None
-
     try:
         while True:
             try:
                 data, addr = sock.recvfrom(4096)
                 total_len = len(data)
-
-                if total_len % validator.expected_packet_size_bytes != 0:
-                    print(f"[WARN] Received {total_len} bytes, not a multiple of {validator.expected_packet_size_bytes}")
 
                 for offset in range(0, total_len - validator.expected_packet_size_bytes + 1, validator.expected_packet_size_bytes):
                     chunk = data[offset:offset + validator.expected_packet_size_bytes]
@@ -343,7 +274,6 @@ def udp_listener():
                             validator.timestamp_errors += 1
                             validator.error_count += 1
                         last_timestamp = timestamp
-
             except socket.timeout:
                 continue
             except KeyboardInterrupt:
@@ -355,90 +285,204 @@ def udp_listener():
         validator.print_statistics()
 
 def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=2.0):
-    """Send a binary command and wait for ACK response"""
+    """Send a binary command and wait for ACK or data response"""
     try:
-        # Generate unique ACK ID
         ack_id = random.randint(1, 65535)
-        
-        # Pack command: magic, cmd_id, ack_id, param1, param2 (all 32-bit little-endian)
         command_data = struct.pack('<IIIII', CMD_MAGIC, cmd_id, ack_id, param1, param2)
-        
-        # Send command
         sock.sendall(command_data)
-        print(f"[TCP] Sent binary command 0x{cmd_id:02X} (ACK ID: {ack_id})")
         
-        # Set timeout and wait for ACK
         sock.settimeout(timeout)
-        ack_response = sock.recv(ACK_PACKET_SIZE)
         
-        if len(ack_response) == ACK_PACKET_SIZE:
-            recv_ack_id = (ack_response[0] << 8) | ack_response[1]
-            status = ack_response[2]
+        # Read initial response (at least 3 bytes for ACK)
+        response = sock.recv(5)
+        
+        if len(response) >= 3:
+            recv_ack_id = (response[0] << 8) | response[1]
+            status = response[2]
             
-            if recv_ack_id == ack_id:
-                if status == ACK_SUCCESS:
-                    print(f"[TCP] ACK received (ID: {ack_id})")
-                    return True
-                else:
-                    print(f"[TCP] Command failed (ID: {ack_id}, status: 0x{status:02X})")
-                    return False
-            else:
+            if recv_ack_id != ack_id:
                 print(f"[TCP] ACK ID mismatch: sent {ack_id}, got {recv_ack_id}")
-                return False
-        else:
-            print(f"[TCP] Invalid ACK response length: {len(ack_response)}")
-            return False
+                return (False, None)
             
+            if status != ACK_SUCCESS:
+                print(f"[TCP] Command failed (status: 0x{status:02X})")
+                return (False, None)
+            
+            # Check if there's data (5-byte header)
+            if len(response) == 5:
+                data_len = (response[3] << 8) | response[4]
+                if data_len > 0:
+                    # Read the data
+                    data = sock.recv(data_len)
+                    return (True, data)
+            
+            return (True, None)
+        
+        return (False, None)
+
     except socket.timeout:
-        print(f"[TCP] Timeout waiting for ACK")
-        return False
+        print(f"[TCP] Timeout waiting for response")
+        return (False, None)
     except Exception as e:
         print(f"[TCP] Error: {e}")
-        return False
+        return (False, None)
     finally:
-        sock.settimeout(None)  # Reset to blocking mode
+        sock.settimeout(None)
+
+def get_status(sock):
+    """Get full status from device"""
+    success, data = send_binary_command(sock, CMD_GET_STATUS)
+    
+    if not success or data is None:
+        print("[TCP] Failed to get status")
+        return None
+    
+    if len(data) != 86:
+        print(f"[TCP] Invalid status response length: {len(data)}")
+        return None
+    
+    # Parse status_response_t structure (86 bytes)
+    # Version and identification (8 bytes)
+    version, device_type, firmware_version = struct.unpack('<HHI', data[0:8])
+    
+    # PL Hardware Status (22 bytes)
+    timestamp, packets_sent, bram_write_addr, fifo_count, state_counter, cycle_counter, flags_pl, _ = \
+        struct.unpack('<QIIHBBBB', data[8:30])
+    
+    # PS Software Status (28 bytes)
+    # Format: 6 uint32_t + 1 uint8_t + 3 reserved bytes
+    packets_received, error_count, udp_packets_sent, udp_send_errors, ps_read_addr, packet_size, flags_ps = \
+        struct.unpack('<IIIIIIB3x', data[30:58])
+    
+    # Current Configuration (16 bytes)
+    # Format: 1 uint32_t + 4 uint8_t + 8 reserved bytes
+    loop_count, phase0, phase1, channel_enable, debug_mode = \
+        struct.unpack('<IBBBB8x', data[58:74])
+    
+    # UDP Stream Information (12 bytes)
+    udp_dest_ip, udp_dest_port, udp_packet_format, udp_bytes_sent = \
+        struct.unpack('<IHHi', data[74:86])
+    
+    status = {
+        'version': version,
+        'device_type': device_type,
+        'firmware_version': firmware_version,
+        'timestamp': timestamp,
+        'packets_sent': packets_sent,
+        'bram_write_addr': bram_write_addr,
+        'fifo_count': fifo_count,
+        'state_counter': state_counter,
+        'cycle_counter': cycle_counter,
+        'transmission_active': bool(flags_pl & 0x01),
+        'loop_limit_reached': bool(flags_pl & 0x02),
+        'packets_received': packets_received,
+        'error_count': error_count,
+        'udp_packets_sent': udp_packets_sent,
+        'udp_send_errors': udp_send_errors,
+        'ps_read_addr': ps_read_addr,
+        'packet_size': packet_size,
+        'stream_enabled': bool(flags_ps & 0x01),
+        'loop_count': loop_count,
+        'phase0': phase0,
+        'phase1': phase1,
+        'channel_enable': channel_enable,
+        'debug_mode': debug_mode,
+        'udp_dest_ip': ipaddress.IPv4Address(udp_dest_ip),
+        'udp_dest_port': udp_dest_port,
+        'udp_packet_format': udp_packet_format,
+        'udp_bytes_sent': udp_bytes_sent
+    }
+    
+    return status
+
+def print_status(status):
+    """Pretty print status information"""
+    if not status:
+        return
+    
+    fw_ver = status['firmware_version']
+    fw_str = f"{(fw_ver>>24)&0xFF}.{(fw_ver>>16)&0xFF}.{(fw_ver>>8)&0xFF}.{fw_ver&0xFF}"
+    
+    print("\n=== DEVICE STATUS ===")
+    print(f"Device Type: 0x{status['device_type']:04X}")
+    print(f"Firmware: v{fw_str}")
+    print(f"Protocol Version: {status['version']}")
+    
+    print("\n--- PL Hardware ---")
+    print(f"Timestamp: {status['timestamp']}")
+    print(f"Packets Sent: {status['packets_sent']}")
+    print(f"BRAM Write Addr: {status['bram_write_addr']}")
+    print(f"FIFO Count: {status['fifo_count']}")
+    print(f"State/Cycle: {status['state_counter']}/{status['cycle_counter']}")
+    print(f"Transmission Active: {status['transmission_active']}")
+    print(f"Loop Limit Reached: {status['loop_limit_reached']}")
+    
+    print("\n--- PS Software ---")
+    print(f"Packets Received: {status['packets_received']}")
+    print(f"Error Count: {status['error_count']}")
+    print(f"UDP Packets Sent: {status['udp_packets_sent']}")
+    print(f"UDP Send Errors: {status['udp_send_errors']}")
+    print(f"PS Read Addr: {status['ps_read_addr']}")
+    print(f"Packet Size: {status['packet_size']} words")
+    print(f"Stream Enabled: {status['stream_enabled']}")
+    
+    print("\n--- Configuration ---")
+    print(f"Loop Count: {status['loop_count']}")
+    print(f"Phase0: {status['phase0']}, Phase1: {status['phase1']}")
+    print(f"Channel Enable: 0x{status['channel_enable']:X} ({channel_enable_to_string(status['channel_enable'])})")
+    print(f"Debug Mode: {status['debug_mode']}")
+    
+    print("\n--- UDP Stream ---")
+    print(f"Destination: {status['udp_dest_ip']}:{status['udp_dest_port']}")
+    print(f"Packet Format: 0x{status['udp_packet_format']:04X}")
+    print(f"Bytes Sent: {status['udp_bytes_sent']}")
+    print("=" * 50)
+
+def set_udp_dest(sock, ip_str, port):
+    """Configure UDP destination"""
+    try:
+        ip_int = int(ipaddress.IPv4Address(ip_str))
+        success, _ = send_binary_command(sock, CMD_SET_UDP_DEST, ip_int, port)
+        if success:
+            print(f"[TCP] UDP destination set to {ip_str}:{port}")
+            return True
+        else:
+            print(f"[TCP] Failed to set UDP destination")
+            return False
+    except Exception as e:
+        print(f"[TCP] Error setting UDP destination: {e}")
+        return False
 
 def manual_cable_test(sock):
     """Manual cable test using existing UDP infrastructure"""
-    
     print("Manual cable test starting...")
 
-    # Enable all channels for cable testing
-    print("Setting all channels enabled for cable test...")
-    if not send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F):  # All channels
+    if not send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F)[0]:
         print("Failed to set channel enable")
         return
     time.sleep(0.1)
     
-    # Start manual cable test mode
     validator.start_manual_cable_test()
-    
-    # collect packets locally to print in order
     collected_packets = []
+    
     try:
-        # Step 1: Set loop count to 1
-        if not send_binary_command(sock, CMD_SET_LOOP_COUNT, 1):
+        if not send_binary_command(sock, CMD_SET_LOOP_COUNT, 1)[0]:
             print("Failed to set loop count")
             return
         time.sleep(0.1)
         
-        # Step 2: Run initialization sequence
         print("Running initialization...")
-        if not send_binary_command(sock, CMD_LOAD_INIT):
-            print("Failed to set init sequence")
+        if not send_binary_command(sock, CMD_LOAD_INIT)[0]:
             return
         time.sleep(0.1)
         
-        if not send_binary_command(sock, CMD_START):
-            print("Failed to start init")
+        if not send_binary_command(sock, CMD_START)[0]:
             return
         time.sleep(0.1)
         
-        if not send_binary_command(sock, CMD_STOP):
-            print("Failed to stop init")
+        if not send_binary_command(sock, CMD_STOP)[0]:
             return
         
-        # Wait for init packet
         init_words = validator.wait_for_manual_packet(timeout=5.0)
         if init_words is None:
             print("Timeout waiting for init packet")
@@ -446,33 +490,24 @@ def manual_cable_test(sock):
         collected_packets.append(init_words)
         print("Collected init packet")
         
-        # Step 3: Set cable test sequence
-        if not send_binary_command(sock, CMD_LOAD_CABLE_TEST):
-            print("Failed to set cable test sequence")
+        if not send_binary_command(sock, CMD_LOAD_CABLE_TEST)[0]:
             return
         time.sleep(0.1)
         
-        # Step 4: Test each phase
         for phase in range(16):
             print(f"Testing phase {phase}...")
             
-            # Set phase
-            if not send_binary_command(sock, CMD_SET_PHASE, phase, phase):
-                print(f"Failed to set phase {phase}")
+            if not send_binary_command(sock, CMD_SET_PHASE, phase, phase)[0]:
                 continue
             time.sleep(0.1)
             
-            # Run acquisition
-            if not send_binary_command(sock, CMD_START):
-                print(f"Failed to start phase {phase}")
+            if not send_binary_command(sock, CMD_START)[0]:
                 continue
             time.sleep(0.1)
             
-            if not send_binary_command(sock, CMD_STOP):
-                print(f"Failed to stop phase {phase}")
+            if not send_binary_command(sock, CMD_STOP)[0]:
                 continue
             
-            # Wait for packet
             words = validator.wait_for_manual_packet(timeout=5.0)
             if words is None:
                 print(f"Timeout waiting for phase {phase} packet")
@@ -480,7 +515,6 @@ def manual_cable_test(sock):
             collected_packets.append(words)
             print(f"Collected phase {phase} packet")
         
-        # Print results in same format as existing cable test
         print(f"\nCollected {len(collected_packets)} packets total")
         for i, words in enumerate(collected_packets):
             if i == 0:
@@ -492,7 +526,6 @@ def manual_cable_test(sock):
     except Exception as e:
         print(f"Error during manual cable test: {e}")
     finally:
-        # Ensure manual test mode is disabled
         global manual_cable_test_mode
         manual_cable_test_mode = False
 
@@ -501,35 +534,35 @@ def tcp_control():
     try:
         sock.connect((ZYNQ_IP, TCP_PORT))
         print(f"[TCP] Connected to {ZYNQ_IP}:{TCP_PORT}")
-        print(f"[TCP] Using binary command protocol")
-        print(f"[TCP] Available commands:")
-        print(f"  Basic Control:")
-        print(f"    start - Begin data streaming")
-        print(f"    stop  - Stop data streaming") 
-        print(f"    reset_timestamp - Reset timestamp to 0")
-        print(f"    loop <count> - Set loop count (0=infinite)")
-        print(f"  COPI Command Sequences:")
-        print(f"    convert - Set normal data acquisition sequence")
-        print(f"    init    - Set chip initialization sequence")
-        print(f"    cable_test - Set cable length test sequence")
-        print(f"    test_pattern - Set COPI test pattern")
-        print(f"    full_cable_test - Run automated cable test")
-        print(f"    manual_cable_test - Manual cable test with step-by-step control")
-        print(f"  Configuration:")
-        print(f"    set_phase <p0> <p1> - Set phase delay for CIPO cables")
-        print(f"    set_debug <0|1> - Send dummy data vs real CIPO data")
-        print(f"    set_channels <hex> - Set channel enable (0x1=CIPO0_REG, 0x2=CIPO0_DDR, 0x4=CIPO1_REG, 0x8=CIPO1_DDR)")
-        print(f"  Status/Debug:")
-        print(f"    status - Show PL status")
-        print(f"    dump_bram [start] [count] - Show BRAM contents")
-        print(f"    stats - Show current statistics")
-        print(f"    hex - Show last packet in hex format")
-        print(f"  Utility:")
-        print(f"    help - Show all commands")
-        print(f"    quit - Exit program")
+        
+        # Auto-configure UDP destination
+        local_ip = get_local_ip()
+        print(f"[TCP] Detected local IP: {local_ip}")
+        print(f"[TCP] Configuring device to send UDP to this machine...")
+        
+        if set_udp_dest(sock, local_ip, UDP_PORT):
+            print(f"[TCP] ✓ Device configured to send UDP packets here")
+        else:
+            print(f"[TCP] ✗ Failed to configure UDP destination")
+            print(f"[TCP] Device may still be sending to default: 192.168.18.100:{UDP_PORT}")
+        
+        # Get and display initial status
+        print("\n[TCP] Getting initial device status...")
+        status = get_status(sock)
+        if status:
+            print_status(status)
+            validator.set_channel_enable(status['channel_enable'])
+        
+        print(f"\n[TCP] Available commands:")
+        print(f"  Basic: start, stop, reset_timestamp, loop <count>")
+        print(f"  COPI: convert, init, cable_test, full_cable_test, manual_cable_test")
+        print(f"  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x0-0xF>")
+        print(f"  Network: set_udp <ip> <port>, get_status")
+        print(f"  Debug: dump_bram [start] [count], stats, hex")
+        print(f"  Utility: help, quit")
         
         while True:
-            cmd = input("\n[TCP] Enter command: ").strip().lower()
+            cmd = input("\n[TCP] Command: ").strip().lower()
             
             if cmd == "quit":
                 break
@@ -540,83 +573,63 @@ def tcp_control():
             elif cmd == "reset_timestamp":
                 send_binary_command(sock, CMD_RESET_TIMESTAMP)
                 validator.last_timestamp = None
-                print("[TCP] Local timestamp tracking reset")
             elif cmd == "convert":
                 send_binary_command(sock, CMD_LOAD_CONVERT)
             elif cmd == "init":
                 send_binary_command(sock, CMD_LOAD_INIT)
             elif cmd == "cable_test":
                 send_binary_command(sock, CMD_LOAD_CABLE_TEST)
-            elif cmd == "test_pattern":
-                send_binary_command(sock, CMD_LOAD_TEST_PATTERN)
             elif cmd == "full_cable_test":
-                # Enable all channels for cable test
-                if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F):
+                if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F)[0]:
                     validator.start_cable_test_capture()
                     send_binary_command(sock, CMD_FULL_CABLE_TEST)
-                else:
-                    print("Failed to enable all channels for cable test")
             elif cmd == "manual_cable_test":
                 manual_cable_test(sock)
-            elif cmd == "status":
-                send_binary_command(sock, CMD_GET_STATUS)
-            elif cmd == "help":
-                send_binary_command(sock, CMD_HELP)
+            elif cmd == "get_status":
+                status = get_status(sock)
+                if status:
+                    print_status(status)
             elif cmd.startswith("loop "):
                 try:
-                    parts = cmd.split()
-                    if len(parts) == 2:
-                        loop_count = int(parts[1])
-                        send_binary_command(sock, CMD_SET_LOOP_COUNT, loop_count)
-                    else:
-                        print("Usage: loop <count>")
-                except ValueError:
-                    print("Invalid loop count")
+                    loop_count = int(cmd.split()[1])
+                    send_binary_command(sock, CMD_SET_LOOP_COUNT, loop_count)
+                except (ValueError, IndexError):
+                    print("Usage: loop <count>")
             elif cmd.startswith("set_phase "):
                 try:
                     parts = cmd.split()
                     if len(parts) == 3:
-                        phase0 = int(parts[1])
-                        phase1 = int(parts[2])
-                        send_binary_command(sock, CMD_SET_PHASE, phase0, phase1)
+                        send_binary_command(sock, CMD_SET_PHASE, int(parts[1]), int(parts[2]))
                     else:
                         print("Usage: set_phase <phase0> <phase1>")
                 except ValueError:
                     print("Invalid phase values")
             elif cmd.startswith("set_debug "):
                 try:
-                    parts = cmd.split()
-                    if len(parts) == 2:
-                        debug_mode = int(parts[1])
-                        send_binary_command(sock, CMD_SET_DEBUG_MODE, debug_mode)
-                    else:
-                        print("Usage: set_debug <0|1>")
-                except ValueError:
-                    print("Invalid debug value")
+                    debug_mode = int(cmd.split()[1])
+                    send_binary_command(sock, CMD_SET_DEBUG_MODE, debug_mode)
+                except (ValueError, IndexError):
+                    print("Usage: set_debug <0|1>")
             elif cmd.startswith("set_channels "):
                 try:
-                    parts = cmd.split()
-                    if len(parts) == 2:
-                        # Support both hex (0xF) and decimal (15) input
-                        if parts[1].lower().startswith('0x'):
-                            channel_enable = int(parts[1], 16)
-                        else:
-                            channel_enable = int(parts[1])
-                        
-                        if 0 <= channel_enable <= 15:
-                            if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, channel_enable):
-                                validator.set_channel_enable(channel_enable)
-                            else:
-                                print("Failed to set channel enable on device")
-                        else:
-                            print("Channel enable must be 0-15 (0x0-0xF)")
+                    val = cmd.split()[1]
+                    channel_enable = int(val, 16) if val.startswith('0x') else int(val)
+                    if 0 <= channel_enable <= 15:
+                        if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, channel_enable)[0]:
+                            validator.set_channel_enable(channel_enable)
                     else:
-                        print("Usage: set_channels <0x0-0xF>")
-                        print("  0x1 = CIPO0 regular, 0x2 = CIPO0 DDR")
-                        print("  0x4 = CIPO1 regular, 0x8 = CIPO1 DDR")
-                        print(f"  Current: 0x{validator.current_channel_enable:X} ({channel_enable_to_string(validator.current_channel_enable)})")
-                except ValueError:
-                    print("Invalid channel enable value")
+                        print("Channel enable must be 0-15")
+                except (ValueError, IndexError):
+                    print("Usage: set_channels <0x0-0xF>")
+            elif cmd.startswith("set_udp "):
+                try:
+                    parts = cmd.split()
+                    if len(parts) == 3:
+                        set_udp_dest(sock, parts[1], int(parts[2]))
+                    else:
+                        print("Usage: set_udp <ip> <port>")
+                except (ValueError, IndexError):
+                    print("Invalid IP or port")
             elif cmd.startswith("dump_bram"):
                 try:
                     parts = cmd.split()
@@ -624,33 +637,35 @@ def tcp_control():
                     word_count = int(parts[2]) if len(parts) > 2 else 10
                     send_binary_command(sock, CMD_DUMP_BRAM, start_addr, word_count)
                 except (ValueError, IndexError):
-                    send_binary_command(sock, CMD_DUMP_BRAM, 0, 10)  # Default values
+                    send_binary_command(sock, CMD_DUMP_BRAM, 0, 10)
             elif cmd == "stats":
                 validator.print_statistics()             
-            elif cmd == "hex" or cmd == "packet_hex":
+            elif cmd == "hex":
                 validator.print_last_packet_hex()
+            elif cmd == "help":
+                print("Commands:")
+                print("  start, stop, reset_timestamp")
+                print("  loop <count>, set_phase <p0> <p1>")
+                print("  set_debug <0|1>, set_channels <0x0-0xF>")
+                print("  convert, init, cable_test")
+                print("  full_cable_test, manual_cable_test")
+                print("  set_udp <ip> <port>, get_status")
+                print("  dump_bram [start] [count]")
+                print("  stats, hex, quit")
             else:
-                print("[TCP] Invalid command. Available commands:")
-                print("  Basic: start, stop, reset_timestamp, status, help, loop <count>")
-                print("  COPI: convert, init, cable_test, test_pattern, full_cable_test, manual_cable_test")
-                print("  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x0-0xF>")
-                print("  Status/Debug: dump_bram [start] [count], stats, hex")
-                print("  Utility: quit")
+                print(f"Unknown command: '{cmd}'. Type 'help' for list.")
                 
     except ConnectionRefusedError:
         print(f"[TCP] Could not connect to {ZYNQ_IP}:{TCP_PORT}")
-        print(f"[TCP] Make sure the Zynq board is running and reachable")
     except KeyboardInterrupt:
-        print("\n[TCP] Closing TCP connection")
+        print("\n[TCP] Closing connection")
     finally:
         sock.close()
 
 if __name__ == "__main__":
     print("=== Zynq BRAM Data Generator Validator ===")
-    print("This program validates data from your BRAM-based Zynq data generator.")
-    print(f"Default: {validator.expected_packet_size_words}-word packets ({validator.expected_packet_size_bytes} bytes)")
-    print(f"Magic number: 0x{MAGIC_NUMBER_HIGH:08X}{MAGIC_NUMBER_LOW:08X}")
-    print("Using binary TCP command protocol")
+    print(f"Device: {ZYNQ_IP}:{TCP_PORT}")
+    print(f"UDP Port: {UDP_PORT}")
     print("Press Ctrl+C to stop.\n")
     
     udp_thread = threading.Thread(target=udp_listener, daemon=True)
@@ -658,6 +673,4 @@ if __name__ == "__main__":
     
     tcp_control()
     
-    # Give UDP thread a moment to print final stats
     time.sleep(0.5)
-    

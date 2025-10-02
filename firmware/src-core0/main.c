@@ -34,15 +34,13 @@ uint32_t error_count = 0;
 // UDP transmission
 uint32_t udp_packets_sent = 0;
 uint32_t udp_send_errors = 0;
+// UDP configuration (can be changed via TCP command)
+uint32_t udp_dest_ip = 0;      // Will be initialized in main()
+uint16_t udp_dest_port = DEFAULT_UDP_DEST_PORT;
 
 // Pre-allocated packet buffer for UDP (sized for maximum packet)
 // Use __attribute__((aligned(64))) to align to cache line boundary for optimal performance
 static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
-
-// Serial debug command buffer
-#define SERIAL_CMD_BUFFER_SIZE 64
-static char serial_cmd_buffer[SERIAL_CMD_BUFFER_SIZE];
-static int serial_cmd_index = 0;
 
 // ============================================================================
 // PACKET SIZE CALCULATION FUNCTIONS
@@ -119,7 +117,7 @@ static int process_packet_from_bram(void) {
   uint32_t magic_high = Xil_In32(BRAM_BASE_ADDR + (magic_high_offset * 4));
 
   // Reconstruct 64-bit magic number
-  uint64_t magic = ((u64)magic_high << 32) | magic_low;
+  uint64_t magic = ((uint64_t)magic_high << 32) | magic_low;
 
   // Validate magic number
   if (magic != 0xCAFEBABEDEADBEEF) {
@@ -138,11 +136,30 @@ static int process_packet_from_bram(void) {
   // Copy variable sized packet data to pre-allocated buffer.
   // TODO: Consider replacing with memcpy
   
+  /*
+  // Unoptimized copy
   for (int i = 0; i < current_packet_size; i++) {
     uint32_t word_offset = (ps_read_address + i) % BRAM_SIZE_WORDS;
     uint32_t safe_addr = BRAM_BASE_ADDR + (word_offset * 4);
     udp_packet_buffer[i] = Xil_In32(safe_addr);
   }
+  */
+    // Copy packet data using optimized memcpy
+    if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
+        // No wrap - single memcpy
+        memcpy(udp_packet_buffer,
+               (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
+               current_packet_size * 4);
+    } else {
+        // Handle wrap with two memcpys
+        uint32_t first_part = BRAM_SIZE_WORDS - ps_read_address;
+        memcpy(udp_packet_buffer,
+               (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
+               first_part * 4);
+        memcpy(&udp_packet_buffer[first_part],
+               (void*)BRAM_BASE_ADDR,
+               (current_packet_size - first_part) * 4);
+    }  
   
   // Create pbuf that references our buffer directly (zero-copy!)
   uint32_t packet_bytes = current_packet_size * BYTES_PER_WORD;
@@ -150,9 +167,13 @@ static int process_packet_from_bram(void) {
   if (p != NULL) {
     // Point pbuf payload directly to our buffer (zero-copy!)
     p->payload = (void*)udp_packet_buffer;
+
+    // Send using udp_sendto (no connect required)
+    ip_addr_t dest_ip;
+    dest_ip.addr = udp_dest_ip;
+    err_t result = udp_sendto(udp, p, &dest_ip, udp_dest_port);
+    // err_t result = udp_send(udp, p);
     
-    // Send UDP packet
-    err_t result = udp_send(udp, p);
     if (result == ERR_OK) {
       udp_packets_sent++;
     } else {
@@ -168,7 +189,6 @@ static int process_packet_from_bram(void) {
   
   // Update read pointer with variable packet size
   ps_read_address = (ps_read_address + current_packet_size) % BRAM_SIZE_WORDS;
-  
   packets_received_count++;
   
   return 1;  // Success
@@ -248,21 +268,25 @@ void process_command_flags(void) {
     handle_reset_timestamp();
     command_flags->lock = 0;
   }
-  if( command_flags->pl_print_flag) {
+
+  if (command_flags->pl_print_flag) {
     command_flags->pl_print_flag = 0;
     pl_print_status();
     command_flags->lock = 0;
   }
-  if( command_flags->bram_benchmark_flag) {
+
+  if (command_flags->bram_benchmark_flag) {
     command_flags->bram_benchmark_flag = 0;
     benchmark_bram_reads();
     command_flags->lock = 0;
   }
-  if(command_flags->dump_bram_flag) {
+
+  if (command_flags->dump_bram_flag) {
     command_flags->dump_bram_flag = 0;
     pl_dump_bram_data(command_flags->start_bram_addr, command_flags->word_count);
     command_flags->lock = 0;
   }
+
   if (command_flags->cable_test_flag) {
     command_flags->cable_test_flag = 0;
     pl_run_full_cable_test();
@@ -279,7 +303,6 @@ void network_maintenance_loop(void) {
   xemacif_input(&server_netif);
   sys_check_timeouts();
   process_command_flags();
-
 }
 
 // ============================================================================
@@ -289,7 +312,6 @@ void network_maintenance_loop(void) {
 int main() {
   ip_addr_t ipaddr, netmask, gw;
   unsigned char mac_ethernet_address[] = { 0x00, 0x0a, 0x35, 0x00, 0x01, 0x02 };
-
 
   init_platform();
   XilTickTimer_Init(&timer);
@@ -316,7 +338,11 @@ int main() {
   isb();  // Instruction Synchronization Barrier
   // ========================================================================
 
-  xil_printf("Kemere Lab Intan Interface v1.0.0.0\n\r\n\r\n\r");
+  xil_printf("Kemere Lab Intan Interface v%d.%d.%d.%d\n\r\n\r\n\r",
+            FIRMWARE_VERSION_MAJOR,
+            FIRMWARE_VERSION_MINOR,
+            FIRMWARE_VERSION_PATCH,
+            FIRMWARE_VERSION_BUILD);
 
   // Initialize network
   IP4_ADDR(&ipaddr, 192, 168, 18, 10);
@@ -338,10 +364,9 @@ int main() {
 
   usleep(5000);
 
-  send_message("Debug server up and running. \r\n");
+  send_message("Debug server up and running.\r\n");
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
-  send_message("System ready. Commands: start, stop, reset_timestamp, status, dump_bram\r\n");
-  send_message("Serial debug: Type 'help' for commands\r\n");
+  send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   
   // Initialize PL
   pl_set_transmission(0);
@@ -361,7 +386,7 @@ int main() {
   
   send_message("debug> ");
   
-  // Main event loop - minimal copying, direct BRAM access with UDP transmission
+  // Main event loop
   while (1) {
     network_maintenance_loop();
     

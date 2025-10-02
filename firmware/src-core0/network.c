@@ -30,6 +30,7 @@ ID   | Command          | Param1              | Param2
 0x30 | FULL_CABLE_TEST  | unused              | unused
 0x40 | GET_STATUS       | unused              | unused
 0x41 | DUMP_BRAM        | start_addr          | word_count
+0x50 | SET_UDP_DEST     | ip_addr             | port
 */
 
 #define CMD_MAGIC           0xDEADBEEF
@@ -45,10 +46,11 @@ ID   | Command          | Param1              | Param2
 #define CMD_LOAD_CONVERT    0x20
 #define CMD_LOAD_INIT       0x21
 #define CMD_LOAD_CABLE_TEST 0x22
-#define CMD_LOAD_TEST_PATTERN 0x23
 #define CMD_FULL_CABLE_TEST 0x30
 #define CMD_GET_STATUS      0x40
 #define CMD_DUMP_BRAM       0x41
+#define CMD_SET_UDP_DEST    0x50
+
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
@@ -71,6 +73,118 @@ uint32_t sys_now(void) {
     return (uint32_t)(now / (XPAR_CPU_CORE_CLOCK_FREQ_HZ / 1000U));
 }
 
+// ============================================================================
+// UDP DESTINATION CONFIGURATION
+// ============================================================================
+
+int is_valid_udp_dest(uint32_t ip, uint16_t port) {
+    if (ip == 0x00000000) return 0;  // 0.0.0.0
+    if (ip == 0xFFFFFFFF) return 0;  // 255.255.255.255
+    if (port == 0) return 0;
+    
+    uint8_t first_octet = (ip & 0xFF);
+    if (first_octet == 127) return 0;  // Loopback
+    
+    return 1;
+}
+
+int udp_reconfigure_destination(uint32_t new_ip, uint16_t new_port) {
+    if (!is_valid_udp_dest(new_ip, new_port)) {
+        send_message("ERROR: Invalid UDP destination\r\n");
+        return 0;
+    }
+    
+    udp_dest_ip = new_ip;
+    udp_dest_port = new_port;
+    
+    ip_addr_t dest_ip;
+    dest_ip.addr = new_ip;
+    send_message("UDP destination updated to %s:%d\r\n",
+                 ip4addr_ntoa(&dest_ip), new_port);
+    
+    return 1;
+}
+
+void udp_stream_init() {
+    ip_addr_t dest_ip;
+    dest_ip.addr = udp_dest_ip;
+    
+    udp = udp_new();
+    if (udp == NULL) {
+        send_message("ERROR: Could not create UDP PCB\r\n");
+        return;
+    }
+    
+    send_message("UDP initialized (destination: %s:%d)\r\n",
+                 ip4addr_ntoa(&dest_ip), udp_dest_port);
+}
+
+// ============================================================================
+// STATUS DATA COLLECTION
+// ============================================================================
+
+void collect_status_data(status_response_t* status) {
+    memset(status, 0, sizeof(status_response_t));
+    
+    // Version and identification
+    status->version = PROTOCOL_VERSION;
+    status->device_type = DEVICE_TYPE_INTAN_INTERFACE;
+    status->firmware_version = FIRMWARE_VERSION_WORD;
+    
+    // PL Hardware Status
+    status->timestamp = pl_get_timestamp();
+    status->packets_sent = pl_get_packets_sent();
+    status->bram_write_addr = pl_get_bram_write_address();
+    status->state_counter = pl_get_state_counter();
+    status->cycle_counter = pl_get_cycle_counter();
+    
+    // PL Flags
+    status->flags_pl = 0;
+    if (pl_is_transmission_active()) {
+        status->flags_pl |= STATUS_PL_TRANSMISSION_ACTIVE;
+    }
+    if (pl_is_loop_limit_reached()) {
+        status->flags_pl |= STATUS_PL_LOOP_LIMIT_REACHED;
+    }
+    
+    // PS Software Status
+    status->packets_received = packets_received_count;
+    status->error_count = error_count;
+    status->udp_packets_sent = udp_packets_sent;
+    status->udp_send_errors = udp_send_errors;
+    status->ps_read_addr = ps_read_address;
+    status->packet_size = current_packet_size;
+    
+    // PS Flags
+    status->flags_ps = 0;
+    if (stream_enabled) {
+        status->flags_ps |= STATUS_PS_STREAM_ENABLED;
+    }
+    
+    // Current Configuration
+    status->loop_count = pl_get_current_loop_count();
+    int phase0, phase1;
+    pl_get_current_phase_select(&phase0, &phase1);
+    status->phase0 = phase0;
+    status->phase1 = phase1;
+    status->channel_enable = pl_get_current_channel_enable();
+    status->debug_mode = pl_get_current_debug_mode();
+    
+    // UDP Stream Information
+    status->udp_dest_ip = udp_dest_ip;
+    status->udp_dest_port = udp_dest_port;
+    status->udp_packet_format = UDP_PACKET_FORMAT_V1;
+    status->udp_bytes_sent = udp_packets_sent * current_packet_size * 4;
+    
+    // Get FIFO count
+    uint32_t status10 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET);
+    status->fifo_count = (status10 >> 14) & 0x1FF;
+}
+
+// ============================================================================
+// TCP RESPONSE FUNCTIONS
+// ============================================================================
+
 static void send_ack(struct tcp_pcb *tpcb, uint32_t ack_id, uint8_t status) {
     uint8_t response[3];
     response[0] = (ack_id >> 8) & 0xFF;  // High byte
@@ -79,6 +193,28 @@ static void send_ack(struct tcp_pcb *tpcb, uint32_t ack_id, uint8_t status) {
     tcp_write(tpcb, response, 3, TCP_WRITE_FLAG_COPY);
     tcp_output(tpcb);
 }
+
+static void send_response(struct tcp_pcb *tpcb, uint32_t ack_id, uint8_t status,
+                         const void* data, uint16_t data_len) {
+    uint8_t header[5];
+    header[0] = (ack_id >> 8) & 0xFF;
+    header[1] = ack_id & 0xFF;
+    header[2] = status;
+    header[3] = (data_len >> 8) & 0xFF;
+    header[4] = data_len & 0xFF;
+    
+    tcp_write(tpcb, header, 5, TCP_WRITE_FLAG_COPY);
+    
+    if (data && data_len > 0) {
+        tcp_write(tpcb, data, data_len, TCP_WRITE_FLAG_COPY);
+    }
+    
+    tcp_output(tpcb);
+}
+
+// ============================================================================
+// TCP COMMAND PROCESSING
+// ============================================================================
 
 static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
     uint8_t status = ACK_SUCCESS;
@@ -139,17 +275,43 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             command_flags->cable_test_flag = 1;
             send_message("Binary Command: FULL_CABLE_TEST\r\n");
             break;
-            
-        case CMD_GET_STATUS:
-            pl_print_status();
-            send_message("Binary Command: GET_STATUS\r\n");
+
+        case CMD_SET_UDP_DEST: {
+            uint32_t new_ip = cmd->param1;
+            uint16_t new_port = cmd->param2 & 0xFFFF;
+
+            // Convert from little-endian (host) to network byte order
+            new_ip = htonl(new_ip);            
+
+            if (udp_reconfigure_destination(new_ip, new_port)) {
+                ip_addr_t dest_ip;
+                dest_ip.addr = new_ip;
+                send_message("Binary Command: SET_UDP_DEST %s:%u\r\n",
+                            ip4addr_ntoa(&dest_ip), new_port);
+            } else {
+                status = ACK_ERROR;
+                send_message("Binary Command: SET_UDP_DEST FAILED\r\n");
+            }
             break;
+        }
+            
+        case CMD_GET_STATUS: {
+            pl_print_status();
+            status_response_t status_data;
+            collect_status_data(&status_data);
+            send_response(tpcb, cmd->ack_id, ACK_SUCCESS,
+                         &status_data, sizeof(status_data));
+            send_message("Binary Command: GET_STATUS (sent %d bytes)\r\n",
+                        sizeof(status_data));
+            return;  // Early return - don't call send_ack
+        }
             
         case CMD_DUMP_BRAM:
             command_flags->dump_bram_flag = 1;
             command_flags->start_bram_addr = cmd->param1;
             command_flags->word_count = cmd->param2;
-            send_message("Binary Command: DUMP_BRAM %u %u\r\n", cmd->param1, cmd->param2);
+            send_message("Binary Command: DUMP_BRAM %u %u\r\n",
+                        cmd->param1, cmd->param2);
             break;
             
         default:
@@ -160,6 +322,10 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
     
     send_ack(tpcb, cmd->ack_id, status);
 }
+
+// ============================================================================
+// TCP CALLBACKS
+// ============================================================================
 
 err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     (void)arg;
@@ -242,18 +408,4 @@ void start_tcp_server() {
     tcp_accept(pcb, tcp_accept_cb);
     send_message("Binary TCP command server started on port %d\r\n", TCP_PORT);
     send_message("Commands use 20-byte binary format with magic 0xDEADBEEF\r\n");
-}
-
-void udp_stream_init() {
-    ip_addr_t dest_ip;
-    IP4_ADDR(&dest_ip, 192, 168, 18, 100);
-    
-    udp = udp_new();
-    if (udp == NULL) {
-        send_message("ERROR: Could not create UDP PCB\r\n");
-        return;
-    }
-    
-    udp_connect(udp, &dest_ip, UDP_PORT);
-    send_message("UDP streaming initialized to %s:%d\r\n", ip4addr_ntoa(&dest_ip), UDP_PORT);
 }

@@ -12,6 +12,13 @@
 #define UDP_PORT 5000
 #define TCP_PORT 6000
 
+// Default UDP destination (can be changed via TCP command)
+#define DEFAULT_UDP_DEST_IP_A   192
+#define DEFAULT_UDP_DEST_IP_B   168
+#define DEFAULT_UDP_DEST_IP_C   18
+#define DEFAULT_UDP_DEST_IP_D   100
+#define DEFAULT_UDP_DEST_PORT   5000
+
 // ============================================================================
 // MULTICORE CONFIGURATION
 // ============================================================================
@@ -93,6 +100,79 @@
 #define STATUS_CHANNEL_ENABLE_REG_SHIFT 20
 
 // ============================================================================
+// TCP RESPONSE PROTOCOL
+// ============================================================================
+
+// Device type constants
+#define DEVICE_TYPE_INTAN_INTERFACE    0x1000
+
+// UDP packet format constants
+#define UDP_PACKET_FORMAT_V1           0x0001
+
+// Protocol version
+#define PROTOCOL_VERSION               1
+#define FIRMWARE_VERSION_MAJOR         1
+#define FIRMWARE_VERSION_MINOR         0
+#define FIRMWARE_VERSION_PATCH         0
+#define FIRMWARE_VERSION_BUILD         0
+#define FIRMWARE_VERSION_WORD          ((FIRMWARE_VERSION_MAJOR << 24) | \
+                                       (FIRMWARE_VERSION_MINOR << 16) | \
+                                       (FIRMWARE_VERSION_PATCH << 8) | \
+                                       FIRMWARE_VERSION_BUILD)
+
+// Response status codes
+#define ACK_SUCCESS         0x06
+#define ACK_ERROR           0x15
+
+// Status response structure (86 bytes total)
+typedef struct __attribute__((packed)) {
+    // Version and identification (8 bytes)
+    uint16_t version;
+    uint16_t device_type;
+    uint32_t firmware_version;
+    
+    // PL Hardware Status (22 bytes)
+    uint64_t timestamp;
+    uint32_t packets_sent;
+    uint32_t bram_write_addr;
+    uint16_t fifo_count;
+    uint8_t  state_counter;
+    uint8_t  cycle_counter;
+    uint8_t  flags_pl;
+    uint8_t  reserved1;
+    
+    // PS Software Status (28 bytes)
+    uint32_t packets_received;
+    uint32_t error_count;
+    uint32_t udp_packets_sent;
+    uint32_t udp_send_errors;
+    uint32_t ps_read_addr;
+    uint32_t packet_size;
+    uint8_t  flags_ps;
+    uint8_t  reserved2[3];
+    
+    // Current Configuration (16 bytes)
+    uint32_t loop_count;
+    uint8_t  phase0;
+    uint8_t  phase1;
+    uint8_t  channel_enable;
+    uint8_t  debug_mode;
+    uint32_t reserved3[2];
+    
+    // UDP Stream Information (12 bytes)
+    uint32_t udp_dest_ip;
+    uint16_t udp_dest_port;
+    uint16_t udp_packet_format;
+    uint32_t udp_bytes_sent;
+    
+} status_response_t;
+
+// Flag definitions
+#define STATUS_PL_TRANSMISSION_ACTIVE  (1 << 0)
+#define STATUS_PL_LOOP_LIMIT_REACHED   (1 << 1)
+#define STATUS_PS_STREAM_ENABLED       (1 << 0)
+
+// ============================================================================
 // GLOBAL VARIABLES
 // ============================================================================
 
@@ -122,6 +202,10 @@ extern uint32_t timestamp_gaps;
 // UDP transmission
 extern uint32_t udp_packets_sent;
 extern uint32_t udp_send_errors;
+
+// UDP configuration (can be changed via TCP command)
+extern uint32_t udp_dest_ip;      // Network byte order
+extern uint16_t udp_dest_port;
 
 // ============================================================================
 // CORE FUNCTIONS
@@ -179,7 +263,7 @@ void pl_dump_bram_data(uint32_t start_addr, uint32_t word_count);
 void pl_set_copi_commands(const uint16_t copi_array[35]);
 int pl_set_copi_commands_safe(const uint16_t copi_array[35], const char* sequence_name);
 
-// COPI sequence selection functions
+// COPI sequence selection
 void pl_set_convert_sequence(void);
 void pl_set_initialization_sequence(void);
 void pl_set_cable_length_sequence(void);
@@ -195,7 +279,6 @@ extern const uint16_t cable_length_cmd_sequence[35];
 // DEBUG FUNCTIONS
 // ============================================================================
 
-// BRAM benchmark function
 void benchmark_bram_reads(void);
 
 // ============================================================================
@@ -206,5 +289,12 @@ void benchmark_bram_reads(void);
 uint32_t sys_now(void);
 void start_tcp_server(void);
 void udp_stream_init(void);
+
+// UDP destination configuration
+int udp_reconfigure_destination(uint32_t new_ip, uint16_t new_port);
+int is_valid_udp_dest(uint32_t ip, uint16_t port);
+
+// Status data collection
+void collect_status_data(status_response_t* status);
 
 #endif // MAIN_H
