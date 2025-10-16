@@ -5,6 +5,8 @@ import time
 import random
 import queue
 import ipaddress
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
 
 ZYNQ_IP = "192.168.18.10"  # IP of the Zynq board
 TCP_PORT = 6000  # Must match your board's TCP_PORT
@@ -39,10 +41,400 @@ CMD_SET_UDP_DEST = 0x50
 ACK_SUCCESS = 0x06
 ACK_ERROR = 0x15
 
+# Cable test constants - ALWAYS use all channels for cable test
+CABLE_TEST_CHANNEL_ENABLE = 0x0F  # All channels always
+CABLE_TEST_PACKET_SIZE_WORDS = 74  # 4 header + 70 data words
+CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
+
 # Cable test globals
 cable_test_mode = False
 cable_test_packets_captured = 0
 manual_cable_test_mode = False
+
+# ============================================================================
+# AUTOMATED CABLE DETECTION CLASSES
+# ============================================================================
+
+@dataclass
+class PhaseResult:
+    phase: int
+    cipo0_score: float
+    cipo1_score: float
+    intan_pattern_cipo0: List[int]
+    intan_pattern_cipo1: List[int]
+    miso_register_cipo0: int
+    miso_register_cipo1: int
+    cipo0_valid: bool
+    cipo1_valid: bool
+    cipo0_has_ddr: bool = False
+    cipo1_has_ddr: bool = False
+
+@dataclass
+class DetectionResult:
+    success: bool
+    chips_detected: bool
+    best_phase0: int
+    best_phase1: int
+    optimal_channel_mask: int
+    best_cipo0_score: float
+    best_cipo1_score: float
+    cipo0_present: bool
+    cipo1_present: bool
+    cipo0_has_ddr: bool
+    cipo1_has_ddr: bool
+    all_results: List[PhaseResult]
+    
+    def get_channel_summary(self) -> str:
+        if not self.chips_detected:
+            return "No chips detected"
+        
+        channels = []
+        if self.cipo0_present:
+            if self.cipo0_has_ddr:
+                channels.append("CIPO0 (Regular + DDR)")
+            else:
+                channels.append("CIPO0 (Regular only)")
+        
+        if self.cipo1_present:
+            if self.cipo1_has_ddr:
+                channels.append("CIPO1 (Regular + DDR)")
+            else:
+                channels.append("CIPO1 (Regular only)")
+        
+        return f"Active channels: {', '.join(channels)}" if channels else "Chips detected but channels unclear"
+    
+    def get_recommendation(self) -> str:
+        if not self.success:
+            return "Detection failed. Check connections and try manual configuration."
+        
+        if not self.chips_detected:
+            return ("No Intan chips detected. Verify:\n"
+                   "  - SPI cable connections\n"
+                   "  - Chip power supply\n"
+                   "  - Cable integrity")
+        
+        confidence = "High" if self.best_score > 50 else "Medium"
+        return (f"Recommended configuration:\n"
+               f"  Phase0: {self.best_phase0}\n"
+               f"  Phase1: {self.best_phase1}\n"
+               f"  Channel mask: 0x{self.optimal_channel_mask:X}\n"
+               f"  {self.get_channel_summary()}\n"
+               f"  Detection confidence: {confidence}")
+
+"""
+Simplified automated cable detection for Intan interface
+Reduced from ~500 lines to ~250 lines while maintaining functionality
+"""
+
+import queue
+import time
+import struct
+from typing import List, Tuple, Optional
+from dataclasses import dataclass
+
+# Cable test uses all channels (for detection only)
+CABLE_TEST_CHANNEL_ENABLE = 0x0F
+CABLE_TEST_PACKET_SIZE_WORDS = 74
+CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
+
+# Expected patterns and chip IDs
+INTAN_PATTERN = [0x0049, 0x004E, 0x0054, 0x0041, 0x004E]  # 'I', 'N', 'T', 'A', 'N'
+CHIP_ID_DDR = 4        # RHD2164 with DDR
+CHIP_ID_NO_DDR = 1     # RHD2132 without DDR
+MISO_REG_DDR = 0x35    # MISO register regular word when DDR available
+MISO_DDR_DDR = 0x3A    # MISO register DDR word when DDR available
+MISO_NO_DDR = 0x00     # MISO register when no DDR
+
+"""
+Simplified automated cable detection for Intan interface
+Reduced from ~500 lines to ~250 lines while maintaining functionality
+"""
+
+import queue
+import time
+import struct
+from typing import List, Tuple, Optional
+from dataclasses import dataclass
+
+# Cable test uses all channels (for detection only)
+CABLE_TEST_CHANNEL_ENABLE = 0x0F
+CABLE_TEST_PACKET_SIZE_WORDS = 74
+CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
+
+# Expected patterns and chip IDs
+INTAN_PATTERN = [0x0049, 0x004E, 0x0054, 0x0041, 0x004E]  # 'I', 'N', 'T', 'A', 'N'
+CHIP_ID_DDR = 4        # RHD2164 with DDR
+CHIP_ID_NO_DDR = 1     # RHD2132 without DDR
+MISO_REG_DDR = 0x35    # MISO register regular word when DDR available
+MISO_DDR_DDR = 0x3A    # MISO register DDR word when DDR available
+MISO_NO_DDR = 0x00     # MISO register when no DDR
+
+@dataclass
+class PhaseResult:
+    phase: int
+    cipo0_score: float
+    cipo1_score: float
+    cipo0_has_ddr: bool
+    cipo1_has_ddr: bool
+
+@dataclass
+class DetectionResult:
+    success: bool
+    best_phase: int
+    optimal_channel_mask: int
+    cipo0_detected: bool
+    cipo1_detected: bool
+    cipo0_has_ddr: bool
+    cipo1_has_ddr: bool
+    all_phases: List[PhaseResult]
+    
+    def summary(self) -> str:
+        if not self.success:
+            return "No chips detected. Check SPI connections and power supply."
+        
+        channels = []
+        if self.cipo0_detected:
+            channels.append(f"CIPO0 ({'DDR' if self.cipo0_has_ddr else 'Regular only'})")
+        if self.cipo1_detected:
+            channels.append(f"CIPO1 ({'DDR' if self.cipo1_has_ddr else 'Regular only'})")
+        
+        return (f" Chips detected!\n"
+                f"  Phase: {self.best_phase}\n"
+                f"  Channels: {', '.join(channels)}\n"
+                f"  Channel mask: 0x{self.optimal_channel_mask:X}")
+
+
+class CableDetection:
+    def __init__(self, send_tcp_command_func):
+        """
+        Initialize with a command function that takes (cmd_id, param1, param2)
+        and returns (success: bool, data: Optional[bytes])
+        """
+        self.send_cmd = send_tcp_command_func
+        self.packet_queue = queue.Queue()
+        self.capturing = False
+    
+    def capture_packet(self, words: List[int]):
+        """Callback for UDP validator to provide packets during detection"""
+        if self.capturing:
+            try:
+                self.packet_queue.put_nowait(list(words))
+            except queue.Full:
+                pass
+    
+    def detect(self, verbose=False) -> DetectionResult:
+        """Run automated detection and return results"""
+        
+        result = DetectionResult(
+            success=False, best_phase=0, optimal_channel_mask=0,
+            cipo0_detected=False, cipo1_detected=False,
+            cipo0_has_ddr=False, cipo1_has_ddr=False, all_phases=[]
+        )
+        
+        try:
+            if verbose:
+                print("[Detection] Starting automated cable detection...")
+            
+            # Initialize and configure
+            if not self._initialize_chips(verbose):
+                return result
+            
+            # Test all phases
+            best_score = -1000
+            for phase in range(16):
+                if verbose:
+                    print(f"[Detection] Testing phase {phase}...")
+                
+                phase_result = self._test_phase(phase, verbose)
+                result.all_phases.append(phase_result)
+                
+                # Only consider phases where at least one channel is detected (score > 60)
+                cipo0_valid = phase_result.cipo0_score > 60
+                cipo1_valid = phase_result.cipo1_score > 60
+                
+                if cipo0_valid or cipo1_valid:
+                    # For valid detections, use sum of scores
+                    total_score = phase_result.cipo0_score + phase_result.cipo1_score
+                    if total_score > best_score:
+                        best_score = total_score
+                        result.best_phase = phase
+                        result.cipo0_detected = cipo0_valid
+                        result.cipo1_detected = cipo1_valid
+                        result.cipo0_has_ddr = phase_result.cipo0_has_ddr
+                        result.cipo1_has_ddr = phase_result.cipo1_has_ddr
+            
+            # Calculate success and channel mask
+            result.success = result.cipo0_detected or result.cipo1_detected
+            
+            if result.success:
+                result.optimal_channel_mask = 0
+                if result.cipo0_detected:
+                    result.optimal_channel_mask |= 0x01  # CIPO0 regular
+                    if result.cipo0_has_ddr:
+                        result.optimal_channel_mask |= 0x02  # CIPO0 DDR
+                if result.cipo1_detected:
+                    result.optimal_channel_mask |= 0x04  # CIPO1 regular
+                    if result.cipo1_has_ddr:
+                        result.optimal_channel_mask |= 0x08  # CIPO1 DDR
+            
+            if verbose:
+                print(f"[Detection] Complete: {result.summary()}")
+        
+        except Exception as e:
+            if verbose:
+                print(f"[Detection] Error: {e}")
+        
+        return result
+    
+    def apply_config(self, result: DetectionResult) -> bool:
+        """Apply detected configuration to device"""
+        if not result.success:
+            return False
+        
+        CMD_SET_PHASE = 0x11
+        CMD_SET_CHANNEL_ENABLE = 0x13
+        
+        return (self.send_cmd(CMD_SET_PHASE, result.best_phase, result.best_phase)[0] and
+                self.send_cmd(CMD_SET_CHANNEL_ENABLE, result.optimal_channel_mask)[0])
+    
+    def _initialize_chips(self, verbose) -> bool:
+        """Initialize chips for testing"""
+        CMD_STOP = 0x02
+        CMD_START = 0x01
+        CMD_SET_LOOP_COUNT = 0x10
+        CMD_LOAD_INIT = 0x21
+        CMD_LOAD_CABLE_TEST = 0x22
+        CMD_SET_CHANNEL_ENABLE = 0x13
+        
+        if verbose:
+            print("[Detection] Initializing chips...")
+        
+        # Stop, set loop count, enable all channels
+        if not (self.send_cmd(CMD_STOP)[0] and
+                self.send_cmd(CMD_SET_LOOP_COUNT, 1)[0] and
+                self.send_cmd(CMD_SET_CHANNEL_ENABLE, CABLE_TEST_CHANNEL_ENABLE)[0]):
+            return False
+        
+        # Load and run initialization sequence
+        if not self.send_cmd(CMD_LOAD_INIT)[0]:
+            return False
+        
+        if not self.send_cmd(CMD_START)[0]:
+            return False
+        time.sleep(0.1)
+        self.send_cmd(CMD_STOP)
+        
+        # Load cable test sequence
+        return self.send_cmd(CMD_LOAD_CABLE_TEST)[0]
+    
+    def _test_phase(self, phase: int, verbose: bool) -> PhaseResult:
+        """Test a single phase configuration"""
+        CMD_SET_PHASE = 0x11
+        CMD_START = 0x01
+        CMD_STOP = 0x02
+        
+        result = PhaseResult(
+            phase=phase, cipo0_score=0, cipo1_score=0,
+            cipo0_has_ddr=False, cipo1_has_ddr=False
+        )
+        
+        try:
+            # Set phase
+            if not self.send_cmd(CMD_SET_PHASE, phase, phase)[0]:
+                return result
+            time.sleep(0.01)
+            
+            # Capture packet
+            self.capturing = True
+            self.send_cmd(CMD_START)
+            
+            try:
+                packet = self.packet_queue.get(timeout=2.0)
+            except queue.Empty:
+                return result
+            finally:
+                self.send_cmd(CMD_STOP)
+                self.capturing = False
+            
+            # Score packet
+            result.cipo0_score, result.cipo0_has_ddr = self._score_channel(packet, 0, verbose)
+            result.cipo1_score, result.cipo1_has_ddr = self._score_channel(packet, 1, verbose)
+            
+            if verbose and (result.cipo0_score > 0 or result.cipo1_score > 0):
+                print(f"  Phase {phase}: CIPO0={result.cipo0_score:.0f}, CIPO1={result.cipo1_score:.0f}")
+        
+        except Exception as e:
+            if verbose:
+                print(f"  Error testing phase {phase}: {e}")
+        
+        return result
+    
+    def _score_channel(self, packet: List[int], channel: int, verbose: bool) -> Tuple[float, bool]:
+        """
+        Score a channel (0=CIPO0, 1=CIPO1) from packet data
+        
+        Packet structure: [Header(4)] + [Data(70)]
+        Data words alternate: CIPO0, CIPO1, CIPO0, CIPO1, ...
+        Each word: [Regular(15:0), DDR(31:16)]
+        
+        Cable test reads (with 2-cycle pipeline delay):
+          Cycles 0-4: INTAN pattern -> appears at data indices 2-6
+          Cycle 5: Chip ID -> appears at data index 7
+          Cycle 6: MISO register -> appears at data index 8
+        """
+        if len(packet) < CABLE_TEST_PACKET_SIZE_WORDS:
+            return 0.0, False
+        
+        score = 0.0
+        has_ddr = False
+        
+        # Extract this channel's data (every other word, starting at channel offset)
+        data_words = packet[4:]  # Skip header
+        channel_words = [data_words[i] for i in range(channel, 70, 2)]  # Get every other word
+        
+        if len(channel_words) < 9:
+            return 0.0, False
+        
+        # Extract regular and DDR streams
+        regular = [w & 0xFFFF for w in channel_words]
+        ddr = [(w >> 16) & 0xFFFF for w in channel_words]
+        
+        # Score INTAN pattern (indices 2-6 due to 2-cycle pipeline delay)
+        intan_found = []
+        for i, expected in enumerate(INTAN_PATTERN):
+            idx = i + 2  # Pipeline delay
+            if idx < len(regular):
+                intan_found.append(regular[idx])
+                if regular[idx] == expected:
+                    score += 10
+        
+        # Check chip ID (index 7)
+        if len(regular) > 7 and len(ddr) > 7:
+            chip_id_reg = regular[7]
+            chip_id_ddr = ddr[7]
+            
+            if chip_id_reg == CHIP_ID_DDR and chip_id_ddr == CHIP_ID_DDR:
+                has_ddr = True
+                score += 10
+            elif chip_id_reg == CHIP_ID_NO_DDR:
+                score += 10
+        
+        # Check MISO register (index 8)
+        if len(regular) > 8 and len(ddr) > 8:
+            miso_reg = regular[8]
+            miso_ddr = ddr[8]
+            
+            if has_ddr and miso_reg == MISO_REG_DDR and miso_ddr == MISO_DDR_DDR:
+                score += 10
+            elif not has_ddr and miso_reg == MISO_NO_DDR:
+                score += 10
+        
+        if verbose and score > 60:
+            pattern_str = ''.join(chr(x) if 32 <= x <= 126 else '?' for x in intan_found)
+            ddr_str = "DDR" if has_ddr else "No DDR"
+            print(f"    CIPO{channel}: '{pattern_str}' ({ddr_str})")
+        
+        return score, has_ddr
 
 def calculate_data_words(channel_enable):
     """Calculate number of 32-bit data words based on channel enable setting"""
@@ -95,6 +487,13 @@ class DataValidator:
         self.expected_packet_size_words = calculate_packet_size(0x0F)
         self._manual_queue = queue.Queue()
         self._manual_lock = threading.Lock()
+        
+        # Cable detection integration
+        self.cable_detector = None
+
+    def set_cable_detector(self, detector):
+        """Set cable detector for packet capture integration"""
+        self.cable_detector = detector
 
     def set_channel_enable(self, channel_enable):
         """Update channel enable setting and recalculate packet sizes"""
@@ -148,9 +547,8 @@ class DataValidator:
 
         if cable_test_mode:
             if cable_test_packets_captured < 17:
-                expected_size = calculate_packet_size(0x0F) * 4
-                if len(data) == expected_size:
-                    words = struct.unpack(f'<{calculate_packet_size(0x0F)}I', data)
+                if len(data) == CABLE_TEST_PACKET_SIZE_BYTES:
+                    words = struct.unpack(f'<{CABLE_TEST_PACKET_SIZE_WORDS}I', data)
                     self.last_packet_words = words
                     if cable_test_packets_captured == 0:
                         print(f"Packet {cable_test_packets_captured + 1} (Init): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
@@ -164,9 +562,8 @@ class DataValidator:
                 return None
 
         if manual_cable_test_mode:
-            expected_size = calculate_packet_size(0x0F) * 4
-            if len(data) == expected_size:
-                words = struct.unpack(f'<{calculate_packet_size(0x0F)}I', data)
+            if len(data) == CABLE_TEST_PACKET_SIZE_BYTES:
+                words = struct.unpack(f'<{CABLE_TEST_PACKET_SIZE_WORDS}I', data)
                 try:
                     self._manual_queue.put_nowait(words)
                 except queue.Full:
@@ -187,6 +584,10 @@ class DataValidator:
         try:
             words = struct.unpack(f'<{self.expected_packet_size_words}I', data)
             self.last_packet_words = words
+
+            # Feed packets to cable detector if active (only for cable test packets)
+            if self.cable_detector and len(data) == CABLE_TEST_PACKET_SIZE_BYTES:
+                self.cable_detector.capture_packet(words)
 
             magic_combined = (words[1] << 32) | words[0]
             expected_magic = (MAGIC_NUMBER_HIGH << 32) | MAGIC_NUMBER_LOW
@@ -457,7 +858,7 @@ def manual_cable_test(sock):
     """Manual cable test using existing UDP infrastructure"""
     print("Manual cable test starting...")
 
-    if not send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F)[0]:
+    if not send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, CABLE_TEST_CHANNEL_ENABLE)[0]:
         print("Failed to set channel enable")
         return
     time.sleep(0.1)
@@ -529,6 +930,50 @@ def manual_cable_test(sock):
         global manual_cable_test_mode
         manual_cable_test_mode = False
 
+# ============================================================================
+# AUTOMATED CABLE DETECTION FUNCTION
+# ============================================================================
+
+def run_detection(sock, verbose=True):
+
+    # Create cable detector using our send_binary_command function
+    def command_wrapper(cmd_id, param1=0, param2=0):
+        return send_binary_command(sock, cmd_id, param1, param2)
+
+    detector = CableDetection(command_wrapper)
+    
+    # Hook into UDP validator
+    validator.set_cable_detector(detector)
+    
+    try:
+        result = detector.detect(verbose=verbose)
+        
+        print("\n" + "="*60)
+        print("DETECTION RESULTS")
+        print("="*60)
+        print(result.summary())
+        
+        if result.success:
+            print("\nPhase Analysis:")
+            print("Phase  CIPO0  CIPO1  DDR0  DDR1")
+            print("-----  -----  -----  ----  ----")
+            for pr in result.all_phases:
+                marker = "*" if pr.phase == result.best_phase else " "
+                print(f"{pr.phase:3d}{marker}  {pr.cipo0_score:5.0f}  {pr.cipo1_score:5.0f}  "
+                      f"{'Yes' if pr.cipo0_has_ddr else 'No ':3s}  "
+                      f"{'Yes' if pr.cipo1_has_ddr else 'No ':3s}")
+            
+            if detector.apply_config(result):
+                print("\nConfiguration applied successfully!")
+            else:
+                print("\nFailed to apply configuration")
+        
+        return result
+    
+    finally:
+        validator.set_cable_detector(None)
+
+
 def tcp_control():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -541,9 +986,9 @@ def tcp_control():
         print(f"[TCP] Configuring device to send UDP to this machine...")
         
         if set_udp_dest(sock, local_ip, UDP_PORT):
-            print(f"[TCP] ✓ Device configured to send UDP packets here")
+            print(f"[TCP] Device configured to send UDP packets here")
         else:
-            print(f"[TCP] ✗ Failed to configure UDP destination")
+            print(f"[TCP] Failed to configure UDP destination")
             print(f"[TCP] Device may still be sending to default: 192.168.18.100:{UDP_PORT}")
         
         # Get and display initial status
@@ -559,6 +1004,7 @@ def tcp_control():
         print(f"  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x0-0xF>")
         print(f"  Network: set_udp <ip> <port>, get_status")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
+        print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Utility: help, quit")
         
         while True:
@@ -566,6 +1012,8 @@ def tcp_control():
             
             if cmd == "quit":
                 break
+            elif cmd == "auto_cable_detect":
+                run_detection(sock, verbose=True)
             elif cmd == "start":
                 send_binary_command(sock, CMD_START)
             elif cmd == "stop":
@@ -580,7 +1028,7 @@ def tcp_control():
             elif cmd == "cable_test":
                 send_binary_command(sock, CMD_LOAD_CABLE_TEST)
             elif cmd == "full_cable_test":
-                if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F)[0]:
+                if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, CABLE_TEST_CHANNEL_ENABLE)[0]:
                     validator.start_cable_test_capture()
                     send_binary_command(sock, CMD_FULL_CABLE_TEST)
             elif cmd == "manual_cable_test":
@@ -649,6 +1097,7 @@ def tcp_control():
                 print("  set_debug <0|1>, set_channels <0x0-0xF>")
                 print("  convert, init, cable_test")
                 print("  full_cable_test, manual_cable_test")
+                print("  auto_cable_detect - NEW: Automated detection!")
                 print("  set_udp <ip> <port>, get_status")
                 print("  dump_bram [start] [count]")
                 print("  stats, hex, quit")
