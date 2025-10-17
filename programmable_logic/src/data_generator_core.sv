@@ -131,7 +131,7 @@ initial begin
     // Generate 512-point sine wave (signed 16-bit, ±32767 range)
     for (int i = 0; i < 512; i++) begin
         real angle = 2.0 * 3.14159265359 * i / 512.0;
-        real sine_real = 32767.0 * $sin(angle);
+        real sine_real = 32767.0 / 8 * $sin(angle);
         sine_lut[i] = $rtoi(sine_real);
     end
 end
