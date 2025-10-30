@@ -218,6 +218,16 @@ void handle_enable_streaming(void) {
   usleep(100);
   pl_reset_timestamp();
   usleep(1000);
+
+  // Fast-forward ps_read_address to current PL write position
+  // This discards any unread packets from the previous streaming session
+  // which may have a different packet size
+  uint32_t pl_write_addr = pl_get_bram_write_address();
+  if (ps_read_address != pl_write_addr) {
+    send_message("Discarding unread packets: ps_read=%u -> %u\r\n", 
+                 ps_read_address, pl_write_addr);
+    ps_read_address = pl_write_addr;
+  }
   
   // Enable streaming
   stream_enabled = 1;
