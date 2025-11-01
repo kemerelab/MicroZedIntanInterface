@@ -158,7 +158,7 @@ from dataclasses import dataclass
 
 # Cable test uses all channels (for detection only)
 CABLE_TEST_CHANNEL_ENABLE = 0x0F
-CABLE_TEST_PACKET_SIZE_WORDS = 74
+CABLE_TEST_PACKET_SIZE_WORDS = 80
 CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
 
 # Expected patterns and chip IDs
@@ -446,7 +446,7 @@ def calculate_data_words(channel_enable):
 
 def calculate_packet_size(channel_enable):
     """Calculate total packet size in words (header + data)"""
-    return 4 + calculate_data_words(channel_enable)
+    return 10 + calculate_data_words(channel_enable)
 
 def channel_enable_to_string(channel_enable):
     """Convert channel enable bits to human readable string"""
@@ -606,8 +606,8 @@ class DataValidator:
                 total_rate = self.packet_count / elapsed if elapsed > 0 else 0
                 inst_rate = (self.packet_count - self.last_packet_count) / (now - self.last_stats_time) if (now - self.last_stats_time) > 0 else 0
                 
-                if len(words) >= 8:
-                    data_sample = f"Data: [0x{words[4]:08X}, 0x{words[5]:08X}, 0x{words[6]:08X}, 0x{words[7]:08X}]"
+                if len(words) >= 14:
+                    data_sample = f"Data: [0x{words[10]:08X}, 0x{words[11]:08X}, 0x{words[12]:08X}, 0x{words[13]:08X}]"
                 else:
                     data_sample = f"Data: [packet too short]"
                 

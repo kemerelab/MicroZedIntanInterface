@@ -32,7 +32,10 @@ module data_generator_core (
     output logic        sclk,       // Serial clock
     output logic        copi,       // Controller Out, Peripheral In
     input  logic        cipo0,      // Controller In, Peripheral Out 0
-    input  logic        cipo1       // Controller In, Peripheral Out 1
+    input  logic        cipo1,       // Controller In, Peripheral Out 1
+
+    // External digital input
+    input  logic [7:0]  digital_in
 );
 
 // Extract control bits
@@ -123,7 +126,7 @@ logic [31:0] loop_counter;
 
 // Debug mode sine wave table index
 logic [8:0] dummy_data_index;
-// Debug mode 512-entry sine lookup table (signed 16-bit values)
+// Debug mode 512-entry sine lookup table (unsigned 16-bit values)
 logic [15:0] sine_lut [0:511];
 
 // Initialize sine lookup table
@@ -131,7 +134,7 @@ initial begin
     // Generate 512-point sine wave (signed 16-bit, ±32767 range)
     for (int i = 0; i < 512; i++) begin
         real angle = 2.0 * 3.14159265359 * i / 512.0;
-        real sine_real = 32767.0 / 8 * $sin(angle);
+        real sine_real = 32767.0 / 16 * $sin(angle) + 32767.0 / 16;
         sine_lut[i] = $rtoi(sine_real);
     end
 end
@@ -266,6 +269,10 @@ always_ff @(posedge clk) begin
             // COPI data transmission - MSB first, set on states 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60
             // Uses copi_words_reg[cycle_counter] as the source for each cycle's transmission  
             // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
+
+            // TODO: Add fast settle bit as a toggle and a configurable digital input. 
+            //       Fast settle should only be set or reset once per packet.
+
             if  (state_counter <= 7'd63) begin //removed part of conditional
                 logic [3:0] bit_index = ~state_counter[5:2];  // MSB first: ~0=15, ~1=14, ..., ~15=0
                 copi <= copi_words_reg[cycle_counter][bit_index];
@@ -296,6 +303,26 @@ always_ff @(posedge clk) begin
     end
 end
 
+
+// Digital input
+// Register for latching digital inputs
+logic [7:0] digital_in_latched;
+
+// Latch digital inputs at the start of each packet
+// TODO: Add the ability to toggle fast settle based on a configured pin
+
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        digital_in_latched <= 8'h0;
+    end else begin
+        if (transmission_active && is_first_cycle && state_counter == 7'd0) begin
+            // Latch digital inputs at the beginning of each packet
+            digital_in_latched <= digital_in;
+        end
+    end
+end
+
+
 // Data-to-BRAM processing
 always_ff @(posedge clk) begin
     if (!rstn) begin
@@ -312,7 +339,7 @@ always_ff @(posedge clk) begin
         
         if (transmission_active && !fifo_full) begin
             // Header writes (first cycle only) - always fully valid
-            if (state_counter inside {7'd0, 7'd1}) begin
+            if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3, 7'd4}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
                     fifo_channel_mask <= 4'b1111;  // Header is always fully valid
@@ -320,6 +347,11 @@ always_ff @(posedge clk) begin
                     case (state_counter)
                         7'd0: fifo_write_data <= {MAGIC_NUMBER_HIGH, MAGIC_NUMBER_LOW}; // magic number
                         7'd1: fifo_write_data <= timestamp;
+                        7'd2: fifo_write_data <= {56'h0, digital_in_latched};           // Digital inputs + reserved
+                        7'd3: fifo_write_data <= 64'h0;  // BREADCRUMB: Future analog channels 0-3 (4x16-bit values)
+                        7'd4: fifo_write_data <= 64'h0;  // BREADCRUMB: Future analog channels 4-7 (4x16-bit values)                        // TODO: Add another state here to transmit 64 bits of non-neural input and other sample-specific metadata
+                        // Metadata - value of the current "extra" register read from this cycle
+                        // Metadata - value of fast settle
                     endcase
                 end
             end 

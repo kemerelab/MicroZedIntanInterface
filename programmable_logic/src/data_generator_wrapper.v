@@ -20,6 +20,9 @@ module data_generator #(
     input  wire [32*22-1:0] ctrl_regs_pl,
     output wire [32*11-1:0]  status_regs_pl,
     
+    // Digital input (eventually should add analog input here!)
+    input  wire [7:0]  digital_in,
+
     // BRAM Port A interface (32-bit)
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA CLK" *)
     output wire            bram_clk,
@@ -110,7 +113,10 @@ module data_generator #(
         .sclk(sclk),
         .copi(copi),
         .cipo0(cipo0),
-        .cipo1(cipo1)
+        .cipo1(cipo1),
+
+        // Digital input
+        .digital_in(digital_in)
     );
 
     // Instantiate the FIFO-BRAM interface

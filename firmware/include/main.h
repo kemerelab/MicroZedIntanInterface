@@ -39,7 +39,7 @@
 #define BRAM_SIZE_BYTES         (BRAM_SIZE_WORDS * BYTES_PER_WORD)   // 64KB
 
 // Packet size calculation based on channel_enable bits
-#define PACKET_HEADER_WORDS     4           // Magic number + timestamp
+#define PACKET_HEADER_WORDS     10           // Magic number + timestamp
 #define MAX_PACKET_DATA_WORDS   70          // Maximum data words (all 4 channels enabled)
 #define MIN_PACKET_DATA_WORDS   18          // Minimum data words (1 channel enabled)
 #define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 74 words

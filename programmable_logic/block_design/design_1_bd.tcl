@@ -245,6 +245,7 @@ proc create_root_design { parentCell } {
   set led1 [ create_bd_port -dir O -type data led1 ]
   set UART1_TX_0 [ create_bd_port -dir O UART1_TX_0 ]
   set UART1_RX_0 [ create_bd_port -dir I UART1_RX_0 ]
+  set digital_in_0 [ create_bd_port -dir I -from 7 -to 0 digital_in_0 ]
 
   # Create instance: processing_system7_0, and set properties
   set processing_system7_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7:5.5 processing_system7_0 ]
@@ -729,6 +730,8 @@ proc create_root_design { parentCell } {
   connect_bd_net -net data_generator_bram_0_status_regs_pl  [get_bd_pins data_generator/status_regs_pl] \
   [get_bd_pins axi_lite_registers/status_regs_pl] \
   [get_bd_pins led_status_controller/status_regs_pl]
+  connect_bd_net -net digital_in_0_1  [get_bd_ports digital_in_0] \
+  [get_bd_pins data_generator/digital_in]
   connect_bd_net -net led_status_controller_0_led0  [get_bd_pins led_status_controller/led0] \
   [get_bd_ports led0]
   connect_bd_net -net led_status_controller_0_led1  [get_bd_pins led_status_controller/led1] \
