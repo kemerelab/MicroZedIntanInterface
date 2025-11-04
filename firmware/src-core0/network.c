@@ -67,6 +67,9 @@ typedef struct {
 static uint8_t recv_buffer[CMD_PACKET_SIZE];
 static uint16_t recv_buffer_pos = 0;
 
+// Track the listening TCP server PCB so we can properly close/restart it
+static struct tcp_pcb *tcp_server_pcb = NULL;
+
 uint32_t sys_now(void) {
     XTime now;
     XTime_GetTime(&now);
@@ -396,16 +399,57 @@ err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     return ERR_OK;
 }
 
+// ============================================================================
+// TCP SERVER MANAGEMENT FUNCTIONS
+// ============================================================================
+
+void tcp_server_reset(void) {
+    recv_buffer_pos = 0;
+    send_message("TCP server state reset\r\n");
+}
+
+void stop_tcp_server(void) {
+    if (tcp_server_pcb != NULL) {
+        tcp_close(tcp_server_pcb);
+        tcp_server_pcb = NULL;
+        send_message("TCP server stopped\r\n");
+    }
+    tcp_server_reset();
+}
+
 void start_tcp_server() {
-    struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) {
+    err_t err;
+
+    // Close existing server if already running
+    stop_tcp_server();
+
+    // Create new TCP PCB
+    tcp_server_pcb = tcp_new();
+    if (!tcp_server_pcb) {
         send_message("ERROR: Could not create TCP PCB\r\n");
         return;
     }
-    
-    tcp_bind(pcb, IP_ADDR_ANY, TCP_PORT);
-    pcb = tcp_listen(pcb);
-    tcp_accept(pcb, tcp_accept_cb);
+
+    // Bind to port
+    err = tcp_bind(tcp_server_pcb, IP_ADDR_ANY, TCP_PORT);
+    if (err != ERR_OK) {
+        send_message("ERROR: Could not bind TCP server to port %d (err=%d)\r\n",
+                     TCP_PORT, err);
+        tcp_close(tcp_server_pcb);
+        tcp_server_pcb = NULL;
+        return;
+    }
+
+    // Start listening
+    tcp_server_pcb = tcp_listen(tcp_server_pcb);
+    if (tcp_server_pcb == NULL) {
+        send_message("ERROR: tcp_listen failed\r\n");
+        return;
+    }
+
+    // Set accept callback
+    tcp_accept(tcp_server_pcb, tcp_accept_cb);
+
     send_message("Binary TCP command server started on port %d\r\n", TCP_PORT);
     send_message("Commands use 20-byte binary format with magic 0xDEADBEEF\r\n");
 }

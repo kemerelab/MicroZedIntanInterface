@@ -23,6 +23,10 @@ volatile int disable_streaming_flag = 0;
 volatile int reset_timestamp_flag = 0;
 volatile int cable_test_flag = 0;
 
+// Link state tracking for hotplug support
+volatile int link_is_up = 0;
+volatile int link_state_changed = 0;
+
 // BRAM state tracking
 uint32_t ps_read_address = 0;              // Current PS read position (word address)
 uint32_t current_packet_size = 74;         // Current expected packet size in 32-bit words (default to max)
@@ -260,6 +264,72 @@ void handle_reset_timestamp(void) {
   send_message("Timestamp and counters RESET\r\n");
 }
 
+// ============================================================================
+// LINK HOTPLUG HANDLERS
+// ============================================================================
+
+// Link state change callback - called by LWIP when link state changes
+void link_status_callback(struct netif *netif) {
+  (void)netif;  // Unused parameter
+
+  if (netif_is_link_up(netif)) {
+    // Link just came up
+    link_state_changed = 1;
+    link_is_up = 1;
+  } else {
+    // Link just went down
+    link_state_changed = 1;
+    link_is_up = 0;
+  }
+}
+
+void handle_link_down(void) {
+  if (!link_is_up) return;  // Already down
+
+  send_message("LINK DOWN - Cable disconnected\r\n");
+  link_is_up = 0;
+
+  // Stop streaming if active
+  if (stream_enabled) {
+    handle_disable_streaming();
+  }
+
+  // Flush BRAM buffer - discard unread packets
+  uint32_t pl_write_addr = pl_get_bram_write_address();
+  if (ps_read_address != pl_write_addr) {
+    send_message("Flushing %u unread words from BRAM\r\n",
+                 (pl_write_addr >= ps_read_address) ?
+                 (pl_write_addr - ps_read_address) :
+                 ((BRAM_SIZE_WORDS - ps_read_address) + pl_write_addr));
+    ps_read_address = pl_write_addr;
+  }
+
+  // Reset TCP receive buffer state
+  tcp_server_reset();
+
+  // LWIP will automatically abort active TCP connections
+  // UDP PCB remains alive but sends will fail (expected)
+
+  send_message("Network cleaned up, ready for reconnection\r\n");
+}
+
+void handle_link_up(void) {
+  if (link_is_up) return;  // Already up
+
+  send_message("LINK UP - Cable connected\r\n");
+  link_is_up = 1;
+
+  // Restart TCP server to ensure clean state
+  start_tcp_server();
+
+  // TODO: When DHCP is added later:
+  // - Call dhcp_start(&server_netif) here instead of static IP config
+  // - Wait for DHCP lease before starting TCP server
+  // - Fall back to static IP if DHCP fails after timeout
+
+  send_message("Network ready. IP: %s\r\n", ip4addr_ntoa(&server_netif.ip_addr));
+}
+
 void process_command_flags(void) {
   if (command_flags->enable_streaming_flag) {
     command_flags->enable_streaming_flag = 0;
@@ -309,9 +379,20 @@ void process_command_flags(void) {
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
   counter++;
-  
+
   xemacif_input(&server_netif);
   sys_check_timeouts();
+
+  // Handle link state changes (set by link_status_callback)
+  if (link_state_changed) {
+    link_state_changed = 0;
+    if (link_is_up) {
+      handle_link_up();
+    } else {
+      handle_link_down();
+    }
+  }
+
   process_command_flags();
 }
 
@@ -359,15 +440,19 @@ int main() {
   IP4_ADDR(&netmask, 255, 255, 255, 0);
   IP4_ADDR(&gw, 192, 168, 18, 1);
   
-  // TODO: Figure out how to make this work with hotplug
-  // TODO: Ideally, we'd allow for a DHCP option with some sort of discovery protocol
+  // TODO: Add DHCP support in handle_link_up() for dynamic IP configuration
+  // TODO: Consider adding UDP discovery beacon for clients to find device
   lwip_init();
-  
+
   netif_add(&server_netif, &ipaddr, &netmask, &gw, NULL, NULL, NULL);
   netif_set_default(&server_netif);
   xemac_add(&server_netif, &ipaddr, &netmask, &gw,
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
+
+  // Register link status callback for hotplug support
+  netif_set_link_callback(&server_netif, link_status_callback);
+  send_message("Network hotplug support enabled\r\n");
 
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
   sev(); // Send event to wake up ARM1

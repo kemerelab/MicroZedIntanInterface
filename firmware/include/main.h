@@ -189,6 +189,10 @@ extern volatile int disable_streaming_flag;
 extern volatile int reset_timestamp_flag;
 extern volatile int cable_test_flag;
 
+// Link state tracking for hotplug support
+extern volatile int link_is_up;
+extern volatile int link_state_changed;
+
 // BRAM state tracking
 extern uint32_t ps_read_address;              // Current PS read position (word address)
 extern uint32_t current_packet_size;          // Current expected packet size in 32-bit words
@@ -216,6 +220,10 @@ void handle_enable_streaming(void);
 void handle_disable_streaming(void);
 void handle_reset_timestamp(void);
 void process_command_flags(void);
+
+// Link hotplug handlers
+void handle_link_down(void);
+void handle_link_up(void);
 
 // Packet size calculation based on channel_enable
 uint32_t calculate_packet_size(int channel_enable);
@@ -288,6 +296,8 @@ void benchmark_bram_reads(void);
 // Network functions (implemented in network.c)
 uint32_t sys_now(void);
 void start_tcp_server(void);
+void stop_tcp_server(void);
+void tcp_server_reset(void);
 void udp_stream_init(void);
 
 // UDP destination configuration
