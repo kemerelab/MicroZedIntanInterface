@@ -269,18 +269,13 @@ void handle_reset_timestamp(void) {
 // ============================================================================
 
 // Link state change callback - called by LWIP when link state changes
+// This just signals that something changed; handlers will check the actual state
 void link_status_callback(struct netif *netif) {
   (void)netif;  // Unused parameter
 
-  if (netif_is_link_up(netif)) {
-    // Link just came up
-    link_state_changed = 1;
-    link_is_up = 1;
-  } else {
-    // Link just went down
-    link_state_changed = 1;
-    link_is_up = 0;
-  }
+  // Signal that link state has changed
+  // The handler will check netif_is_link_up() to determine direction
+  link_state_changed = 1;
 }
 
 void handle_link_down(void) {
@@ -328,6 +323,7 @@ void handle_link_up(void) {
   // - Fall back to static IP if DHCP fails after timeout
 
   send_message("Network ready. IP: %s\r\n", ip4addr_ntoa(&server_netif.ip_addr));
+  send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
 }
 
 void process_command_flags(void) {
@@ -386,7 +382,9 @@ void network_maintenance_loop(void) {
   // Handle link state changes (set by link_status_callback)
   if (link_state_changed) {
     link_state_changed = 0;
-    if (link_is_up) {
+
+    // Check actual link state from netif to determine what happened
+    if (netif_is_link_up(&server_netif)) {
       handle_link_up();
     } else {
       handle_link_down();
@@ -446,12 +444,24 @@ int main() {
 
   netif_add(&server_netif, &ipaddr, &netmask, &gw, NULL, NULL, NULL);
   netif_set_default(&server_netif);
+
+  // Register link status callback BEFORE bringing interface up
+  // This ensures we get callbacks for any link state changes
+  netif_set_link_callback(&server_netif, link_status_callback);
+
   xemac_add(&server_netif, &ipaddr, &netmask, &gw,
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
 
-  // Register link status callback for hotplug support
-  netif_set_link_callback(&server_netif, link_status_callback);
+  // Check initial link state after bringing interface up
+  if (netif_is_link_up(&server_netif)) {
+    link_is_up = 1;
+    send_message("Network link UP at boot\r\n");
+  } else {
+    link_is_up = 0;
+    send_message("Network link DOWN at boot - waiting for cable connection...\r\n");
+  }
+
   send_message("Network hotplug support enabled\r\n");
 
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
@@ -461,19 +471,25 @@ int main() {
 
   send_message("Debug server up and running.\r\n");
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
-  send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
-  
+
   // Initialize PL
   pl_set_transmission(0);
   pl_set_loop_count(0);
-    
+
   // Initialize packet size based on current channel_enable setting
   update_current_packet_size();
 
-  start_tcp_server();
-  
-  // Initialize UDP (always enabled)
+  // Initialize UDP PCB (always create it, but sends will fail if link is down)
   udp_stream_init();
+
+  // Only start TCP server if link is up at boot
+  // If link is down, handle_link_up() will start it when cable is connected
+  if (link_is_up) {
+    start_tcp_server();
+    send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
+  } else {
+    send_message("Waiting for network link... (plug in Ethernet cable)\r\n");
+  }
 
   // benchmark_bram_reads();
 
