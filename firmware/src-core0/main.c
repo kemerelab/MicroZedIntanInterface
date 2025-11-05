@@ -7,9 +7,12 @@
 #include "xil_cache.h"
 #include "lwip/init.h"
 #include "lwip/timeouts.h"
-#include "xemacpsif.h"
 //#include "xuartps.h"
 #include "shared_print.h"
+
+// Forward declare eth_link_detect from xemacpsif adapter
+// This function is provided by the LWIP library's Xilinx EMAC adapter
+extern void eth_link_detect(struct netif *netif);
 
 // Global variables
 XTimer timer;
