@@ -450,6 +450,10 @@ int main() {
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
 
+  // Poll PHY hardware to get accurate initial link state
+  // Without this, netif_is_link_up() returns stale/cached state
+  eth_link_detect(&server_netif);
+
   // Check initial link state after bringing interface up
   if (netif_is_link_up(&server_netif)) {
     link_is_up = 1;
