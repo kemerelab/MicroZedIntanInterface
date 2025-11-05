@@ -450,6 +450,19 @@ int main() {
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
 
+  // Poll PHY to detect initial link state right after xemac_add completes
+  // This must be done BEFORE starting services so LWIP has correct link state
+  eth_link_detect(&server_netif);
+  if (netif_is_link_up(&server_netif)) {
+    link_is_up = 1;
+    send_message("Network link UP at boot\r\n");
+  } else {
+    link_is_up = 0;
+    send_message("Network link DOWN at boot - waiting for cable connection...\r\n");
+  }
+
+  send_message("Network hotplug support enabled (polling every 500ms)\r\n");
+
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
   sev(); // Send event to wake up ARM1
 
@@ -465,24 +478,17 @@ int main() {
   // Initialize packet size based on current channel_enable setting
   update_current_packet_size();
 
-  // Always start TCP server at boot (hotplug handles reconnection if needed)
-  start_tcp_server();
-
   // Initialize UDP PCB (always create it, but sends will fail if link is down)
   udp_stream_init();
 
-  // Check initial link state after network stack has initialized
-  // This must be done AFTER starting services to avoid initialization timing issues
-  eth_link_detect(&server_netif);
-  if (netif_is_link_up(&server_netif)) {
-    link_is_up = 1;
-    send_message("Network link UP at boot\r\n");
+  // Only start TCP server if link is up at boot
+  // If link is down, handle_link_up() will start it when cable is connected
+  if (link_is_up) {
+    start_tcp_server();
   } else {
-    link_is_up = 0;
-    send_message("Network link DOWN at boot - waiting for cable connection...\r\n");
+    send_message("Waiting for network link... (plug in Ethernet cable)\r\n");
   }
 
-  send_message("Network hotplug support enabled (polling every 500ms)\r\n");
   send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
 
   // benchmark_bram_reads();
