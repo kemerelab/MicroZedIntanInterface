@@ -21,10 +21,8 @@ domain.set_config('lib', lib_name='xiltimer', param='XILTIMER_tick_timer', value
 domain.set_lib('lwip220')
 domain.set_config('lib', lib_name='lwip220', param='lwip220_no_sys_no_timers', value='false')
 
-status = domain.set_config(option = "proc", param = "proc_extra_compiler_flags", 
-                           value = " -O2 -g -Wall -Wextra -fno-tree-loop-distribute-patterns -DUSE_AMP=1 -DLWIP_NETIF_LINK_CALLBACK=1")
-
-# This last DEFINE is CRITICAL to allow for the code to work. So hard to figure out, but we got it!
+status = domain.set_config(option = "proc", param = "proc_extra_compiler_flags",
+                           value = " -O2 -g -Wall -Wextra -fno-tree-loop-distribute-patterns -DUSE_AMP=1")
 
 domain = platform.add_domain(cpu = "ps7_cortexa9_1",os = "standalone",
                              name = "standalone_ps7_cortexa9_1", display_name = "standalone_ps7_cortexa9_1",

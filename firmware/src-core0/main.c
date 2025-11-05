@@ -24,9 +24,8 @@ volatile int disable_streaming_flag = 0;
 volatile int reset_timestamp_flag = 0;
 volatile int cable_test_flag = 0;
 
-// Link state tracking for hotplug support (callback-based)
+// Link state tracking for hotplug support (polling-based)
 volatile int link_is_up = 0;
-volatile int link_state_changed = 0;
 
 // BRAM state tracking
 uint32_t ps_read_address = 0;              // Current PS read position (word address)
@@ -269,15 +268,6 @@ void handle_reset_timestamp(void) {
 // LINK HOTPLUG HANDLERS
 // ============================================================================
 
-// Link state change callback - called by LWIP when link state changes
-void link_status_callback(struct netif *netif) {
-  (void)netif;  // Unused parameter
-
-  // Signal that link state has changed
-  // The handler will check netif_is_link_up() to determine direction
-  link_state_changed = 1;
-}
-
 void handle_link_down(void) {
   if (!link_is_up) return;  // Already down
 
@@ -381,26 +371,21 @@ void network_maintenance_loop(void) {
   sys_check_timeouts();
 
   // Periodically check PHY link status (every 500ms)
-  // This polls the actual PHY hardware and updates LWIP's link state
-  // When link state changes, LWIP will call our link_status_callback()
+  // Polls actual PHY hardware and handles state changes directly
   uint32_t current_time = sys_now();
   if (current_time - last_link_check >= 500) {
     last_link_check = current_time;
 
-    // Call Xilinx EMAC PS link detection function
-    // This checks the PHY registers and updates netif->flags with NETIF_FLAG_LINK_UP
-    // If the link state changed, LWIP will trigger link_status_callback()
+    // Poll PHY hardware to check current link state
     eth_link_detect(&server_netif);
-  }
+    int current_link_state = netif_is_link_up(&server_netif) ? 1 : 0;
 
-  // Handle link state changes (set by link_status_callback)
-  if (link_state_changed) {
-    link_state_changed = 0;
-
-    // Check actual link state from netif to determine what happened
-    if (netif_is_link_up(&server_netif)) {
+    // Detect state changes and handle them
+    if (current_link_state && !link_is_up) {
+      // Link just came up
       handle_link_up();
-    } else {
+    } else if (!current_link_state && link_is_up) {
+      // Link just went down
       handle_link_down();
     }
   }
@@ -458,11 +443,6 @@ int main() {
 
   netif_add(&server_netif, &ipaddr, &netmask, &gw, NULL, NULL, NULL);
   netif_set_default(&server_netif);
-
-  // Register link status callback BEFORE bringing interface up
-  // This ensures we get callbacks for any link state changes
-  netif_set_link_callback(&server_netif, link_status_callback);
-
   xemac_add(&server_netif, &ipaddr, &netmask, &gw,
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
@@ -476,7 +456,7 @@ int main() {
     send_message("Network link DOWN at boot - waiting for cable connection...\r\n");
   }
 
-  send_message("Network hotplug support enabled (callback-based)\r\n");
+  send_message("Network hotplug support enabled (polling every 500ms)\r\n");
 
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
   sev(); // Send event to wake up ARM1
