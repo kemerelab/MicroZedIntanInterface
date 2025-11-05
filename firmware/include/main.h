@@ -189,9 +189,8 @@ extern volatile int disable_streaming_flag;
 extern volatile int reset_timestamp_flag;
 extern volatile int cable_test_flag;
 
-// Link state tracking for hotplug support
+// Link state tracking for hotplug support (polling-based)
 extern volatile int link_is_up;
-extern volatile int link_state_changed;
 
 // BRAM state tracking
 extern uint32_t ps_read_address;              // Current PS read position (word address)
