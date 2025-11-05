@@ -7,6 +7,7 @@
 #include "xil_cache.h"
 #include "lwip/init.h"
 #include "lwip/timeouts.h"
+#include "xemacpsif.h"
 //#include "xuartps.h"
 #include "shared_print.h"
 
@@ -373,10 +374,24 @@ void process_command_flags(void) {
 // Network maintenance loop
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
+  static uint32_t last_link_check = 0;
   counter++;
 
   xemacif_input(&server_netif);
   sys_check_timeouts();
+
+  // Periodically check PHY link status (every 500ms)
+  // This polls the actual PHY hardware and updates LWIP's link state
+  // When link state changes, LWIP will call our link_status_callback()
+  uint32_t current_time = sys_now();
+  if (current_time - last_link_check >= 500) {
+    last_link_check = current_time;
+
+    // Call Xilinx EMAC PS link detection function
+    // This checks the PHY registers and updates netif->flags with NETIF_FLAG_LINK_UP
+    // If the link state changed, LWIP will trigger link_status_callback()
+    eth_link_detect(&server_netif);
+  }
 
   // Handle link state changes (set by link_status_callback)
   if (link_state_changed) {
