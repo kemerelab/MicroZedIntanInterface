@@ -21,6 +21,14 @@ domain.set_config('lib', lib_name='xiltimer', param='XILTIMER_tick_timer', value
 domain.set_lib('lwip220')
 domain.set_config('lib', lib_name='lwip220', param='lwip220_no_sys_no_timers', value='false')
 
+# Add custom include path for lwipopts.h (needs to be found before BSP defaults)
+# This allows our firmware/include/lwipopts.h to override BSP LWIP configuration
+import os
+lwip_include_path = os.path.abspath("firmware/include")
+domain.set_config(option="proc", param="proc_extra_compiler_flags",
+                  value=f"-I{lwip_include_path}")
+print(f"Added custom LWIP options include path: {lwip_include_path}")
+
 
 domain = platform.add_domain(cpu = "ps7_cortexa9_1",os = "standalone",
                              name = "standalone_ps7_cortexa9_1", display_name = "standalone_ps7_cortexa9_1",
