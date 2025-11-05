@@ -483,7 +483,7 @@ int main() {
   }
 
   send_message("Network hotplug support enabled (polling every 500ms)\r\n");
-  send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n")
+  send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
 
   // benchmark_bram_reads();
 
