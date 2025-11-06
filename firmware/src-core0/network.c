@@ -67,6 +67,10 @@ typedef struct {
 static uint8_t recv_buffer[CMD_PACKET_SIZE];
 static uint16_t recv_buffer_pos = 0;
 
+// TCP connection tracking for hotplug support
+static struct tcp_pcb *tcp_server_pcb = NULL;  // Listening PCB
+static struct tcp_pcb *tcp_client_pcb = NULL;  // Active client connection
+
 uint32_t sys_now(void) {
     XTime now;
     XTime_GetTime(&now);
@@ -327,13 +331,26 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
 // TCP CALLBACKS
 // ============================================================================
 
+static void tcp_err_cb(void *arg, err_t err) {
+    (void)arg;
+    (void)err;
+
+    // Connection error or abort - clear client tracking
+    tcp_client_pcb = NULL;
+    recv_buffer_pos = 0;
+    send_message("TCP connection error/closed\r\n");
+}
+
 err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     (void)arg;
     (void)err;
-    
+
     if (!p) {
+        // Client closed connection gracefully
         tcp_close(tpcb);
+        tcp_client_pcb = NULL;
         recv_buffer_pos = 0;
+        send_message("TCP connection closed by client\r\n");
         return ERR_OK;
     }
     
@@ -387,11 +404,17 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
 err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     (void)arg;
     (void)err;
-    
+
     // Reset receive buffer for new connection
     recv_buffer_pos = 0;
-    
+
+    // Track this client connection
+    tcp_client_pcb = newpcb;
+
+    // Set up callbacks
     tcp_recv(newpcb, tcp_recv_cb);
+    tcp_err(newpcb, tcp_err_cb);
+
     send_message("Binary TCP connection established\r\n");
     return ERR_OK;
 }
@@ -402,10 +425,40 @@ void start_tcp_server() {
         send_message("ERROR: Could not create TCP PCB\r\n");
         return;
     }
-    
+
     tcp_bind(pcb, IP_ADDR_ANY, TCP_PORT);
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_accept_cb);
+
+    // Store globally for hotplug support
+    tcp_server_pcb = pcb;
+
     send_message("Binary TCP command server started on port %d\r\n", TCP_PORT);
     send_message("Commands use 20-byte binary format with magic 0xDEADBEEF\r\n");
+}
+
+// ============================================================================
+// HOTPLUG SUPPORT FUNCTIONS
+// ============================================================================
+
+void abort_tcp_connections(void) {
+    // Abort active client connection immediately
+    if (tcp_client_pcb != NULL) {
+        tcp_abort(tcp_client_pcb);
+        tcp_client_pcb = NULL;
+        recv_buffer_pos = 0;
+        send_message("TCP client connection aborted\r\n");
+    }
+}
+
+void stop_tcp_server(void) {
+    // Abort any active client connections first
+    abort_tcp_connections();
+
+    // Close the listening server
+    if (tcp_server_pcb != NULL) {
+        tcp_close(tcp_server_pcb);
+        tcp_server_pcb = NULL;
+        send_message("TCP server stopped\r\n");
+    }
 }
