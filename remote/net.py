@@ -685,7 +685,7 @@ def udp_listener():
         sock.close()
         validator.print_statistics()
 
-def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=2.0):
+def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
     """Send a binary command and wait for ACK or data response"""
     try:
         ack_id = random.randint(1, 65535)
@@ -722,11 +722,11 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=2.0):
         return (False, None)
 
     except socket.timeout:
-        print(f"[TCP] Timeout waiting for response")
-        return (False, None)
+        # Let timeout propagate to reconnection handler
+        raise
     except Exception as e:
         print(f"[TCP] Error: {e}")
-        return (False, None)
+        raise
     finally:
         sock.settimeout(None)
 
@@ -979,7 +979,17 @@ def tcp_control():
     try:
         sock.connect((ZYNQ_IP, TCP_PORT))
         print(f"[TCP] Connected to {ZYNQ_IP}:{TCP_PORT}")
-        
+
+        # Enable TCP keepalive to detect dead connections faster
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # Start keepalive probes after 1 second of idle
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+        # Send probes every 1 second
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+        # Close connection after 3 failed probes
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        print(f"[TCP] TCP keepalive enabled (detect disconnection in ~3-5 seconds)")
+
         # Auto-configure UDP destination
         local_ip = get_local_ip()
         print(f"[TCP] Detected local IP: {local_ip}")
@@ -1008,101 +1018,122 @@ def tcp_control():
         print(f"  Utility: help, quit")
         
         while True:
-            cmd = input("\n[TCP] Command: ").strip().lower()
-            
-            if cmd == "quit":
-                break
-            elif cmd == "auto_cable_detect":
-                run_detection(sock, verbose=True)
-            elif cmd == "start":
-                send_binary_command(sock, CMD_START)
-            elif cmd == "stop":
-                send_binary_command(sock, CMD_STOP)
-            elif cmd == "reset_timestamp":
-                send_binary_command(sock, CMD_RESET_TIMESTAMP)
-                validator.last_timestamp = None
-            elif cmd == "convert":
-                send_binary_command(sock, CMD_LOAD_CONVERT)
-            elif cmd == "init":
-                send_binary_command(sock, CMD_LOAD_INIT)
-            elif cmd == "cable_test":
-                send_binary_command(sock, CMD_LOAD_CABLE_TEST)
-            elif cmd == "full_cable_test":
-                if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, CABLE_TEST_CHANNEL_ENABLE)[0]:
-                    validator.start_cable_test_capture()
-                    send_binary_command(sock, CMD_FULL_CABLE_TEST)
-            elif cmd == "manual_cable_test":
-                manual_cable_test(sock)
-            elif cmd == "get_status":
-                status = get_status(sock)
-                if status:
-                    print_status(status)
-            elif cmd.startswith("loop "):
+            try:
+                cmd = input("\n[TCP] Command: ").strip().lower()
+
+                if cmd == "quit":
+                    break
+                elif cmd == "auto_cable_detect":
+                    run_detection(sock, verbose=True)
+                elif cmd == "start":
+                    send_binary_command(sock, CMD_START)
+                elif cmd == "stop":
+                    send_binary_command(sock, CMD_STOP)
+                elif cmd == "reset_timestamp":
+                    send_binary_command(sock, CMD_RESET_TIMESTAMP)
+                    validator.last_timestamp = None
+                elif cmd == "convert":
+                    send_binary_command(sock, CMD_LOAD_CONVERT)
+                elif cmd == "init":
+                    send_binary_command(sock, CMD_LOAD_INIT)
+                elif cmd == "cable_test":
+                    send_binary_command(sock, CMD_LOAD_CABLE_TEST)
+                elif cmd == "full_cable_test":
+                    if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, CABLE_TEST_CHANNEL_ENABLE)[0]:
+                        validator.start_cable_test_capture()
+                        send_binary_command(sock, CMD_FULL_CABLE_TEST)
+                elif cmd == "manual_cable_test":
+                    manual_cable_test(sock)
+                elif cmd == "get_status":
+                    status = get_status(sock)
+                    if status:
+                        print_status(status)
+                elif cmd.startswith("loop "):
+                    try:
+                        loop_count = int(cmd.split()[1])
+                        send_binary_command(sock, CMD_SET_LOOP_COUNT, loop_count)
+                    except (ValueError, IndexError):
+                        print("Usage: loop <count>")
+                elif cmd.startswith("set_phase "):
+                    try:
+                        parts = cmd.split()
+                        if len(parts) == 3:
+                            send_binary_command(sock, CMD_SET_PHASE, int(parts[1]), int(parts[2]))
+                        else:
+                            print("Usage: set_phase <phase0> <phase1>")
+                    except ValueError:
+                        print("Invalid phase values")
+                elif cmd.startswith("set_debug "):
+                    try:
+                        debug_mode = int(cmd.split()[1])
+                        send_binary_command(sock, CMD_SET_DEBUG_MODE, debug_mode)
+                    except (ValueError, IndexError):
+                        print("Usage: set_debug <0|1>")
+                elif cmd.startswith("set_channels "):
+                    try:
+                        val = cmd.split()[1]
+                        channel_enable = int(val, 16) if val.startswith('0x') else int(val)
+                        if 0 <= channel_enable <= 15:
+                            if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, channel_enable)[0]:
+                                validator.set_channel_enable(channel_enable)
+                        else:
+                            print("Channel enable must be 0-15")
+                    except (ValueError, IndexError):
+                        print("Usage: set_channels <0x0-0xF>")
+                elif cmd.startswith("set_udp "):
+                    try:
+                        parts = cmd.split()
+                        if len(parts) == 3:
+                            set_udp_dest(sock, parts[1], int(parts[2]))
+                        else:
+                            print("Usage: set_udp <ip> <port>")
+                    except (ValueError, IndexError):
+                        print("Invalid IP or port")
+                elif cmd.startswith("dump_bram"):
+                    try:
+                        parts = cmd.split()
+                        start_addr = int(parts[1]) if len(parts) > 1 else 0
+                        word_count = int(parts[2]) if len(parts) > 2 else 10
+                        send_binary_command(sock, CMD_DUMP_BRAM, start_addr, word_count)
+                    except (ValueError, IndexError):
+                        send_binary_command(sock, CMD_DUMP_BRAM, 0, 10)
+                elif cmd == "stats":
+                    validator.print_statistics()
+                elif cmd == "hex":
+                    validator.print_last_packet_hex()
+                elif cmd == "help":
+                    print("Commands:")
+                    print("  start, stop, reset_timestamp")
+                    print("  loop <count>, set_phase <p0> <p1>")
+                    print("  set_debug <0|1>, set_channels <0x0-0xF>")
+                    print("  convert, init, cable_test")
+                    print("  full_cable_test, manual_cable_test")
+                    print("  auto_cable_detect - NEW: Automated detection!")
+                    print("  set_udp <ip> <port>, get_status")
+                    print("  dump_bram [start] [count]")
+                    print("  stats, hex, quit")
+                else:
+                    print(f"Unknown command: '{cmd}'. Type 'help' for list.")
+
+            except (socket.timeout, ConnectionError, BrokenPipeError, OSError) as e:
+                print(f"\n[TCP] Connection lost: {e}")
+                print(f"[TCP] Attempting to reconnect...")
                 try:
-                    loop_count = int(cmd.split()[1])
-                    send_binary_command(sock, CMD_SET_LOOP_COUNT, loop_count)
-                except (ValueError, IndexError):
-                    print("Usage: loop <count>")
-            elif cmd.startswith("set_phase "):
-                try:
-                    parts = cmd.split()
-                    if len(parts) == 3:
-                        send_binary_command(sock, CMD_SET_PHASE, int(parts[1]), int(parts[2]))
-                    else:
-                        print("Usage: set_phase <phase0> <phase1>")
-                except ValueError:
-                    print("Invalid phase values")
-            elif cmd.startswith("set_debug "):
-                try:
-                    debug_mode = int(cmd.split()[1])
-                    send_binary_command(sock, CMD_SET_DEBUG_MODE, debug_mode)
-                except (ValueError, IndexError):
-                    print("Usage: set_debug <0|1>")
-            elif cmd.startswith("set_channels "):
-                try:
-                    val = cmd.split()[1]
-                    channel_enable = int(val, 16) if val.startswith('0x') else int(val)
-                    if 0 <= channel_enable <= 15:
-                        if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, channel_enable)[0]:
-                            validator.set_channel_enable(channel_enable)
-                    else:
-                        print("Channel enable must be 0-15")
-                except (ValueError, IndexError):
-                    print("Usage: set_channels <0x0-0xF>")
-            elif cmd.startswith("set_udp "):
-                try:
-                    parts = cmd.split()
-                    if len(parts) == 3:
-                        set_udp_dest(sock, parts[1], int(parts[2]))
-                    else:
-                        print("Usage: set_udp <ip> <port>")
-                except (ValueError, IndexError):
-                    print("Invalid IP or port")
-            elif cmd.startswith("dump_bram"):
-                try:
-                    parts = cmd.split()
-                    start_addr = int(parts[1]) if len(parts) > 1 else 0
-                    word_count = int(parts[2]) if len(parts) > 2 else 10
-                    send_binary_command(sock, CMD_DUMP_BRAM, start_addr, word_count)
-                except (ValueError, IndexError):
-                    send_binary_command(sock, CMD_DUMP_BRAM, 0, 10)
-            elif cmd == "stats":
-                validator.print_statistics()             
-            elif cmd == "hex":
-                validator.print_last_packet_hex()
-            elif cmd == "help":
-                print("Commands:")
-                print("  start, stop, reset_timestamp")
-                print("  loop <count>, set_phase <p0> <p1>")
-                print("  set_debug <0|1>, set_channels <0x0-0xF>")
-                print("  convert, init, cable_test")
-                print("  full_cable_test, manual_cable_test")
-                print("  auto_cable_detect - NEW: Automated detection!")
-                print("  set_udp <ip> <port>, get_status")
-                print("  dump_bram [start] [count]")
-                print("  stats, hex, quit")
-            else:
-                print(f"Unknown command: '{cmd}'. Type 'help' for list.")
+                    sock.close()
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.connect((ZYNQ_IP, TCP_PORT))
+
+                    # Re-enable TCP keepalive on reconnection
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
+                    print(f"[TCP] Reconnected successfully!")
+                except Exception as reconnect_error:
+                    print(f"[TCP] Reconnection failed: {reconnect_error}")
+                    print(f"[TCP] Please check network cable and device, then restart.")
+                    break
                 
     except ConnectionRefusedError:
         print(f"[TCP] Could not connect to {ZYNQ_IP}:{TCP_PORT}")

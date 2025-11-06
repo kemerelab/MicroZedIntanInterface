@@ -317,11 +317,54 @@ void process_command_flags(void) {
 // Network maintenance loop
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
+  static uint32_t last_link_check_time = 0;
   counter++;
-  
+
   xemacif_input(&server_netif);
   sys_check_timeouts();
   process_command_flags();
+
+  // Poll network link state every 500ms for hotplug detection
+  uint32_t current_time = sys_now();
+  if (current_time - last_link_check_time >= 500) {
+    last_link_check_time = current_time;
+
+    // Update PHY link status
+    eth_link_detect(&server_netif);
+    int current_link_state = netif_is_link_up(&server_netif) ? 1 : 0;
+
+    // Detect link state transitions
+    if (link_is_up && !current_link_state) {
+      // Link went DOWN
+      link_is_up = 0;
+      send_message("Network link DOWN - cable disconnected\r\n");
+
+      // Abort TCP connections immediately
+      abort_tcp_connections();
+      stop_tcp_server();
+
+      // Stop UDP stream
+      stop_udp_stream();
+
+      // Disable streaming if active
+      if (stream_enabled) {
+        handle_disable_streaming();
+        send_message("Streaming automatically stopped due to link down\r\n");
+      }
+    } else if (!link_is_up && current_link_state) {
+      // Link came UP
+      link_is_up = 1;
+      send_message("Network link UP - cable reconnected\r\n");
+
+      // Restart TCP server
+      start_tcp_server();
+
+      // Restart UDP stream
+      udp_stream_init();
+
+      send_message("Network ready. Send START command to resume streaming.\r\n");
+    }
+  }
 }
 
 // ============================================================================
