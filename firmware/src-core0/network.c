@@ -31,6 +31,7 @@ ID   | Command          | Param1              | Param2
 0x40 | GET_STATUS       | unused              | unused
 0x41 | DUMP_BRAM        | start_addr          | word_count
 0x50 | SET_UDP_DEST     | ip_addr             | port
+0x60 | PING             | unused              | unused
 */
 
 #define CMD_MAGIC           0xDEADBEEF
@@ -50,7 +51,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_GET_STATUS      0x40
 #define CMD_DUMP_BRAM       0x41
 #define CMD_SET_UDP_DEST    0x50
-
+#define CMD_PING            0x60
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
@@ -285,7 +286,7 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             uint16_t new_port = cmd->param2 & 0xFFFF;
 
             // Convert from little-endian (host) to network byte order
-            new_ip = htonl(new_ip);            
+            new_ip = htonl(new_ip);
 
             if (udp_reconfigure_destination(new_ip, new_port)) {
                 ip_addr_t dest_ip;
@@ -298,7 +299,12 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             }
             break;
         }
-            
+
+        case CMD_PING:
+            // Lightweight link check - no send_message() to avoid UDP streaming lag
+            // Just ACK immediately
+            break;
+
         case CMD_GET_STATUS: {
             pl_print_status();
             status_response_t status_data;
