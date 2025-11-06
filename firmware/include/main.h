@@ -297,4 +297,8 @@ int is_valid_udp_dest(uint32_t ip, uint16_t port);
 // Status data collection
 void collect_status_data(status_response_t* status);
 
+// Hotplug support functions
+void abort_tcp_connections(void);
+void stop_tcp_server(void);
+
 #endif // MAIN_H
