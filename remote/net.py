@@ -722,11 +722,11 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
         return (False, None)
 
     except socket.timeout:
-        print(f"[TCP] Timeout waiting for response")
-        return (False, None)
+        # Let timeout propagate to reconnection handler
+        raise
     except Exception as e:
         print(f"[TCP] Error: {e}")
-        return (False, None)
+        raise
     finally:
         sock.settimeout(None)
 
