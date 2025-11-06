@@ -130,12 +130,14 @@ static int process_packet_from_bram(void) {
 
   // Validate magic number
   if (magic != 0xCAFEBABEDEADBEEF) {
-    // The only way that this should happen is if we've overflowed our BRAM
-    // To try to recover, we need to keep moving ASAP. So we won't send
-    // this packet over the network, but we'll try to fast forward.
-    ps_read_address = (ps_read_address + current_packet_size) % BRAM_SIZE_WORDS;
+    // Invalid magic - could be BRAM overflow, corruption, or misalignment
+    // Jump directly to write pointer to sync with fresh data
+    uint32_t pl_write_addr = pl_get_bram_write_address();
+    ps_read_address = pl_write_addr;
     error_count++; // ERROR TO TRACK
-    return 0; // Packet validation failed; TODO - Catch up more extremely
+    send_message("Magic validation failed (0x%016llX), jumping to write position %u\r\n",
+                 magic, pl_write_addr);
+    return 0; // Packet validation failed, now synced to fresh data
   }
 
   // TODO: If we are in an error state, we could track how long we stay there
@@ -231,9 +233,10 @@ void handle_enable_streaming(void) {
   // Fast-forward ps_read_address to current PL write position
   // This discards any unread packets from the previous streaming session
   // which may have a different packet size
+  // We set ps_read = pl_write to wait for the NEXT fresh packet
   uint32_t pl_write_addr = pl_get_bram_write_address();
   if (ps_read_address != pl_write_addr) {
-    send_message("Discarding unread packets: ps_read=%u -> %u\r\n", 
+    send_message("Discarding unread packets: ps_read=%u -> %u\r\n",
                  ps_read_address, pl_write_addr);
     ps_read_address = pl_write_addr;
   }
@@ -317,11 +320,54 @@ void process_command_flags(void) {
 // Network maintenance loop
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
+  static uint32_t last_link_check_time = 0;
   counter++;
-  
+
   xemacif_input(&server_netif);
   sys_check_timeouts();
   process_command_flags();
+
+  // Poll network link state every 500ms for hotplug detection
+  uint32_t current_time = sys_now();
+  if (current_time - last_link_check_time >= 500) {
+    last_link_check_time = current_time;
+
+    // Update PHY link status
+    eth_link_detect(&server_netif);
+    int current_link_state = netif_is_link_up(&server_netif) ? 1 : 0;
+
+    // Detect link state transitions
+    if (link_is_up && !current_link_state) {
+      // Link went DOWN
+      link_is_up = 0;
+      send_message("Network link DOWN - cable disconnected\r\n");
+
+      // Abort TCP connections immediately
+      abort_tcp_connections();
+      stop_tcp_server();
+
+      // Stop UDP stream
+      stop_udp_stream();
+
+      // Disable streaming if active
+      if (stream_enabled) {
+        handle_disable_streaming();
+        send_message("Streaming automatically stopped due to link down\r\n");
+      }
+    } else if (!link_is_up && current_link_state) {
+      // Link came UP
+      link_is_up = 1;
+      send_message("Network link UP - cable reconnected\r\n");
+
+      // Restart TCP server
+      start_tcp_server();
+
+      // Restart UDP stream
+      udp_stream_init();
+
+      send_message("Network ready. Send START command to resume streaming.\r\n");
+    }
+  }
 }
 
 // ============================================================================
