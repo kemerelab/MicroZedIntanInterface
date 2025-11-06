@@ -855,6 +855,23 @@ def set_udp_dest(sock, ip_str, port):
         print(f"[TCP] Error setting UDP destination: {e}")
         return False
 
+def ping(sock, timeout=0.1):
+    """Send lightweight ping to check link status without affecting UDP streaming"""
+    try:
+        success, _ = send_binary_command(sock, CMD_PING, timeout=timeout)
+        if success:
+            print(f"[TCP] Ping successful - link is up")
+            return True
+        else:
+            print(f"[TCP] Ping failed - no response")
+            return False
+    except socket.timeout:
+        print(f"[TCP] Ping timeout - link may be down")
+        return False
+    except Exception as e:
+        print(f"[TCP] Ping error: {e}")
+        return False
+
 def manual_cable_test(sock):
     """Manual cable test using existing UDP infrastructure"""
     print("Manual cable test starting...")
@@ -1013,7 +1030,7 @@ def tcp_control():
         print(f"  Basic: start, stop, reset_timestamp, loop <count>")
         print(f"  COPI: convert, init, cable_test, full_cable_test, manual_cable_test")
         print(f"  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x0-0xF>")
-        print(f"  Network: set_udp <ip> <port>, get_status")
+        print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Utility: help, quit")
@@ -1049,6 +1066,8 @@ def tcp_control():
                     status = get_status(sock)
                     if status:
                         print_status(status)
+                elif cmd == "ping":
+                    ping(sock)
                 elif cmd.startswith("loop "):
                     try:
                         loop_count = int(cmd.split()[1])
@@ -1110,7 +1129,7 @@ def tcp_control():
                     print("  convert, init, cable_test")
                     print("  full_cable_test, manual_cable_test")
                     print("  auto_cable_detect - NEW: Automated detection!")
-                    print("  set_udp <ip> <port>, get_status")
+                    print("  set_udp <ip> <port>, get_status, ping")
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, quit")
                 else:
