@@ -10,12 +10,21 @@
 //#include "xuartps.h"
 #include "shared_print.h"
 
+// Forward declare eth_link_detect from xemacpsif adapter
+// This function is provided by the LWIP library's Xilinx EMAC adapter
+extern void eth_link_detect(struct netif *netif);
+
+
 // Global variables
 XTimer timer;
 struct netif server_netif;
 struct udp_pcb *udp;
 volatile int stream_enabled = 0;
 uint32_t packets_received_count = 0;
+
+
+// Link state tracking for hotplug support
+volatile int link_is_up = 0;
 
 // Command flags for main loop processing
 volatile int enable_streaming_flag = 0;
@@ -359,6 +368,10 @@ int main() {
   IP4_ADDR(&netmask, 255, 255, 255, 0);
   IP4_ADDR(&gw, 192, 168, 18, 1);
   
+  // NOTE: Something is suspect about our shared memory setup, in the sense
+  //       that LWIP does something that breaks if we let the other core start
+  //       before we call lwip_init. Is it LWIP's fault? Ours???
+
   // TODO: Figure out how to make this work with hotplug
   // TODO: Ideally, we'd allow for a DHCP option with some sort of discovery protocol
   lwip_init();
@@ -369,14 +382,39 @@ int main() {
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
 
+
+  // Start second core
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
   sev(); // Send event to wake up ARM1
-
   usleep(5000);
 
   send_message("Debug server up and running.\r\n");
+    
+  // Interrogate PHY to detect initial link state right after xemac_add completes
+  // We'll only start TCP and UDP if we're connected
+  eth_link_detect(&server_netif);
+  if (netif_is_link_up(&server_netif)) {
+    link_is_up = 1;
+    send_message("Network link UP at boot\r\n");
+  } else {
+    link_is_up = 0;
+    send_message("Network link DOWN at boot - waiting for cable connection...\r\n");
+  }
+
+  while (!link_is_up) {
+    eth_link_detect(&server_netif);
+    if (netif_is_link_up(&server_netif)) {
+      link_is_up = 1;
+      send_message("Network link UP\r\n");    
+    }
+  }
+
+  start_tcp_server();
+  
+  // Initialize UDP (always enabled)
+  udp_stream_init();
+
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
-  send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   
   // Initialize PL
   pl_set_transmission(0);
@@ -385,15 +423,11 @@ int main() {
   // Initialize packet size based on current channel_enable setting
   update_current_packet_size();
 
-  start_tcp_server();
-  
-  // Initialize UDP (always enabled)
-  udp_stream_init();
-
   // benchmark_bram_reads();
 
   pl_set_copi_commands(initialization_cmd_sequence);
   
+  send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   send_message("debug> ");
   
   // Main event loop
