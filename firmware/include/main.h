@@ -300,5 +300,6 @@ void collect_status_data(status_response_t* status);
 // Hotplug support functions
 void abort_tcp_connections(void);
 void stop_tcp_server(void);
+void stop_udp_stream(void);
 
 #endif // MAIN_H

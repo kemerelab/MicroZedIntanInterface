@@ -462,3 +462,11 @@ void stop_tcp_server(void) {
         send_message("TCP server stopped\r\n");
     }
 }
+
+void stop_udp_stream(void) {
+    if (udp != NULL) {
+        udp_remove(udp);
+        udp = NULL;
+        send_message("UDP stream stopped\r\n");
+    }
+}

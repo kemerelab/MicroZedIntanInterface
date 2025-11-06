@@ -343,6 +343,9 @@ void network_maintenance_loop(void) {
       abort_tcp_connections();
       stop_tcp_server();
 
+      // Stop UDP stream
+      stop_udp_stream();
+
       // Disable streaming if active
       if (stream_enabled) {
         handle_disable_streaming();
@@ -355,6 +358,9 @@ void network_maintenance_loop(void) {
 
       // Restart TCP server
       start_tcp_server();
+
+      // Restart UDP stream
+      udp_stream_init();
 
       send_message("Network ready. Send START command to resume streaming.\r\n");
     }
