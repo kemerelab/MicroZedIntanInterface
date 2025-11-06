@@ -130,12 +130,14 @@ static int process_packet_from_bram(void) {
 
   // Validate magic number
   if (magic != 0xCAFEBABEDEADBEEF) {
-    // The only way that this should happen is if we've overflowed our BRAM
-    // To try to recover, we need to keep moving ASAP. So we won't send
-    // this packet over the network, but we'll try to fast forward.
-    ps_read_address = (ps_read_address + current_packet_size) % BRAM_SIZE_WORDS;
+    // Invalid magic - could be BRAM overflow, corruption, or misalignment
+    // Jump directly to write pointer to sync with fresh data
+    uint32_t pl_write_addr = pl_get_bram_write_address();
+    ps_read_address = pl_write_addr;
     error_count++; // ERROR TO TRACK
-    return 0; // Packet validation failed; TODO - Catch up more extremely
+    send_message("Magic validation failed (0x%016llX), jumping to write position %u\r\n",
+                 magic, pl_write_addr);
+    return 0; // Packet validation failed, now synced to fresh data
   }
 
   // TODO: If we are in an error state, we could track how long we stay there
@@ -231,9 +233,10 @@ void handle_enable_streaming(void) {
   // Fast-forward ps_read_address to current PL write position
   // This discards any unread packets from the previous streaming session
   // which may have a different packet size
+  // We set ps_read = pl_write to wait for the NEXT fresh packet
   uint32_t pl_write_addr = pl_get_bram_write_address();
   if (ps_read_address != pl_write_addr) {
-    send_message("Discarding unread packets: ps_read=%u -> %u\r\n", 
+    send_message("Discarding unread packets: ps_read=%u -> %u\r\n",
                  ps_read_address, pl_write_addr);
     ps_read_address = pl_write_addr;
   }
