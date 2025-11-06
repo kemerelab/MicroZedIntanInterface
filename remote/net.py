@@ -857,19 +857,12 @@ def set_udp_dest(sock, ip_str, port):
 
 def ping(sock, timeout=0.1):
     """Send lightweight ping to check link status without affecting UDP streaming"""
-    try:
-        success, _ = send_binary_command(sock, CMD_PING, timeout=timeout)
-        if success:
-            print(f"[TCP] Ping successful - link is up")
-            return True
-        else:
-            print(f"[TCP] Ping failed - no response")
-            return False
-    except socket.timeout:
-        print(f"[TCP] Ping timeout - link may be down")
-        return False
-    except Exception as e:
-        print(f"[TCP] Ping error: {e}")
+    success, _ = send_binary_command(sock, CMD_PING, timeout=timeout)
+    if success:
+        print(f"[TCP] Ping successful - link is up")
+        return True
+    else:
+        print(f"[TCP] Ping failed - no response")
         return False
 
 def manual_cable_test(sock):
