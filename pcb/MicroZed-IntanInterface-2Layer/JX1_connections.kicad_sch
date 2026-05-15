@@ -6964,13 +6964,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "JX1")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "JX3")
 					(unit 1)
 				)
 			)
@@ -7043,7 +7039,7 @@
 			(uuid "d5fdab79-9522-4c31-9306-e25ac52a5f0b")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR095")
 					(unit 1)
@@ -7069,7 +7065,7 @@
 				)
 			)
 		)
-		(property "Value" "100R"
+		(property "Value" "150 1%"
 			(at 195.58 96.52 90)
 			(effects
 				(font
@@ -7077,7 +7073,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 195.58 97.282 90)
 			(effects
 				(font
@@ -7104,7 +7100,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C22775"
+		(property "LCSC" "C25082"
 			(at 195.58 99.06 0)
 			(effects
 				(font
@@ -7120,7 +7116,7 @@
 			(uuid "532ca6af-3b5c-45f0-b301-61f37d59fc7c")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R20")
 					(unit 1)
@@ -7135,7 +7131,7 @@
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(uuid "07b9c581-da0e-44b0-bf55-4fdb65fb53dd")
 		(property "Reference" "PMODV3"
 			(at 144.78 171.45 0)
@@ -7221,12 +7217,8 @@
 			(uuid "59b1c9f3-20fc-4d47-96a6-70ba17591e53")
 		)
 		(instances
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
-					(reference "PMODV3")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
 					(reference "PMODV3")
 					(unit 1)
 				)
@@ -7261,7 +7253,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
 			(at 211.7852 135.89 0)
 			(effects
 				(font
@@ -7288,7 +7280,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C66501"
+		(property "LCSC" "C307331"
 			(at 210.82 132.08 0)
 			(effects
 				(font
@@ -7304,7 +7296,7 @@
 			(uuid "40bdcc08-2fd6-4463-8ca1-bf084af211f9")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "C9")
 					(unit 1)
@@ -7340,7 +7332,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Viktor:TestPoint__Drill1.0mm"
+		(property "Footprint" "TestPoint:TestPoint_THTPad_D2.0mm_Drill1.0mm"
 			(at 127 38.1 0)
 			(effects
 				(font
@@ -7386,17 +7378,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "TP1")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "TP11")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "TP10")
 					(unit 1)
 				)
 			)
@@ -7469,7 +7453,7 @@
 			(uuid "566cadaf-47fa-4483-ad7a-33a0d792bb45")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR082")
 					(unit 1)
@@ -7542,13 +7526,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR045")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR096")
 					(unit 1)
 				)
 			)
@@ -7572,7 +7552,7 @@
 				)
 			)
 		)
-		(property "Value" "100R"
+		(property "Value" "150 1%"
 			(at 194.31 123.19 90)
 			(effects
 				(font
@@ -7580,7 +7560,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 194.31 123.952 90)
 			(effects
 				(font
@@ -7607,7 +7587,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C22775"
+		(property "LCSC" "C25082"
 			(at 194.31 125.73 0)
 			(effects
 				(font
@@ -7623,7 +7603,7 @@
 			(uuid "fc7a2d62-36b5-419f-b5ec-fc1ffb13bf88")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R19")
 					(unit 1)
@@ -7689,7 +7669,7 @@
 			(uuid "225270c3-9c5b-4eff-922d-94ebf0432369")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR091")
 					(unit 1)
@@ -7762,13 +7742,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR057")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR0104")
 					(unit 1)
 				)
 			)
@@ -7840,13 +7816,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR093")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR058")
 					(unit 1)
 				)
 			)
@@ -7880,7 +7852,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
 			(at 213.0552 109.22 0)
 			(effects
 				(font
@@ -7907,7 +7879,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C66501"
+		(property "LCSC" "C307331"
 			(at 212.09 105.41 0)
 			(effects
 				(font
@@ -7923,7 +7895,7 @@
 			(uuid "dc9fff7c-b27a-4763-8ebb-0fd262c9af3b")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "C13")
 					(unit 1)
@@ -7938,7 +7910,7 @@
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(uuid "28757d08-25c8-4931-bf2e-3c49dbb683c3")
 		(property "Reference" "PMODH3"
 			(at 144.78 143.51 0)
@@ -8024,12 +7996,8 @@
 			(uuid "35b6f05d-528f-433b-908d-d44c4ae7e502")
 		)
 		(instances
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
-					(reference "PMODH3")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
 					(reference "PMODH3")
 					(unit 1)
 				)
@@ -8122,7 +8090,7 @@
 			(uuid "9a6fd9c9-2be0-4559-994d-43883007eba4")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "Q1")
 					(unit 1)
@@ -8198,7 +8166,7 @@
 			(uuid "b5ecf1fd-a4fb-4ea5-99ed-a89dc24ffd83")
 		)
 		(instances
-			(project ""
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR011")
 					(unit 1)
@@ -8224,7 +8192,7 @@
 				)
 			)
 		)
-		(property "Value" "150R"
+		(property "Value" "150 1%"
 			(at 248.92 93.98 90)
 			(effects
 				(font
@@ -8232,7 +8200,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 248.92 98.298 90)
 			(effects
 				(font
@@ -8259,7 +8227,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C22808"
+		(property "LCSC" "C25082"
 			(at 248.92 96.52 0)
 			(effects
 				(font
@@ -8275,7 +8243,7 @@
 			(uuid "2be6b0ae-2622-453c-a062-fa752d36ac83")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R21")
 					(unit 1)
@@ -8348,13 +8316,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR0111")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR0101")
 					(unit 1)
 				)
 			)
@@ -8435,7 +8399,7 @@
 			(uuid "4f056ca5-d433-4171-9790-51df13ded149")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "SW2")
 					(unit 1)
@@ -8508,13 +8472,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR049")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR089")
 					(unit 1)
 				)
 			)
@@ -8585,13 +8545,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR056")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR0103")
 					(unit 1)
 				)
 			)
@@ -8662,13 +8618,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR037")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR083")
 					(unit 1)
 				)
 			)
@@ -8727,7 +8679,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C2833058"
+		(property "LCSC" "C2286"
 			(at 257.81 128.27 0)
 			(effects
 				(font
@@ -8770,7 +8722,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "3K3"
+		(property "Value" "3k"
 			(at 203.2 133.985 0)
 			(effects
 				(font
@@ -8779,7 +8731,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 198.882 132.08 90)
 			(effects
 				(font
@@ -8822,7 +8774,7 @@
 			(uuid "d6fa266c-f012-49ea-ba96-f5dca849d291")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R22")
 					(unit 1)
@@ -8848,7 +8800,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "22uF"
+		(property "Value" "22uF 25V"
 			(at 134.62 95.25 0)
 			(effects
 				(font
@@ -8884,7 +8836,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C5672"
+		(property "LCSC" "C12891"
 			(at 130.81 93.98 0)
 			(effects
 				(font
@@ -8906,17 +8858,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "C9")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "C8")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "C2")
 					(unit 1)
 				)
 			)
@@ -8975,7 +8919,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C2833058"
+		(property "LCSC" "C2286"
 			(at 257.81 96.52 0)
 			(effects
 				(font
@@ -9067,7 +9011,7 @@
 			(uuid "4b78cd3e-6b57-424f-bdfe-e5fb03e52dbc")
 		)
 		(instances
-			(project ""
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR05")
 					(unit 1)
@@ -9100,7 +9044,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Viktor:TestPoint__Drill1.0mm"
+		(property "Footprint" "TestPoint:TestPoint_THTPad_D2.0mm_Drill1.0mm"
 			(at 25.4 27.94 0)
 			(effects
 				(font
@@ -9146,17 +9090,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "TP1")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "TP12")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "TP10")
 					(unit 1)
 				)
 			)
@@ -9227,13 +9163,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR047")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR098")
 					(unit 1)
 				)
 			)
@@ -9304,13 +9236,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR052")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR092")
 					(unit 1)
 				)
 			)
@@ -9335,7 +9263,7 @@
 				)
 			)
 		)
-		(property "Value" "22uF"
+		(property "Value" "22uF 25V"
 			(at 137.16 115.57 90)
 			(effects
 				(font
@@ -9370,7 +9298,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C5672"
+		(property "LCSC" "C12891"
 			(at 137.16 119.38 0)
 			(effects
 				(font
@@ -9392,17 +9320,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "C9")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "C18")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "C2")
 					(unit 1)
 				)
 			)
@@ -9474,13 +9394,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR048")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR058")
 					(unit 1)
 				)
 			)
@@ -9551,13 +9467,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR040")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR086")
 					(unit 1)
 				)
 			)
@@ -9628,11 +9540,7 @@
 			)
 		)
 		(instances
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#SYM1")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#SYM2")
 					(unit 1)
@@ -9658,7 +9566,7 @@
 				)
 			)
 		)
-		(property "Value" "100R"
+		(property "Value" "100 1%"
 			(at 27.94 180.34 90)
 			(effects
 				(font
@@ -9666,7 +9574,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 27.94 181.102 90)
 			(effects
 				(font
@@ -9693,7 +9601,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C22775"
+		(property "LCSC" "C25076"
 			(at 27.94 182.88 0)
 			(effects
 				(font
@@ -9709,11 +9617,7 @@
 			(uuid "2bbd3bb0-4aa7-4609-9a5b-007c1ccb685a")
 		)
 		(instances
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "R9")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R2")
 					(unit 1)
@@ -9741,7 +9645,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "22uF"
+		(property "Value" "22uF 25V"
 			(at 20.32 121.285 0)
 			(effects
 				(font
@@ -9777,7 +9681,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C5672"
+		(property "LCSC" "C12891"
 			(at 24.13 119.38 0)
 			(effects
 				(font
@@ -9799,17 +9703,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "C9")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "C10")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "C2")
 					(unit 1)
 				)
 			)
@@ -9880,13 +9776,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR053")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR0100")
 					(unit 1)
 				)
 			)
@@ -9957,13 +9849,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR054")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR0101")
 					(unit 1)
 				)
 			)
@@ -9980,7 +9868,7 @@
 		(fields_autoplaced yes)
 		(uuid "74634142-2e78-4240-a8b9-e2f13b1804be")
 		(property "Reference" "R27"
-			(at 204.47 104.775 0)
+			(at 204.47 104.1399 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9988,8 +9876,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "3K3"
-			(at 204.47 107.315 0)
+		(property "Value" "3k"
+			(at 204.47 106.6799 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9997,7 +9885,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 200.152 105.41 90)
 			(effects
 				(font
@@ -10040,7 +9928,7 @@
 			(uuid "58c9d19f-fecc-4e2a-b539-dd9b07b91db0")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R27")
 					(unit 1)
@@ -10106,7 +9994,7 @@
 			(uuid "f166bc42-04ba-452a-b292-0bb984e169f6")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR092")
 					(unit 1)
@@ -10179,13 +10067,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR035")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR082")
 					(unit 1)
 				)
 			)
@@ -10256,13 +10140,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR042")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR098")
 					(unit 1)
 				)
 			)
@@ -10275,7 +10155,7 @@
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(fields_autoplaced yes)
 		(uuid "8e00a292-3cd0-4adb-a19f-8d3e26740a2d")
 		(property "Reference" "JP2"
@@ -10342,7 +10222,7 @@
 			(uuid "72613244-0260-4e2c-bfc9-539f3f71084a")
 		)
 		(instances
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "JP2")
 					(unit 1)
@@ -10416,13 +10296,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR068")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR058")
 					(unit 1)
 				)
 			)
@@ -10493,13 +10369,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR039")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR085")
 					(unit 1)
 				)
 			)
@@ -10563,7 +10435,7 @@
 			(uuid "456256ac-399f-45c6-b44a-2c77cf4f1e87")
 		)
 		(instances
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR072")
 					(unit 1)
@@ -10637,17 +10509,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR012")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR069")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR059")
 					(unit 1)
 				)
 			)
@@ -10718,13 +10582,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR043")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR094")
 					(unit 1)
 				)
 			)
@@ -10795,13 +10655,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR051")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR091")
 					(unit 1)
 				)
 			)
@@ -10872,13 +10728,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR044")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR095")
 					(unit 1)
 				)
 			)
@@ -10949,13 +10801,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR036")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR093")
 					(unit 1)
 				)
 			)
@@ -11029,7 +10877,7 @@
 			(uuid "30b14647-e6dc-4187-94e9-11a8dce2fb93")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR075")
 					(unit 1)
@@ -11095,7 +10943,7 @@
 			(uuid "9ec110f2-2ddf-43fc-9f1a-2ea3f190aabd")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR080")
 					(unit 1)
@@ -11168,17 +11016,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR012")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR070")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR059")
 					(unit 1)
 				)
 			)
@@ -11249,13 +11089,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR046")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR097")
 					(unit 1)
 				)
 			)
@@ -11328,7 +11164,7 @@
 			(uuid "41f588bb-7a1f-474f-a852-1468d96cb92a")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR050")
 					(unit 1)
@@ -11354,7 +11190,7 @@
 				)
 			)
 		)
-		(property "Value" "150R"
+		(property "Value" "150 1%"
 			(at 248.92 125.73 90)
 			(effects
 				(font
@@ -11362,7 +11198,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 248.92 130.048 90)
 			(effects
 				(font
@@ -11389,7 +11225,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C22808"
+		(property "LCSC" "C25082"
 			(at 248.92 128.27 0)
 			(effects
 				(font
@@ -11405,7 +11241,7 @@
 			(uuid "6c713e1d-601f-47d8-ad30-dee18013c50c")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R24")
 					(unit 1)
@@ -11432,7 +11268,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "1K"
+		(property "Value" "1k 1%"
 			(at 36.83 178.435 0)
 			(effects
 				(font
@@ -11441,7 +11277,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
 			(at 36.068 176.53 90)
 			(effects
 				(font
@@ -11468,7 +11304,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C21190"
+		(property "LCSC" "C11702"
 			(at 34.29 176.53 0)
 			(effects
 				(font
@@ -11484,11 +11320,7 @@
 			(uuid "3fb5331e-7ec3-4909-92f5-c0844cb51e73")
 		)
 		(instances
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "R9")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "R1")
 					(unit 1)
@@ -11562,13 +11394,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR094")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR058")
 					(unit 1)
 				)
 			)
@@ -11641,7 +11469,7 @@
 			(uuid "d9dec8a7-7576-4665-a1e4-7b98b6bf4be0")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR090")
 					(unit 1)
@@ -11716,7 +11544,7 @@
 			(uuid "c4d06b12-8994-4490-9809-a3e9054c5b68")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR096")
 					(unit 1)
@@ -11810,7 +11638,7 @@
 			(uuid "5ef610b4-2ae4-4a74-af37-9b9fab09e6c7")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "Q2")
 					(unit 1)
@@ -11893,7 +11721,7 @@
 			(uuid "9ead19e8-8d14-4476-a5ee-5cbdf9e7d2b8")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "SW1")
 					(unit 1)
@@ -11966,13 +11794,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR038")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR084")
 					(unit 1)
 				)
 			)
@@ -12046,7 +11870,7 @@
 			(uuid "b3b273ee-1cf9-422e-ae66-e99e14955e06")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR034")
 					(unit 1)
@@ -12074,7 +11898,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "22uF"
+		(property "Value" "22uF 25V"
 			(at 20.32 95.885 0)
 			(effects
 				(font
@@ -12110,7 +11934,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C5672"
+		(property "LCSC" "C12891"
 			(at 24.13 93.98 0)
 			(effects
 				(font
@@ -12132,17 +11956,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "C9")
-					(unit 1)
-				)
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "C7")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "C2")
 					(unit 1)
 				)
 			)
@@ -12213,13 +12029,9 @@
 					(unit 1)
 				)
 			)
-			(project "MicroZed_carrier_board_v4"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR041")
-					(unit 1)
-				)
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/57144c13-51ce-4a78-b8cb-5be8ccbaa1ab"
-					(reference "#PWR087")
 					(unit 1)
 				)
 			)
@@ -12283,7 +12095,7 @@
 			(uuid "4d843b33-1ebb-4453-8c83-732070e4d433")
 		)
 		(instances
-			(project "MicroZed-IntanInterface"
+			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c/2aa1503b-988b-41bd-8b63-a98224b67377"
 					(reference "#PWR081")
 					(unit 1)
