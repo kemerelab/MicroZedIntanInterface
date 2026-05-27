@@ -32,7 +32,7 @@ The [carrier PCB](pcb/KiCad-Project/) design has been manufactured at JLCPCB.
 
 
 #### Creating a Vitis project
-1. Set the path for Vitis command line - `source ./Xilinx/2025.1/Vitis/settings64.sh`
+1. Set the path for Vitis command line - `source ~/Xilinx/2025.1/Vitis/settings64.sh`
 2. From the root directory of the repository run `vitis -s scripts/create_vitis_project.py`. This will
   create a Vitis project that you can open in the `<repository>/vitis_project`. The script automatically
   sources the hardware file that was created in the previous step with Vivado. It by default also builds
