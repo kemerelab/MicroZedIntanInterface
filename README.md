@@ -12,6 +12,12 @@ as well as other sources. Note that the Zynq 7010 should likely also work for th
 
 The [carrier PCB](pcb/KiCad-Project/) design has been manufactured at JLCPCB. 
 
+Here is the carrier PCB bare and with the MicroZed installed.
+<p align="center">
+  <img src="PCBOnly.jpeg" width="45%" />
+  <img src="PCBWithMicroZed.jpeg" width="45%" />
+</p>
+
 ## Firmware
 
 ### Steps to building and testing
