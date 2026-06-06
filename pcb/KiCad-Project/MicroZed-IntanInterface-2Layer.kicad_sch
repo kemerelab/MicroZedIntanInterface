@@ -189,251 +189,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Connector:Conn_01x04_Pin"
-			(pin_names
-				(offset 1.016)
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "J"
-				(at 0 5.08 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "Conn_01x04_Pin"
-				(at 0 -7.62 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" ""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" "~"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Description" "Generic connector, single row, 01x04, script generated"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_locked" ""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "connector"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_fp_filters" "Connector*:*_1x??_*"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(symbol "Conn_01x04_Pin_1_1"
-				(rectangle
-					(start 0.8636 2.667)
-					(end 0 2.413)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 0.127)
-					(end 0 -0.127)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 -2.413)
-					(end 0 -2.667)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 -4.953)
-					(end 0 -5.207)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 2.54) (xy 0.8636 2.54)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 0) (xy 0.8636 0)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 -2.54) (xy 0.8636 -2.54)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 -5.08) (xy 0.8636 -5.08)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(pin passive line
-					(at 5.08 2.54 180)
-					(length 3.81)
-					(name "Pin_1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 0 180)
-					(length 3.81)
-					(name "Pin_2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 -2.54 180)
-					(length 3.81)
-					(name "Pin_3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 -5.08 180)
-					(length 3.81)
-					(name "Pin_4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 		(symbol "Connector:Screw_Terminal_01x02"
 			(pin_names
 				(offset 1.016)
@@ -1428,7 +1183,7 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Connector_Generic:Conn_02x05_Odd_Even"
+		(symbol "Connector_Generic:Conn_02x04_Odd_Even"
 			(pin_names
 				(offset 1.016)
 				(hide yes)
@@ -1437,14 +1192,14 @@
 			(in_bom yes)
 			(on_board yes)
 			(property "Reference" "J"
-				(at 1.27 7.62 0)
+				(at 1.27 5.08 0)
 				(effects
 					(font
 						(size 1.27 1.27)
 					)
 				)
 			)
-			(property "Value" "Conn_02x05_Odd_Even"
+			(property "Value" "Conn_02x04_Odd_Even"
 				(at 1.27 -7.62 0)
 				(effects
 					(font
@@ -1470,7 +1225,7 @@
 					(hide yes)
 				)
 			)
-			(property "Description" "Generic connector, double row, 02x05, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(property "Description" "Generic connector, double row, 02x04, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
 				(at 0 0 0)
 				(effects
 					(font
@@ -1497,9 +1252,9 @@
 					(hide yes)
 				)
 			)
-			(symbol "Conn_02x05_Odd_Even_1_1"
+			(symbol "Conn_02x04_Odd_Even_1_1"
 				(rectangle
-					(start -1.27 6.35)
+					(start -1.27 3.81)
 					(end 3.81 -6.35)
 					(stroke
 						(width 0.254)
@@ -1507,17 +1262,6 @@
 					)
 					(fill
 						(type background)
-					)
-				)
-				(rectangle
-					(start -1.27 5.207)
-					(end 0 4.953)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
 					)
 				)
 				(rectangle
@@ -1556,17 +1300,6 @@
 				(rectangle
 					(start -1.27 -4.953)
 					(end 0 -5.207)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(rectangle
-					(start 3.81 5.207)
-					(end 2.54 4.953)
 					(stroke
 						(width 0.1524)
 						(type default)
@@ -1620,7 +1353,7 @@
 					)
 				)
 				(pin passive line
-					(at -5.08 5.08 0)
+					(at -5.08 2.54 0)
 					(length 3.81)
 					(name "Pin_1"
 						(effects
@@ -1638,7 +1371,7 @@
 					)
 				)
 				(pin passive line
-					(at -5.08 2.54 0)
+					(at -5.08 0 0)
 					(length 3.81)
 					(name "Pin_3"
 						(effects
@@ -1656,7 +1389,7 @@
 					)
 				)
 				(pin passive line
-					(at -5.08 0 0)
+					(at -5.08 -2.54 0)
 					(length 3.81)
 					(name "Pin_5"
 						(effects
@@ -1674,7 +1407,7 @@
 					)
 				)
 				(pin passive line
-					(at -5.08 -2.54 0)
+					(at -5.08 -5.08 0)
 					(length 3.81)
 					(name "Pin_7"
 						(effects
@@ -1692,25 +1425,7 @@
 					)
 				)
 				(pin passive line
-					(at -5.08 -5.08 0)
-					(length 3.81)
-					(name "Pin_9"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "9"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 7.62 5.08 180)
+					(at 7.62 2.54 180)
 					(length 3.81)
 					(name "Pin_2"
 						(effects
@@ -1728,7 +1443,7 @@
 					)
 				)
 				(pin passive line
-					(at 7.62 2.54 180)
+					(at 7.62 0 180)
 					(length 3.81)
 					(name "Pin_4"
 						(effects
@@ -1746,7 +1461,7 @@
 					)
 				)
 				(pin passive line
-					(at 7.62 0 180)
+					(at 7.62 -2.54 180)
 					(length 3.81)
 					(name "Pin_6"
 						(effects
@@ -1764,7 +1479,7 @@
 					)
 				)
 				(pin passive line
-					(at 7.62 -2.54 180)
+					(at 7.62 -5.08 180)
 					(length 3.81)
 					(name "Pin_8"
 						(effects
@@ -1774,24 +1489,6 @@
 						)
 					)
 					(number "8"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 7.62 -5.08 180)
-					(length 3.81)
-					(name "Pin_10"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "10"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -2723,6 +2420,65 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "ELEC327-Kicad:RICE_OWL"
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "S"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Description" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(symbol "RICE_OWL_1_1"
+				(text "OWL\nLOGO"
+					(at 0 0 0)
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "Graphic:Logo_Open_Hardware_Small"
 			(exclude_from_sim no)
 			(in_bom no)
@@ -3152,7 +2908,7 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Regulator_Switching:TLV62568DDC"
+		(symbol "Regulator_Switching:TLV62569DDC"
 			(exclude_from_sim no)
 			(in_bom yes)
 			(on_board yes)
@@ -3165,7 +2921,7 @@
 					(justify left)
 				)
 			)
-			(property "Value" "TLV62568DDC"
+			(property "Value" "TLV62569DDC"
 				(at 0 6.35 0)
 				(effects
 					(font
@@ -3185,7 +2941,7 @@
 					(hide yes)
 				)
 			)
-			(property "Datasheet" "http://www.ti.com/lit/ds/symlink/tlv62568.pdf"
+			(property "Datasheet" "http://www.ti.com/lit/ds/symlink/tlv62569.pdf"
 				(at -6.35 11.43 0)
 				(effects
 					(font
@@ -3194,7 +2950,7 @@
 					(hide yes)
 				)
 			)
-			(property "Description" "High Efficiency Synchronous Buck Converter, Adjustable Output 0.6V-5.5V, 1A, SOT-23-6"
+			(property "Description" "High Efficiency Synchronous Buck Converter, Adjustable Output 0.6V-5.5V, 2A, SOT-23-6"
 				(at 0 0 0)
 				(effects
 					(font
@@ -3221,7 +2977,7 @@
 					(hide yes)
 				)
 			)
-			(symbol "TLV62568DDC_0_1"
+			(symbol "TLV62569DDC_0_1"
 				(rectangle
 					(start -5.08 5.08)
 					(end 5.08 -5.08)
@@ -3234,7 +2990,7 @@
 					)
 				)
 			)
-			(symbol "TLV62568DDC_1_1"
+			(symbol "TLV62569DDC_1_1"
 				(pin power_in line
 					(at -7.62 2.54 0)
 					(length 2.54)
@@ -4238,34 +3994,16 @@
 		(uuid "f3d2c222-efe9-4747-8a2e-eee8dfa61d3c")
 	)
 	(junction
-		(at 101.6 97.79)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "013caac4-8059-4e68-9e44-817c9a5ecfe2")
-	)
-	(junction
 		(at 78.74 138.43)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "1671605b-8a17-41b0-b854-9779d081c2b8")
 	)
 	(junction
-		(at 99.06 97.79)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "1a443dc0-bea9-48d3-b96b-6721a4705d76")
-	)
-	(junction
 		(at 168.91 29.21)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "1ea76b32-445e-414d-990d-37de9e3ceae8")
-	)
-	(junction
-		(at 54.61 110.49)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "31e8eba8-0cfd-42c8-93f8-5454c1be7fa6")
 	)
 	(junction
 		(at 137.16 140.97)
@@ -4278,12 +4016,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "4327791a-c762-44ef-b462-00ad8b01f1f5")
-	)
-	(junction
-		(at 96.52 97.79)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "43da8368-4eef-4533-a2ab-c3d2845adc6c")
 	)
 	(junction
 		(at 43.18 153.67)
@@ -4370,12 +4102,6 @@
 		(uuid "cd3cfa85-d546-476b-90fe-74eba43646ef")
 	)
 	(junction
-		(at 36.83 110.49)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "cd4c9f6c-ee9d-4dc2-a10c-d3af8af50751")
-	)
-	(junction
 		(at 259.08 34.29)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4408,6 +4134,16 @@
 	(no_connect
 		(at 43.18 135.89)
 		(uuid "0acdb2c0-8da5-46d7-9ad6-b4dc5f86cefc")
+	)
+	(wire
+		(pts
+			(xy 35.56 115.57) (xy 39.37 115.57)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "02a2ed0e-f07f-43f8-8a5f-a1e1021e3be0")
 	)
 	(wire
 		(pts
@@ -4481,26 +4217,6 @@
 	)
 	(wire
 		(pts
-			(xy 52.07 110.49) (xy 54.61 110.49)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "0df7be18-2ba1-4fd9-9798-f5ac481e9d9c")
-	)
-	(wire
-		(pts
-			(xy 34.29 118.11) (xy 39.37 118.11)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "0e4f15d1-9cfa-409c-b81a-bd4ed6292708")
-	)
-	(wire
-		(pts
 			(xy 91.44 34.29) (xy 91.44 41.91)
 		)
 		(stroke
@@ -4541,13 +4257,13 @@
 	)
 	(wire
 		(pts
-			(xy 36.83 113.03) (xy 39.37 113.03)
+			(xy 35.56 113.03) (xy 39.37 113.03)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "190e399d-2167-4ad9-bb3b-0a7ad6e73187")
+		(uuid "1d438ccd-c78c-4435-9d35-00cd85fc63a9")
 	)
 	(wire
 		(pts
@@ -4661,16 +4377,6 @@
 	)
 	(wire
 		(pts
-			(xy 34.29 115.57) (xy 39.37 115.57)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "2cfb607f-73cd-4842-bb68-f262aa08e51d")
-	)
-	(wire
-		(pts
 			(xy 191.77 92.71) (xy 195.58 92.71)
 		)
 		(stroke
@@ -4708,16 +4414,6 @@
 			(type default)
 		)
 		(uuid "329331c5-25b7-4d63-9e78-e37d85467039")
-	)
-	(wire
-		(pts
-			(xy 36.83 110.49) (xy 39.37 110.49)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "32a1cc9b-730b-455b-bd48-7b5a47ba34cb")
 	)
 	(wire
 		(pts
@@ -4791,16 +4487,6 @@
 	)
 	(wire
 		(pts
-			(xy 101.6 97.79) (xy 104.14 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "46e1c106-82b0-47d5-a13a-e33c5ce42afb")
-	)
-	(wire
-		(pts
 			(xy 167.64 73.66) (xy 149.86 73.66)
 		)
 		(stroke
@@ -4838,16 +4524,6 @@
 			(type default)
 		)
 		(uuid "50a704df-40b6-4a19-a489-61fd2abbb9c0")
-	)
-	(wire
-		(pts
-			(xy 99.06 95.25) (xy 99.06 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "50c629ea-3985-4c62-96f9-d6c4f9691037")
 	)
 	(wire
 		(pts
@@ -4901,16 +4577,6 @@
 	)
 	(wire
 		(pts
-			(xy 93.98 97.79) (xy 96.52 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "5d0d0dd6-8108-4db1-b1db-fddbaa03bec8")
-	)
-	(wire
-		(pts
 			(xy 170.18 92.71) (xy 170.18 93.98)
 		)
 		(stroke
@@ -4948,16 +4614,6 @@
 			(type default)
 		)
 		(uuid "69e5425a-83c1-4a6e-86af-2d7398592537")
-	)
-	(wire
-		(pts
-			(xy 36.83 110.49) (xy 36.83 113.03)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "6a00541e-a529-4407-957e-cf557dab73bd")
 	)
 	(wire
 		(pts
@@ -5011,7 +4667,7 @@
 	)
 	(wire
 		(pts
-			(xy 52.07 107.95) (xy 57.15 107.95)
+			(xy 52.07 113.03) (xy 57.15 113.03)
 		)
 		(stroke
 			(width 0)
@@ -5038,6 +4694,16 @@
 			(type default)
 		)
 		(uuid "75349968-8e21-4a0c-b461-ad6f00673280")
+	)
+	(wire
+		(pts
+			(xy 57.15 110.49) (xy 52.07 110.49)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "793fb390-06aa-4626-879e-1aa6e3f989e2")
 	)
 	(wire
 		(pts
@@ -5161,16 +4827,6 @@
 	)
 	(wire
 		(pts
-			(xy 96.52 97.79) (xy 99.06 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "937d182a-b9c8-452f-85bb-9fb80271aeba")
-	)
-	(wire
-		(pts
 			(xy 214.63 34.29) (xy 218.44 34.29)
 		)
 		(stroke
@@ -5261,16 +4917,6 @@
 	)
 	(wire
 		(pts
-			(xy 96.52 95.25) (xy 96.52 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "a03979ff-2786-4a73-8f99-76e0fc931e7e")
-	)
-	(wire
-		(pts
 			(xy 170.18 73.66) (xy 167.64 73.66)
 		)
 		(stroke
@@ -5328,26 +4974,6 @@
 			(type default)
 		)
 		(uuid "adc58b98-41e4-4a1e-8f5f-0256b0855319")
-	)
-	(wire
-		(pts
-			(xy 101.6 95.25) (xy 101.6 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "ae421f7e-29f7-4a01-9419-b7ff32b0fae5")
-	)
-	(wire
-		(pts
-			(xy 52.07 113.03) (xy 54.61 113.03)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "afcbb828-66c7-4283-9369-208dc0bf5ea5")
 	)
 	(wire
 		(pts
@@ -5441,16 +5067,6 @@
 	)
 	(wire
 		(pts
-			(xy 93.98 95.25) (xy 93.98 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b6ca82a0-032a-49c2-ad71-5804a7bbf8a5")
-	)
-	(wire
-		(pts
 			(xy 228.6 36.83) (xy 228.6 34.29)
 		)
 		(stroke
@@ -5478,16 +5094,6 @@
 			(type default)
 		)
 		(uuid "b89aba7c-5a09-4eb6-9a32-aea8f35b6c8b")
-	)
-	(wire
-		(pts
-			(xy 99.06 97.79) (xy 101.6 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "ba4a6f74-03a5-4559-8b50-99b33a85fd55")
 	)
 	(wire
 		(pts
@@ -5551,16 +5157,6 @@
 	)
 	(wire
 		(pts
-			(xy 34.29 110.49) (xy 36.83 110.49)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c584cff9-f956-4576-b054-271e05170a09")
-	)
-	(wire
-		(pts
 			(xy 245.11 43.18) (xy 245.11 44.45)
 		)
 		(stroke
@@ -5591,16 +5187,6 @@
 	)
 	(wire
 		(pts
-			(xy 54.61 110.49) (xy 57.15 110.49)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "cc4d72a5-fd3c-4470-92a8-30081adf7b33")
-	)
-	(wire
-		(pts
 			(xy 124.46 128.27) (xy 124.46 130.81)
 		)
 		(stroke
@@ -5608,16 +5194,6 @@
 			(type default)
 		)
 		(uuid "ce7eccaf-8502-4867-a5fb-c97b5c911f63")
-	)
-	(wire
-		(pts
-			(xy 34.29 107.95) (xy 39.37 107.95)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "d0c35d1f-5e5b-471d-ac15-5814d6903b9a")
 	)
 	(wire
 		(pts
@@ -5691,16 +5267,6 @@
 	)
 	(wire
 		(pts
-			(xy 54.61 110.49) (xy 54.61 113.03)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "de357338-ad9a-468e-900f-79487991980c")
-	)
-	(wire
-		(pts
 			(xy 118.11 57.15) (xy 125.73 57.15)
 		)
 		(stroke
@@ -5708,6 +5274,16 @@
 			(type default)
 		)
 		(uuid "df816380-6018-4361-9c61-0ad2940b2668")
+	)
+	(wire
+		(pts
+			(xy 35.56 110.49) (xy 39.37 110.49)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e1ee66f9-c00e-4d44-acfe-17076ccdca00")
 	)
 	(wire
 		(pts
@@ -5808,6 +5384,16 @@
 			(type default)
 		)
 		(uuid "f5abe2de-5f39-457e-9999-f3c74e0d75b8")
+	)
+	(wire
+		(pts
+			(xy 35.56 118.11) (xy 39.37 118.11)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f6f61e5e-ffaa-4140-8e3a-6fc4af7e7cd9")
 	)
 	(wire
 		(pts
@@ -6142,73 +5728,6 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR024")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:+5V")
-		(at 34.29 107.95 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "077fb7c2-2a22-4859-8385-e2b5a2f58aae")
-		(property "Reference" "#PWR077"
-			(at 38.1 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "+5V"
-			(at 30.48 108.585 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" ""
-			(at 34.29 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 34.29 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" ""
-			(at 34.29 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "7b99a915-13d3-49b8-b7b8-50f5a419084b")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR077")
 					(unit 1)
 				)
 			)
@@ -6789,6 +6308,106 @@
 		)
 	)
 	(symbol
+		(lib_id "Regulator_Switching:TLV62569DDC")
+		(at 200.66 46.99 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "1a59f9f1-b22f-4f7b-b13e-1f6793f3157b")
+		(property "Reference" "U4"
+			(at 200.66 36.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "TLV62569DDC"
+			(at 200.66 39.37 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23-6"
+			(at 201.93 53.34 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+					(italic yes)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/tlv62569.pdf"
+			(at 194.31 35.56 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "High Efficiency Synchronous Buck Converter, Adjustable Output 0.6V-5.5V, 2A, SOT-23-6"
+			(at 200.66 46.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C398365"
+			(at 200.66 46.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Notes" "LCSC Part name is TI TLV62569PDDCR"
+			(at 200.66 46.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "4"
+			(uuid "27ce4eb7-73b2-4d72-a634-e0c638264e34")
+		)
+		(pin "5"
+			(uuid "71f5d6dc-3e7f-4184-a9c0-da3b77375077")
+		)
+		(pin "1"
+			(uuid "13981f19-a355-42b7-8928-6d2c00b4fc4b")
+		)
+		(pin "2"
+			(uuid "a8874532-f02e-45a0-9fd7-4a1bd8b5f7e0")
+		)
+		(pin "3"
+			(uuid "5f93f680-da96-4d9b-83dc-4ba944ca41fb")
+		)
+		(pin "6"
+			(uuid "711d6b7a-0e04-4330-829b-2a9436fcfa98")
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "U4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:R")
 		(at 262.89 111.76 90)
 		(unit 1)
@@ -6926,6 +6545,73 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR020")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 35.56 118.11 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "26ff5485-cf70-4ba4-834e-756ab602898c")
+		(property "Reference" "#PWR087"
+			(at 29.21 118.11 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 31.75 118.1099 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" ""
+			(at 35.56 118.11 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 35.56 118.11 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 35.56 118.11 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "ffc057e6-4a54-4b1a-8454-ef1b7da90fc5")
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "#PWR087")
 					(unit 1)
 				)
 			)
@@ -7376,7 +7062,7 @@
 	)
 	(symbol
 		(lib_id "power:+5V")
-		(at 57.15 107.95 270)
+		(at 57.15 113.03 270)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -7385,7 +7071,7 @@
 		(fields_autoplaced yes)
 		(uuid "32186e14-040a-4bd4-b3fc-3c2a41252fee")
 		(property "Reference" "#PWR084"
-			(at 53.34 107.95 0)
+			(at 53.34 113.03 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7394,7 +7080,7 @@
 			)
 		)
 		(property "Value" "+5V"
-			(at 60.96 108.585 90)
+			(at 60.96 113.665 90)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7403,7 +7089,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 57.15 107.95 0)
+			(at 57.15 113.03 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7412,7 +7098,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 57.15 107.95 0)
+			(at 57.15 113.03 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7421,7 +7107,7 @@
 			)
 		)
 		(property "Description" ""
-			(at 57.15 107.95 0)
+			(at 57.15 113.03 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7727,7 +7413,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "3aff4698-b606-43c6-b44b-f20791089de2")
-		(property "Reference" "J4"
+		(property "Reference" "J8"
 			(at 44.45 24.13 0)
 			(effects
 				(font
@@ -7833,7 +7519,7 @@
 		(instances
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "J4")
+					(reference "J8")
 					(unit 1)
 				)
 			)
@@ -7966,82 +7652,6 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR099")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:VCC")
-		(at 34.29 118.11 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "463dc9be-6b67-4433-b0fb-7bfbca275e03")
-		(property "Reference" "#PWR076"
-			(at 38.1 118.11 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "VCCIO_34"
-			(at 30.48 118.1099 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" ""
-			(at 34.29 118.11 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 34.29 118.11 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VCC\""
-			(at 34.29 118.11 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "LCSC" ""
-			(at 34.29 118.11 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "369fb742-66b5-4284-992c-fec5e66a40ce")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR076")
 					(unit 1)
 				)
 			)
@@ -8977,6 +8587,73 @@
 	)
 	(symbol
 		(lib_id "power:GND")
+		(at 35.56 113.03 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "68b988fa-6ec9-458b-a3f8-adebc06e3643")
+		(property "Reference" "#PWR0158"
+			(at 29.21 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 31.75 113.0299 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" ""
+			(at 35.56 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 35.56 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 35.56 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "440a85e9-d616-4910-9d26-0306775362b6")
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "#PWR0158")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
 		(at 73.66 193.04 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -9487,6 +9164,73 @@
 		)
 	)
 	(symbol
+		(lib_id "power:GND")
+		(at 35.56 110.49 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "75f39eee-a4bf-4298-a7b7-9b4e0aca79d6")
+		(property "Reference" "#PWR0159"
+			(at 29.21 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 31.75 110.4899 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" ""
+			(at 35.56 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 35.56 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 35.56 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "b39ee916-1b2b-4445-864c-2ed0f598f307")
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "#PWR0159")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:R")
 		(at 124.46 134.62 0)
 		(unit 1)
@@ -9497,7 +9241,7 @@
 		(fields_autoplaced yes)
 		(uuid "7be7b199-329d-4b1d-84e6-dd31011cbb63")
 		(property "Reference" "R12"
-			(at 127 133.985 0)
+			(at 127 133.3499 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9505,8 +9249,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "3k"
-			(at 127 136.525 0)
+		(property "Value" "3.3k"
+			(at 127 135.8899 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9532,7 +9276,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "-55℃~+155℃ 3.3kΩ 50V 62.5mW Thick Film Resistor ±1% ±100ppm/℃ 0402 Chip Resistor - Surface Mount ROHS"
 			(at 124.46 134.62 0)
 			(effects
 				(font
@@ -9541,7 +9285,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C22978"
+		(property "LCSC" "C25890"
 			(at 124.46 134.62 0)
 			(effects
 				(font
@@ -9836,6 +9580,101 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR012")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector_Generic:Conn_02x04_Odd_Even")
+		(at 44.45 113.03 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp yes)
+		(fields_autoplaced yes)
+		(uuid "868a9d72-fcf2-42fb-bba3-d00b190d5c4f")
+		(property "Reference" "J2"
+			(at 45.72 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "Conn_02x04_Odd_Even"
+			(at 45.72 106.68 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Connector_PinSocket_2.54mm:PinSocket_2x04_P2.54mm_Vertical"
+			(at 44.45 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 44.45 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Generic connector, double row, 02x04, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 44.45 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" ""
+			(at 44.45 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "3"
+			(uuid "d76dd2e7-779d-41d2-8b74-36519c8b05e2")
+		)
+		(pin "5"
+			(uuid "d02df7f7-5917-42d6-902c-33e3db2f8de3")
+		)
+		(pin "2"
+			(uuid "1c000960-d5af-4d4f-a434-9c65e6efcf3d")
+		)
+		(pin "4"
+			(uuid "24378600-63ff-4843-ac6d-c166b107b5f4")
+		)
+		(pin "1"
+			(uuid "7fffd843-5e22-4995-8d26-35ea94609582")
+		)
+		(pin "7"
+			(uuid "7b36abbd-b0bb-4734-b36c-c75ca34fda1f")
+		)
+		(pin "8"
+			(uuid "9d5db6b3-f117-4420-a317-c128f38d2d97")
+		)
+		(pin "6"
+			(uuid "a1dbce00-f889-4b42-ab79-503b52a28920")
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "J2")
 					(unit 1)
 				)
 			)
@@ -10347,44 +10186,17 @@
 		)
 	)
 	(symbol
-		(lib_id "Regulator_Switching:TLV62568DDC")
-		(at 200.66 46.99 0)
+		(lib_id "power:GND")
+		(at 57.15 110.49 90)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
 		(fields_autoplaced yes)
-		(uuid "90f4b535-ef8b-409d-b6a3-cee0e954ceab")
-		(property "Reference" "U2"
-			(at 200.66 36.83 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "TLV62568PDRLR"
-			(at 200.66 39.37 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Package_TO_SOT_SMD:SOT-563"
-			(at 201.93 53.34 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-					(italic yes)
-				)
-				(justify left)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/tlv62568.pdf"
-			(at 194.31 35.56 0)
+		(uuid "9337515e-154f-4384-aeeb-777d8673c7e1")
+		(property "Reference" "#PWR085"
+			(at 63.5 110.49 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10392,8 +10204,17 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "High Efficiency Synchronous Buck Converter, Adjustable Output 0.6V-5.5V, 1A, SOT-23-6"
-			(at 200.66 46.99 0)
+		(property "Value" "GND"
+			(at 60.96 110.4899 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" ""
+			(at 57.15 110.49 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10401,8 +10222,8 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C398368"
-			(at 200.66 46.99 0)
+		(property "Datasheet" ""
+			(at 57.15 110.49 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10410,28 +10231,22 @@
 				(hide yes)
 			)
 		)
-		(pin "6"
-			(uuid "33b6c749-7acd-4702-a919-cd427028784f")
-		)
-		(pin "3"
-			(uuid "8144311b-4dc7-4be8-a008-c29aab7464b6")
-		)
-		(pin "4"
-			(uuid "6e341dc1-c1ac-470a-b92e-fb3bba6c318e")
-		)
-		(pin "5"
-			(uuid "42fc8155-9f60-413e-af4c-d0db00cb074f")
+		(property "Description" ""
+			(at 57.15 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
 		)
 		(pin "1"
-			(uuid "41a94838-4336-4eae-9900-57876955c69e")
-		)
-		(pin "2"
-			(uuid "04150b5f-ec7f-40c3-a89b-130cbc8fd7a1")
+			(uuid "52ee001b-9f0c-47c8-9db6-2e9dbbdb9dc9")
 		)
 		(instances
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "U2")
+					(reference "#PWR085")
 					(unit 1)
 				)
 			)
@@ -10878,6 +10693,79 @@
 		)
 	)
 	(symbol
+		(lib_id "ELEC327-Kicad:RICE_OWL")
+		(at 69.85 95.25 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp yes)
+		(fields_autoplaced yes)
+		(uuid "9f72d242-15a1-4883-8806-4a184517aa27")
+		(property "Reference" "S2"
+			(at 73.66 93.9799 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "~"
+			(at 73.66 96.5199 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "ELEC327-Kicad:RICE_OWL_LOGO"
+			(at 69.85 95.25 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 69.85 95.25 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 69.85 95.25 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" ""
+			(at 69.85 95.25 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "S2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 44.45 69.85 0)
 		(unit 1)
@@ -10938,73 +10826,6 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR026")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 57.15 110.49 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "a52db8f4-7bd4-4eb3-b337-34d7a12d5335")
-		(property "Reference" "#PWR085"
-			(at 63.5 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 60.96 111.125 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(property "Footprint" ""
-			(at 57.15 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 57.15 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" ""
-			(at 57.15 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "c746aa22-aac2-4f5a-956e-0ba1b8d5c2c1")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR085")
 					(unit 1)
 				)
 			)
@@ -11084,107 +10905,6 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "R10")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Connector_Generic:Conn_02x05_Odd_Even")
-		(at 44.45 113.03 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom no)
-		(on_board yes)
-		(dnp yes)
-		(fields_autoplaced yes)
-		(uuid "a72718b8-a239-4e8e-94eb-0792a449db63")
-		(property "Reference" "J2"
-			(at 45.72 101.6 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "Conn_02x05_Odd_Even"
-			(at 45.72 104.14 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Connector_PinSocket_2.54mm:PinSocket_2x05_P2.54mm_Vertical"
-			(at 44.45 113.03 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 44.45 113.03 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Generic connector, double row, 02x05, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
-			(at 44.45 113.03 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "LCSC" ""
-			(at 44.45 113.03 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "893f95fc-607e-47bb-884a-250e4d9c92d2")
-		)
-		(pin "4"
-			(uuid "91339a19-952c-474f-95ed-020cee2547a6")
-		)
-		(pin "1"
-			(uuid "34e86c26-efe1-48a9-8fc4-47ab75862495")
-		)
-		(pin "10"
-			(uuid "0f4d02cc-a342-4e73-9f67-0b5dbd81d61c")
-		)
-		(pin "3"
-			(uuid "a963b216-b796-449a-bcbe-01123394292e")
-		)
-		(pin "7"
-			(uuid "615742ab-8576-4d67-9d66-f584bb8c8b20")
-		)
-		(pin "9"
-			(uuid "34935eef-627a-42e2-ac72-d47214549028")
-		)
-		(pin "8"
-			(uuid "3c6c2d00-a923-464a-87cd-77a7cbb0acaa")
-		)
-		(pin "6"
-			(uuid "a3986059-1705-4f5b-a5b9-a7cc412a7257")
-		)
-		(pin "5"
-			(uuid "9d438ea0-0386-48aa-b959-c476cba06d4c")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "J2")
 					(unit 1)
 				)
 			)
@@ -11327,73 +11047,6 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR03")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 104.14 97.79 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "ac39a311-ced4-479a-ab1e-5fc0e1cea519")
-		(property "Reference" "#PWR087"
-			(at 110.49 97.79 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 107.95 98.425 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(property "Footprint" ""
-			(at 104.14 97.79 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 104.14 97.79 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" ""
-			(at 104.14 97.79 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "5e59db33-6fbe-4c9f-982b-f3c3baca3fe7")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR087")
 					(unit 1)
 				)
 			)
@@ -11612,6 +11265,79 @@
 		)
 	)
 	(symbol
+		(lib_id "ELEC327-Kicad:RICE_OWL")
+		(at 69.85 88.9 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp yes)
+		(fields_autoplaced yes)
+		(uuid "ba3d56bc-9306-42e2-92d9-039358a53712")
+		(property "Reference" "S1"
+			(at 73.66 87.6299 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "~"
+			(at 73.66 90.1699 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "ELEC327-Kicad:RICE_OWL_LOGO"
+			(at 69.85 88.9 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 69.85 88.9 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 69.85 88.9 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" ""
+			(at 69.85 88.9 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "S1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Connector:Screw_Terminal_01x02")
 		(at 96.52 31.75 0)
 		(unit 1)
@@ -11676,6 +11402,106 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "J1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Regulator_Switching:TLV62569DDC")
+		(at 203.2 92.71 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "bce2447b-6e7b-4076-b17e-08db3646b520")
+		(property "Reference" "U2"
+			(at 203.2 82.55 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "TLV62569DDC"
+			(at 203.2 85.09 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23-6"
+			(at 204.47 99.06 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+					(italic yes)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/tlv62569.pdf"
+			(at 196.85 81.28 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "High Efficiency Synchronous Buck Converter, Adjustable Output 0.6V-5.5V, 2A, SOT-23-6"
+			(at 203.2 92.71 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C398365"
+			(at 203.2 92.71 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Notes" "LCSC Part name is TI TLV62569PDDCR"
+			(at 203.2 92.71 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "4"
+			(uuid "329944a3-42d5-4000-b932-03c4020a27b4")
+		)
+		(pin "5"
+			(uuid "d253f8b5-87af-43aa-9773-dcaf15399897")
+		)
+		(pin "1"
+			(uuid "1415be05-d736-46d1-83e0-2c4c8f612b30")
+		)
+		(pin "2"
+			(uuid "e143bf37-378a-44c3-954b-9d2c01f549c6")
+		)
+		(pin "3"
+			(uuid "e8e54c0a-95d6-4a80-9929-8e02d51cced5")
+		)
+		(pin "6"
+			(uuid "d5d3177e-dfe4-4875-91c8-82569ae24206")
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "U2")
 					(unit 1)
 				)
 			)
@@ -12941,6 +12767,73 @@
 	)
 	(symbol
 		(lib_id "power:GND")
+		(at 35.56 115.57 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "d602283a-e294-463b-bbf1-45cc685d61f8")
+		(property "Reference" "#PWR0157"
+			(at 29.21 115.57 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 31.75 115.5699 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" ""
+			(at 35.56 115.57 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 35.56 115.57 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 35.56 115.57 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "d964893f-2140-4dcf-80e2-69edc94e40d8")
+		)
+		(instances
+			(project "MicroZed-IntanInterface-2Layer"
+				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
+					(reference "#PWR0157")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
 		(at 259.08 44.45 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -13719,82 +13612,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:VCC")
-		(at 34.29 115.57 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "f32b48af-4112-44af-af2b-7010af1d9563")
-		(property "Reference" "#PWR086"
-			(at 38.1 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "VCCIO_35"
-			(at 30.48 115.5699 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" ""
-			(at 34.29 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 34.29 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VCC\""
-			(at 34.29 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "LCSC" ""
-			(at 34.29 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "9c5c2886-fe9d-4fcd-b701-a2b06baaa832")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR086")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "power:GND")
 		(at 124.46 153.67 0)
 		(unit 1)
@@ -13855,89 +13672,6 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR030")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Connector:Conn_01x04_Pin")
-		(at 99.06 90.17 270)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom no)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "f5d9b6ca-7d6c-4163-82e5-133dd43c14e4")
-		(property "Reference" "J7"
-			(at 97.79 86.36 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "GND header for probes"
-			(at 97.79 88.9 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"
-			(at 99.06 90.17 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 99.06 90.17 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" ""
-			(at 99.06 90.17 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "LCSC" ""
-			(at 99.06 90.17 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "ec4f0295-b6c2-4388-8dd3-f6415c2da8d7")
-		)
-		(pin "2"
-			(uuid "7dd675ac-1344-4d27-99f4-58c392165d9a")
-		)
-		(pin "3"
-			(uuid "fc8cd2f5-1bd6-4a47-9f37-c18b08ed45ee")
-		)
-		(pin "4"
-			(uuid "e9177cbe-34fb-4522-b85a-dd33570df79b")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "J7")
 					(unit 1)
 				)
 			)
@@ -14089,164 +13823,6 @@
 			(project "MicroZed-IntanInterface-2Layer"
 				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
 					(reference "#PWR019")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Regulator_Switching:TLV62568DDC")
-		(at 203.2 92.71 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "fbae0d8b-8570-4da7-ac50-439abc06f01e")
-		(property "Reference" "U9"
-			(at 203.2 82.55 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "TLV62568PDRLR"
-			(at 203.2 85.09 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Package_TO_SOT_SMD:SOT-563"
-			(at 204.47 99.06 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-					(italic yes)
-				)
-				(justify left)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/tlv62568.pdf"
-			(at 196.85 81.28 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "High Efficiency Synchronous Buck Converter, Adjustable Output 0.6V-5.5V, 1A, SOT-23-6"
-			(at 203.2 92.71 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "LCSC" "C398368"
-			(at 203.2 92.71 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "6"
-			(uuid "77c31120-064d-40e7-8262-ef642cb32873")
-		)
-		(pin "3"
-			(uuid "1e057042-3a7c-4bad-8bf4-f6852287f1ce")
-		)
-		(pin "4"
-			(uuid "544d3e0a-cc04-4e2e-a7c2-18f42976ff11")
-		)
-		(pin "5"
-			(uuid "65809355-8f68-49b3-a834-75ca99cb2844")
-		)
-		(pin "1"
-			(uuid "9a12f0fa-0be6-4675-8f82-55e2a7e87b2b")
-		)
-		(pin "2"
-			(uuid "6dc33aee-bafb-42f7-bcec-9796c5d9c65b")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "U9")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 34.29 110.49 270)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "fe0cf9d5-26dd-452b-97fa-d6ad68f3ebcb")
-		(property "Reference" "#PWR078"
-			(at 27.94 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 30.48 111.125 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(property "Footprint" ""
-			(at 34.29 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 34.29 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" ""
-			(at 34.29 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "1b97da6e-adce-446b-a605-bca7437bb192")
-		)
-		(instances
-			(project "MicroZed-IntanInterface-2Layer"
-				(path "/e2973d32-f02d-4cac-9cf4-7229e04d7d6c"
-					(reference "#PWR078")
 					(unit 1)
 				)
 			)
