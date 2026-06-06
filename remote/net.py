@@ -985,6 +985,28 @@ def run_detection(sock, verbose=True):
         validator.set_cable_detector(None)
 
 
+def configure_tcp_keepalive(sock):
+    """Enable TCP keepalive to detect dead connections faster.
+
+    Some keepalive tuning options are platform-specific: Linux uses
+    TCP_KEEPIDLE while macOS uses TCP_KEEPALIVE for the idle time, and
+    TCP_KEEPINTVL / TCP_KEEPCNT are not available on macOS. Guard each
+    one so this works across platforms.
+    """
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    # Idle time before the first keepalive probe is sent.
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+    elif hasattr(socket, "TCP_KEEPALIVE"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 1)
+    # Send probes every 1 second.
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+    # Close connection after 3 failed probes.
+    if hasattr(socket, "TCP_KEEPCNT"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
+
 def tcp_control():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -992,13 +1014,7 @@ def tcp_control():
         print(f"[TCP] Connected to {ZYNQ_IP}:{TCP_PORT}")
 
         # Enable TCP keepalive to detect dead connections faster
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        # Start keepalive probes after 1 second of idle
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-        # Send probes every 1 second
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
-        # Close connection after 3 failed probes
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        configure_tcp_keepalive(sock)
         print(f"[TCP] TCP keepalive enabled (detect disconnection in ~3-5 seconds)")
 
         # Auto-configure UDP destination
@@ -1137,10 +1153,7 @@ def tcp_control():
                     sock.connect((ZYNQ_IP, TCP_PORT))
 
                     # Re-enable TCP keepalive on reconnection
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                    configure_tcp_keepalive(sock)
 
                     print(f"[TCP] Reconnected successfully!")
                 except Exception as reconnect_error:
