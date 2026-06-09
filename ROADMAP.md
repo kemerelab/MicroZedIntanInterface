@@ -31,7 +31,9 @@ Remember the three-layer contract: every register/packet change touches
 - [ ] **ADC format config** — two's-complement vs offset-binary, absolute-value mode.
 - [ ] **Configurable digital inputs** capture into the packet (`:273` TODO).
 - [ ] **Generalize COPI sequences** — replace the hardcoded `convert`/`init`/`cable_test`
-      blobs in `pl_control.c` with host-configurable register-write sequences.
+      blobs in `pl_control.c` with host-configurable, **looping aux command banks** + a
+      fast-settle override layer. **Design: [`docs/command-bank-design.md`](docs/command-bank-design.md).**
+      This is the foundation the fast-settle items (above) and impedance/temp/supply build on.
 
 ## B. Board-rev sensor / IO interfaces (2 ADC + 2 DAC + 9-axis IMU)
 
