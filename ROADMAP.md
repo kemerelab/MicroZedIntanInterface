@@ -20,6 +20,11 @@ Remember the three-layer contract: every register/packet change touches
       except on transition packets). Refs: `data_generator_core.sv:273,312`; Intan
       [`rhythm/main.v`](https://github.com/open-ephys/rhythm/blob/master/main.v)`:750-767,1028-1030`.
       Decisions pending: pin, edge vs one-shot, DSP-bit yes/no, which aux slot to sacrifice. *(top 5)*
+      **OPEN:** does a fast-settle GPIO *replace* Slot 1's command (current plan), or instead
+      *block/inject into* Slot 3's sequence? Revisit when building the override layer.
+- [ ] **Digital output (`auxout`) — GPIO mirror** — drive the chip's `auxout` pin from a
+      software-selectable controller GPIO in real time (Slot 1 Reg-3 override; confirmed Intan
+      `main.v:1252` routes `TTL_in[ch]` → digout bit). Pairs with the Reg-3 shadow.
 - [ ] **Configurable amplifier bandwidth** — upper/lower cutoff registers (RH1/RH2/RL),
       host command + firmware sequence instead of the hardcoded init.
 - [ ] **DSP high-pass / offset removal** config (register 0 DSP cutoff bits).
