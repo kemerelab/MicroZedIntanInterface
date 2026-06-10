@@ -11,7 +11,10 @@ the next. Implements `docs/command-bank-design.md` (Epic A).
 functionally complete and passes whole-design synthesis, but the **full
 place-and-route FAILS on routing congestion**, so per the task rules it was
 **NOT committed to `claude/roadmap`** — it is preserved on a separate WIP branch.
-`claude/roadmap` is left at a clean, synthesis-passing state.
+**`claude/roadmap` HEAD was rebuilt end-to-end and PASSES (`BUILD_PASS`, XSA +
+both firmware ELFs).** A clean build of HEAD was used to isolate the cause:
+**the baseline routes fine; the Phase-3 integration is what triggers the
+congestion** (details below).
 
 ---
 
@@ -125,39 +128,82 @@ Interpretation: the congestion lives in the existing `fifo_bram_interface`, and
 this otherwise-inert (default-OFF) integration added just enough global placement
 pressure to push an already-marginal design past the routability cliff.
 
-### Causation check (baseline) — <!--BASELINE_STATUS-->
-A clean build of `claude/roadmap` HEAD (`60d0e89`) was launched to confirm the
-branch builds and to isolate causation. At HEAD the 3 new `.sv` files are
-**un-instantiated**, so its synthesized netlist and P&R are identical to the true
-pre-integration baseline. **Result: _pending — see the final entry below._**
+### Causation check (baseline) — CONFIRMED: the integration is the trigger
+A clean end-to-end build of `claude/roadmap` HEAD (`60d0e89`) was run. At HEAD
+the 3 new `.sv` files are **un-instantiated**, so its synthesized netlist and
+P&R equal the true pre-integration baseline. Result:
+
+- **Baseline = `BUILD_PASS`.** `route_design` succeeded: **31576/31576 routable
+  nets fully routed, 0 routing errors**, XSA (1.0 MB) + both firmware ELFs built.
+  Congestion peaked at level 3–4. (~16 min to bitstream vs. the failed build's
+  2h32m of route thrashing.)
+- **Timing is "not met" in the baseline too** — WNS = **−4.55 ns**, TNS ≈
+  **−75,000 ns, 23,429 failing setup endpoints** (hold met, WHS +0.013). This is
+  **essentially identical to the integration's timing** (WNS −3.48) and is the
+  design's **pre-existing, normal state**: Vivado writes the bitstream despite it
+  and the board runs on hardware, so these are almost certainly unconstrained
+  false / async cross-clock / multicycle paths, **not** real failures and **not**
+  caused by this work.
+
+**Therefore the only thing the Phase-3 integration changed that matters is
+ROUTING CONGESTION** (it did not worsen timing). Both designs carry the same bad
+timing; the baseline routes at congestion level 3–4, and the integration's extra
+logic pushes the same region to level 5 (8142 overlaps) → unroutable. The extra
+logic is the sequencer's distributed RAM (LUTRAM, i.e. **SLICEM**) plus the wider
+`ctrl/status` buses + CDC FFs, placed in/near the already-tight `fifo_bram`
+LUTRAM region — they **compete for the same scarce SLICEM resource**.
+
+This was reproducibly isolated, so I did **not** attempt a speculative fix
+overnight (the clean fixes are not one-liners — see next steps). `claude/roadmap`
+is confirmed building; the integration waits on the WIP branch.
 
 ---
 
 ## State of the tree
 
-- `claude/roadmap` @ `60d0e89`: clean, whole-design OOC-synth-passing; adds the
-  sequencer + tb + Phase-4 drafts as files. The sequencer/override/capture are
-  **not instantiated**, so the produced bitstream is identical to the baseline.
+- `claude/roadmap` @ `60d0e89`: **rebuilt end-to-end → `BUILD_PASS`** (XSA +
+  firmware). Adds the sequencer + tb + Phase-4 drafts as files, but the
+  sequencer/override/capture are **not instantiated**, so the produced bitstream
+  is identical to the pre-existing, hardware-proven baseline.
 - `claude/aux-seq-integration-wip` @ `639fd18`: the full Phase-3 integration,
   preserved for follow-up. **Do not merge** until the congestion is resolved.
 
-## Recommended next steps
-1. **Resolve the congestion in `fifo_bram_interface`** (the actual bottleneck,
-   independent of this work): run `report_design_analysis -congestion
-   -complexity` on `impl_1/design_1_wrapper_routed_error.dcp`; try a
-   congestion-oriented implementation strategy
-   (`Performance_Explore`/`Congestion_SpreadLogic_high`), and/or a Pblock to
-   spread the `write_fifo` segment buffer. This likely helps the baseline too.
-2. **Fix the constraints** so the timing report reflects reality (the −59k TNS
-   suggests unconstrained/false cross-clock paths — e.g. AXI↔PL and the 175 MHz
-   domain). A design that times correctly routes far more easily.
-3. Once the design routes with headroom, **re-apply `claude/aux-seq-integration-wip`**
-   (`git cherry-pick 639fd18` or `git diff 60d0e89 claude/aux-seq-integration-wip`)
-   and rebuild. The integration is default-OFF and bit-identical when disabled, so
-   it is safe to carry once the platform routes.
-4. Then proceed to host/firmware (`pl_control.c`, `net.py`) for bank upload +
-   `aux_seq_en`, and to integrating the Phase-4 `override_layer`/`aux_capture`
-   (after datasheet + sim verification of bit positions and pipeline alignment).
+## Recommended next steps (ordered by promise)
+
+1. **Move the sequencer's command store from distributed RAM to BLOCK RAM.**
+   This is the most direct fix and addresses the verified mechanism: it takes the
+   168 LUTRAM bits **off the contended SLICEM resource** and onto the device's
+   ~140 **idle** BRAM tiles (the data path's BRAM is external via `BRAM_PORTA`;
+   `data_generator` itself uses 0 BRAM today). BRAM read is synchronous (1-cycle
+   latency) instead of combinational, but there is enormous slack: the per-slot
+   index is latched at `packet_start` (cycle 0, state 0) and the command is not
+   serialized until cycle 32, so driving the `{bank,index}` address continuously
+   and registering the read (the "prefetch" the design doc already calls for) is
+   trivially in time. Cost: it changes the verified Phase-1 sequencer (storage +
+   1-cycle read latency), so the testbench (`aux_command_sequencer_tb.sv`) must be
+   updated for the read delay and re-run, then re-OOC-synth, then a full build to
+   confirm it routes.
+2. **Or relieve congestion via the flow** (no RTL change): in `build_bitstream.tcl`
+   try an implementation strategy such as `Congestion_SpreadLogic_high` /
+   `Performance_Explore`, and/or a Pblock spreading the `fifo_bram` `write_fifo[*]`
+   segment buffer. Run `report_design_analysis -congestion -complexity` on
+   `impl_1/design_1_wrapper_routed_error.dcp` (from the failed build) to target it.
+   Caveat: this also affects the baseline build.
+3. **Or shrink the sequencer footprint** (`ADDR_W 6→5` = 32 entries/bank if that
+   is enough for the Slot-3 program) to roughly halve its LUTRAM demand.
+4. **Independently, fix the timing constraints.** The ~−75k TNS / 23k failing
+   setup endpoints is pre-existing and present even in the passing baseline — it
+   masks real timing and makes the router work hard (less congestion headroom).
+   The likely culprits are unconstrained AXI↔PL and 175 MHz cross-clock paths;
+   declaring the real `set_clock_groups -asynchronous` / false / multicycle paths
+   would shrink the failing set and give routing margin. Helps everything.
+5. Once the platform routes with headroom, **re-apply
+   `claude/aux-seq-integration-wip`** (`git cherry-pick 639fd18`, or
+   `git diff 60d0e89 claude/aux-seq-integration-wip`) and rebuild. The integration
+   is default-OFF and bit-identical when disabled, so it is safe to carry.
+6. Then host/firmware (`pl_control.c`, `net.py`) for bank upload + `aux_seq_en`,
+   and integrate the Phase-4 `override_layer`/`aux_capture` (after datasheet + sim
+   verification of bit positions and pipeline alignment).
 
 ## How to reproduce
 - Sequencer TB: `source /opt/Xilinx/2025.1/Vivado/settings64.sh && bash
