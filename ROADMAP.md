@@ -84,11 +84,33 @@ Remember the three-layer contract: every register/packet change touches
 - [ ] **Error-state recovery** — track timestamp-gap duration on recovery (`main.c:143`).
 - [ ] **De-hardcode IPs** — config mechanism instead of baked-in 192.168.18.x.
 
-## F. OpenEphys integration
+## F. OpenEphys integration (`ephys-socket` plugin)
 
-- [ ] **Fold in the OpenEphys plugin** (currently separate:
-      https://github.com/ckemere/ephys-socket) — decide vendoring vs submodule.
-- [ ] **Align the packet format** between firmware UDP output and the plugin's expectations.
+Target: [`ckemere/ephys-socket`](https://github.com/ckemere/ephys-socket) (clone at
+`~/Code/ephys-socket`) — a forked OpenEphys "Ephys Socket" `DataThread`, already MicroZed-specific
+(`IntanInterface` = UDP recv + TCP control; `IntanSocket` = parse → GUI buffer). It is the **third
+consumer of the register/packet contract** (after firmware and `net.py`) — `IntanInterface`
+duplicates `net.py`'s `CMD_*` set.
+
+Current gaps (plugin is WIP):
+- [ ] **Packet alignment** — reads data flat (`dataWords[ch/2]`, `IntanSocket.cpp:481`) with **no
+      +2 pipeline shift** and ignores metadata words [6–9]. Needs the PL-side alignment +
+      command-echo (Epics A/C) to get correctly-labeled neural + aux channels.
+- [ ] **Aux split + scaling** — allocates 3 aux/bank + `aux_data_scale` but doesn't actually
+      separate/align them; wire to the echo metadata.
+- [ ] **Command parity** — add the new `CMD_*` (aux bank write, fast settle, digout, register R/W)
+      to `IntanInterface`, in lockstep with `net.py` + firmware.
+- [ ] **Contract single-source** (see Epic H) — make the plugin consume the generated
+      packet/register/`CMD` definition so all 3 consumers stay in sync. *This is the real coupling.*
+
+Integration approach (must stay installable via the OpenEphys Plugin Installer, which requires a
+standalone repo + releases):
+- [ ] **Decide submodule vs subtree** for co-locating in this repo:
+      - *Submodule* (recommended): plugin stays its own repo (source of truth, installable); this
+        repo references it at e.g. `openephys-plugin/`. Standard, low-risk; bump pointer on change.
+      - *Subtree*: plugin code lives in this repo (primary dev); `git subtree push` to the
+        standalone repo to cut installable releases. Smoother co-dev, more arcane.
+      - Either way the standalone repo + its CMake/CI/releases persist for installability.
 - [ ] **Build + docs** for the plugin within this repo.
 
 ## G. Verification infrastructure (scoped to where iteration cost is highest)
