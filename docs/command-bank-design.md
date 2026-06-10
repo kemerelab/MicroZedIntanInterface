@@ -1,208 +1,189 @@
-# Design — Aux Command Bank Rebuild + Fast-Settle Override
+# Design — Aux Command Bank Rebuild + Fast-Settle/Digout Override
 
-**Status:** Draft (captures the design discussed June 2026). Open decisions are listed at the
-end. Confirm chip details against `docs/Intan_RHD2000_series_datasheet.pdf` and
-`docs/Intan_RHD2164_datasheet.pdf` before implementing.
+**Status:** Converged design (June 2026). Confirm chip details against
+`docs/Intan_RHD2000_series_datasheet.pdf` / `docs/Intan_RHD2164_datasheet.pdf` before implementing.
+Reference implementation studied: `github.com/open-ephys/rhythm` + `open-ephys-plugins`
+(clones under `~/Code/Intan/`).
 
 ## Motivation
 
 Today the streaming command stream is a flat, fixed 35-entry list replayed identically every
 packet (`pl_control.c: convert_cmd_sequence`, played out by `data_generator_core.sv` over
-`cycle_counter` 0..34). The three "auxiliary" positions are static (`CONVERT(32/33/34)` only),
-leaving no room — without a firmware rebuild — for the temperature sensor, supply-voltage
-monitoring, runtime link/health checks, impedance testing, ad-hoc register access, or fast settle.
+`cycle_counter` 0..34). The three aux positions are static `CONVERT(32/33/34)`, leaving no room —
+without a firmware rebuild — for temperature, supply, runtime link/health checks, impedance,
+ad-hoc register access, real-time digital output, or fast settle.
 
-This rebuild replaces the static aux positions with **programmable, looping, swappable command
-banks** (the Intan/OpenEphys model), adds a **fast-settle override layer**, and uses an
-**index-tagged, self-describing** data format so the host decodes aux results without mirroring the
-program.
+This rebuild replaces the static aux positions with **programmable, looping, swappable per-slot
+command banks**, adds a **real-time override layer** (fast settle + digital-out + a Register-3
+shadow), and uses **PL-side frame alignment with command-echo identity** so the host receives
+clean, self-contained UDP packets.
 
-## Background
+## Command source model
 
-### Current system (this repo)
-- One packet = one ~30 ksps sample = **35 COPI commands**: 32 channel converts (RHD2164 reads
-  64 ch via DDR) + **3 aux commands**, replayed identically every packet.
-- Aux commands fixed at `CONVERT(32/33/34)`. Fast settle unimplemented (`data_generator_core.sv:273,312`).
-
-### Intan / OpenEphys reference (github.com/open-ephys/rhythm)
-- 32 converts + **3 independent programmable aux slots** (`AuxCmd1/2/3`), each a looping RAM bank
-  with its own index/length/loop-point, **with multiple banks per slot selectable on the fly**.
-- Decode is **positional**: host knows the program, computes `index = f(sample#)`, accounts for the
-  fixed **2-command pipeline delay**.
-- Fast settle = edge-triggered `WRITE(0,…)` injected into the digout slot + a bit-5 coherence
-  override on every slot (`main.v:960-1013`). The RHD chip *latches* Register 0, so a pulse needs
-  only two writes (on at the rising edge, off at the falling edge).
-
-## Design
-
-### What's in a bank: aux-only, multi-bank, swappable
-
-- **Aux-only.** The PL **auto-generates** `CONVERT(0..31)` (invariant for the RHD2164 — those 32
-  converts DDR-read all 64 channels). Banks hold **only the aux commands**, so the host can never
-  corrupt the neural sampling, banks stay small, and the API is focused on what actually varies.
-  Per-convert tweaks (the DSP-reset bit-H) are applied by the *override layer*, not by editing a bank.
-- **Multiple banks per slot, preloaded and swapped** (Intan's safety model). Each slot has N banks
-  (2–4). You build/validate a program offline, load it into an *unused* bank, then flip a small
-  **bank-select** register; the swap is **atomic at a packet boundary**, the running bank is never
-  mid-edit, and modes (calibrate↔normal, normal↔impedance) become a register change, not a re-upload.
-
-### Slot map
-
-Three aux slots (positions 33/34/35 of each packet; positions 1–32 are the auto-generated channel
-converts). Roles enforce the invariant **only the scratch slot is ever command-*replaced*.**
-
-| Slot | Role | Owns (reg) | Protected? |
-|------|------|-----------|-----------|
-| **1 — Aux ADC** | round-robin `CONVERT(32/33/34)` → each aux input at **10 kHz** | none | **yes** (bank-swappable to Zcheck DAC during impedance only) |
-| **2 — Housekeeping** | looping low-rate measurement bank: temperature, supply, link/chip-ID, user periodic reads | **Reg 3** (temperature) | **yes** |
-| **3 — Scratch / control** | fast-settle home; on-demand `READ/WRITE_REGISTER`; config bank-switching | **Reg 0** (fast settle) | no — the only command-replaced slot |
-
-### Register ownership (why slots "own" registers)
-
-An RHD register write sets **all 8 bits at once** — there is no per-bit masking on the chip. So two
-slots writing the *same* register fight over the shared byte. We avoid this by giving each
-contended register a single owner:
-
-**Register 0 — ADC config + amplifier fast settle** (`WRITE(0,…)`):
-```
-D7:6 ADC reference BW (=3 always)
-D5   amp fast settle   ← pulsed by 0x80FE (set) / 0x80DE (clear)
-D4   amp Vref enable
-D3:2 ADC comparator bias
-D1:0 ADC comparator select
-```
-Owned by **Slot 3** (fast settle). Any `WRITE(0,…)` flowing through another slot gets bit 5 forced
-to the live fast-settle state (the override below), so a config refresh can't clear an active settle.
-
-**Register 3 — MUX load, temperature sensor, auxiliary digital output** (`WRITE(3,…)`):
-```
-D7:5 MUX load (=0 always)
-D4   tempS2 ┐ temperature-sensor switch controls — toggled across samples,
-D3   tempS1 ┘ then CONVERT(49) reads the result
-D2   tempen  (temperature sensor enable)
-D1   digout HiZ ┐ auxiliary digital output pin (auxout)
-D0   digout     ┘
-```
-Owned by **Slot 2** (temperature). Because Reg 3 also holds the digout pin, we deliberately do
-**not** do real-time digout in another slot (Intan put digout in the scratch slot and had to
-coordinate Reg 3 across slots; we sidestep that). Caveat: `WRITE_REGISTER` (via Slot 3) *can* target
-Reg 3 — document that ad-hoc writes during streaming must avoid registers an active slot owns.
-
-### Override layer (invariant, structurally enforced)
+Per packet (= one ~30 kHz sample) the PL issues 35 commands: 32 channel converts + 3 aux.
+A host-writable **full 35-entry command table** remains the base; two enable bits overlay the
+segmented behavior:
 
 ```
-   CONVERT(0..31)            ← neural data (64ch via DDR) — untouched
-   Slot 1 (Aux ADC)          ┐
-   Slot 2 (Housekeeping)     ├─ bank outputs
-   Slot 3 (Scratch/control)  ┘
-                 │  override layer
-                 ▼
-   • amp settle  : on trigger EDGE, REPLACE Slot 3's command with WRITE(0,0xFE/0xDE).
-                   Wired to Slot 3 ONLY  →  invariant holds by construction.
-   • reg-0 coher.: force bit5 on ANY reg-0 write in ANY slot (bit-only, never replaces).
-   • DSP reset   : force bit H on CONVERT(0..31) (in-place; channel still sampled, drops nothing).
-                 │
-                 ▼  COPI
+if (cycle_counter < 32)
+    cmd = auto_convert_en ? make_convert(cycle_counter)    // CONVERT(pos), fixed every packet
+                          : full_cmd_table[cycle_counter]; // host table (init/cal/cable-test)
+else begin
+    slot = cycle_counter - 32;                              // 0,1,2
+    cmd = aux_bank_en ? aux_slot[slot].read()              // looping per-slot bank
+                      : full_cmd_table[cycle_counter];
+end
+// → override layer (below) may rewrite cmd
 ```
 
-- **Amp settle** (analog, Reg 0 bit 5): edge-following; software-selectable `digital_in_0[*]` pin +
-  software force bit. Chip latches Reg 0 → two writes per pulse.
-- **DSP reset** (digital HPF, CONVERT bit H): independently routable to software and/or a selectable
-  pin — usable together with amp settle or separately. In-place; drops no data.
+| Mode | `auto_convert_en` | `aux_bank_en` | `loop_count` | Behavior |
+|---|---|---|---|---|
+| Init / calibrate / cable-test | 0 | 0 | 1..N | full table replayed (today's exact pipeline) |
+| Acquisition | 1 | 1 | 0 (∞) | auto converts + looping aux banks + overrides |
 
-**Invariant test (xsim):** assert the trigger arbitrarily; prove `Slot 1/2 emitted == bank[index]`
-and `CONVERT(c) channel field unchanged` on *every* cycle, including edges. Only Slot 3 may differ.
+The segmentation is a **two-index-domain** FSM: positions 0–31 indexed by `cycle_counter` (fixed
+each packet); positions 32–34 indexed by **per-slot, per-packet indices** that loop independently.
 
-### Default aux command cycle
+## Storage: 3 independent per-slot command BRAMs
 
-One packet = one 30 kHz sample, so each slot emits one command per packet.
+One **dual-port BRAM per aux slot** (3 total) — *not* one shared 3×N array — so each slot's index,
+length, and bank-select are fully independent (Slot 2 loops at 3, Slot 3 at ~30; trivial with
+separate RAMs). Each BRAM is its own AXI **memory-mapped window** (PS writes as memory; FPGA reads
+on the PL clock), separate from the control registers and the data BRAM.
 
-**Slot 1 — Aux ADC @ 10 kHz** (3-entry loop):
-```
-idx 0: CONVERT(32)  → AuxIn1
-idx 1: CONVERT(33)  → AuxIn2
-idx 2: CONVERT(34)  → AuxIn3       each input = 30 kHz / 3 = 10 kHz
-```
-Dedicating a whole slot to the aux ADC is *better than Intan* (theirs shares one slot, capping aux
-at ¼ rate); here aux gets the full 10 kHz with nothing else interleaved.
+- **≥2 banks per slot** (active + standby), so you write a standby bank while the FSM reads the
+  active one — no torn program.
+- **Length is bound to the bank.** Each bank carries its own `(loop_idx, end_idx)`, so a
+  bank-select **atomically swaps the length too**. (Intan keeps length per-*slot* — a footgun we
+  fix; their AuxCmd3 banks have different lengths and must be hand-synced on every swap.)
+- **Per-slot index** advances once per packet, wrapping `end_idx → loop_idx`.
+- **Atomic swap:** PS writes `aux_bank_select[slot]`; the FSM latches it only at a packet boundary.
+- **Confirm-before-reuse handshake:** PS polls `aux_bank_active[slot]` (status reg) until it reads
+  the new bank → the freed bank is now safe to write.
+- **Read needs prefetch:** BRAM read has 1–2 cycle latency, so issue the `(bank,index)` address a
+  state ahead inside the 80-state loop (plenty of slack).
 
-**Slot 2 — Housekeeping** (looping; length tunes the rate — these signals are slow, so a long loop
-is fine). Representative program:
-```
-idx 0: WRITE(3, tempen|tempS1)         // temp setup A
-idx 1: WRITE(3, tempen|tempS1|tempS2)  // temp setup B
-idx 2: CONVERT(49)                     // temperature
-idx 3: CONVERT(48)                     // supply voltage
-idx 4: CONVERT(63)                     // chip ID  ← continuous link/health check
-idx 5: RegRead(40..44)                 // "INTAN" ROM ← link integrity (subsumes cable detection)
-idx 6..N: user-defined periodic reads / RegRead(63) no-op padding
-```
-Rate of any item = `30 kHz × appearances / loop_length`.
+**Multi-chip note:** one shared COPI broadcasts to both chips, so aux commands are **shared** — one
+set of 3 banks, not per-chip. Each chip returns on its own CIPO line. So *identity = echoed command
+(what) + CIPO line (which chip)*; no per-chip bank machinery (unlike Intan's per-port banks).
 
-**Slot 3 — Scratch / control** (default = `RegRead(63)` no-op every packet):
-- fast-settle override replaces it on trigger edges (`WRITE(0,…)`),
-- `READ_REGISTER` / `WRITE_REGISTER` inject here on demand (result returns 2 cmds later, tagged),
-- hosts config/impedance bank-switching.
+## Slot allocation (final)
 
-So: **one slot streams the aux ADC at 10 kHz; the other two carry all housekeeping and user-specified
-I/O.**
+| Slot | Role | Default contents | Reg writes |
+|------|------|------------------|------------|
+| **1 — real-time control** | digital-out (GPIO→`auxout` mirror) + fast settle | `WRITE(3,…)` every packet (digout); fast settle hijacks it on TTL edges | **sole Reg 0 + Reg 3 writer** (via shadow) |
+| **2 — ADC only** | accelerometer sweep | `CONVERT(32) → CONVERT(33) → CONVERT(34)` looping → each aux input at **10 kHz** | none (pure reads) |
+| **3 — config + measurements** | setup + low-rate housekeeping, banked | bank A = register config/calibration (run once); bank B = supply `CONVERT(48)`, temp read `CONVERT(49)`, link/chip-ID `CONVERT(63)`/`RegRead(40-44)`, arbitrary R/W, looping (length ~30) | many regs, time-exclusive |
 
-### Bank format
+This gives all goals at once: real-time digout, dedicated 10 kHz accel, and temp/supply/link +
+config — no rate compromise. (Intan instead crams accel+temp+supply into one slot → 7.5 kHz accel;
+dedicating Slot 2 beats that.)
 
-- Per-slot **command RAM**, N banks deep × M entries (propose M = 32–64). Each entry: 16-bit COPI command.
-- Per-slot **index** advances once per packet, wrapping `max → loop` (one-time preamble + looping
-  section, like Intan's `loopIndex/endIndex`).
-- Per-slot **bank-select** register for atomic swaps.
+## Override layer + the Register-3 shadow
 
-### Packet metadata + decode contract
+Two RHD registers are shared across functions, and RHD writes set **all 8 bits at once**, so we
+maintain coherent **shadows** and override any write to those registers — generalizing the trick
+Intan already uses (override bit 5 on Reg-0 writes; `digout_override` on Reg-3 writes):
 
-Fill the header words currently `0x0` (`data_generator_core.sv:352`). Per packet add:
-- `meas_index` per protected slot (Slots 1 & 2) — **delay-adjusted**: the index of the command whose
-  *result* is in this packet, so the host does a pure `map[tag]` lookup with no pipeline math.
-- `fast_settle_active` (1 bit); optional `slot3_tag` (what Slot 3 did: noop / settle / reg-read result).
+**Register 0 — ADC config + amp fast settle** (`D5` = amp fast settle):
+- Force `D5` = live fast-settle state on *any* `WRITE(0,…)`.
+- On a fast-settle TTL **edge**, replace **Slot 1's** command with `WRITE(0,0xFE)` (on) / `0x80DE`
+  (off). Chip latches Reg 0 → two injections per pulse.
 
-**Self-describing:** drop a packet → lose one measurement, never desync (unlike pure positional
-decode). The 64-bit timestamp stays the global anchor.
+**Register 3 — temp sensor + auxiliary digital output** (`D0`=digout, `D2..D4`=tempen/tempS1/tempS2):
+- Maintain `reg3_shadow = { static MUX/HiZ bits, tempen/tempS state, live digout bit }`.
+- The **digout bit** = a software-selectable TTL/GPIO input (real-time mirror to the headstage
+  `auxout` pin — this is why Intan hardcodes it: `auxout` follows a controller GPIO at ~1-sample
+  latency, `main.v:1252` routes `TTL_in[channel]` → `digout_override`).
+- Override *any* `WRITE(3,…)` (from any slot) with `reg3_shadow` → no slot can clobber another's
+  Reg-3 bits; Reg 3 has a single coherent authority.
 
-### Host API (new `CMD_*` in `net.py` + firmware)
+**Temperature accuracy (decision):**
+- *Single-point* (default): fix `tempS` in the shadow, one `CONVERT(49)`. No sequencer.
+- *Differential* (Intan-accurate): a small temp sequencer steps `tempS` in the shadow in sync with
+  Slot 3's `CONVERT(49)`. Add only if calibrated temperature is needed.
+
+**DSP reset** (optional digital fast settle): force the CONVERT **LSB ("bit H")** on `CONVERT(0..31)`
+from software and/or a selectable pin — in-place, drops no data. Independent of amp settle.
+
+**Invariant:** the override layer only ever *replaces* commands in **Slot 1** (the real-time-control
+slot). Slots 2 (ADC) and 3 (measurements/config) are never command-replaced — only Reg-write *bits*
+are coherently substituted. So the 10 kHz accel stream and the measurement stream are never perturbed.
+
+## Data path — align in the PL, echo the command, self-contained packets
+
+Intan resolves the SPI **2-command pipeline delay in the FPGA** (a tuned offset — `channel_MISO<=33`,
+"*Bug fix: changed 2 to 33*" — plus fixed-order frame assembly), so the host reads clean, grouped
+frames; it does **not** ship shifted data or read wrapped points. (The exact cycle-level grouping is
+intricate and empirically tuned; verify ours by simulation rather than by replicating their magic
+offset.) We do the same:
+
+- **`aux_capture` unit:** latch each aux result, pair it with the **originating command** carried
+  through the readback delay, and emit clean.
+- **Command-echo identity:** each packet's metadata carries the *originating command* per aux slot.
+  The command is self-describing (`CONVERT(49)`→temp, `CONVERT(48)`→supply, `CONVERT(3x)`→accel
+  axis, `READ(addr)`→that register). Host decodes with **zero** knowledge of the loaded program,
+  and a dropped packet never desyncs. Robust to bank swaps too.
+- **Self-contained UDP packets:** unlike Intan (continuous, reliable USB), we're on lossy UDP, so
+  each packet must stand alone. Aligning in the PL gives this directly; if any result still wraps,
+  pad with trailing dummy command(s) so only don't-care results cross the boundary.
+
+## Packet metadata
+
+Fill the header words currently `0x0` (`data_generator_core.sv:352`). Per packet:
+- per protected slot: the **echoed originating command** (+ optional per-slot index for drop
+  detection) — identity for the aux results on each CIPO line.
+- `fast_settle_active` (1 bit), `digout_state` (1 bit), optional `slot3_bank`.
+- reserved space for PS-side **BNO055 IMU** quaternion/accel (read over Zynq PS-I²C; see
+  `[[openephys-accelerometer]]` — dedicated SDA/SCL on the cable, not in these slots).
+
+## Aux command format (verified Intan interface → our adaptation)
+
+Intan: 3 dual-port RAMs (`RAM_bank_1/2/3`, `main.v:937/972/994`), each 16 banks × 1024 × 16-bit
+RHD command words; read at `RAM_addr_rd = aux_cmd_index_N`, `RAM_bank_sel_rd = bank`; written
+word-by-word via WireIns `WireInCmdRamData/Addr/Bank` (0x07/0x05/0x06) + `TrigInRamWrite` (0x42)
+bit 0/1/2 selecting the slot (`uploadCommandList`). Bank via `selectAuxCommandBank`, length via
+`selectAuxCommandLength`.
+
+Ours: same model, adapted — **memory-mapped BRAM window per slot** (cleaner than wire+trigger on
+Zynq), **one bank-select per slot** (shared COPI, not per-port), **length bound to the bank**,
+much smaller (2–4 banks, N≈30).
+
+## Host API (new `CMD_*` in `net.py` + firmware)
 
 | Command | Action |
 |---|---|
-| `AUX_BANK_WRITE(slot, bank, list)` | upload an aux program into a bank |
-| `AUX_BANK_SELECT(slot, bank)` | atomic swap at next packet boundary |
-| `AUX_BANK_LENGTH(slot, loop_idx, end_idx)` | set loop bounds |
-| `READ_REGISTER(addr)` | inject `READ(addr)` into Slot 3; return result (tagged) |
-| `WRITE_REGISTER(addr, val)` | inject `WRITE(addr,val)` into Slot 3 |
-| `SET_FAST_SETTLE(pin, amp_en, dsp_en, mode)` | configure the override |
+| `AUX_BANK_WRITE(slot, bank, list)` | upload a program (incl. its length) into a standby bank |
+| `AUX_BANK_SELECT(slot, bank)` | atomic swap at next packet boundary (carries the bank's length) |
+| `READ_REGISTER(addr)` / `WRITE_REGISTER(addr,val)` | one-off, injected via Slot 3 (or Slot 1 for Reg 0/3 through the shadow); result tagged |
+| `SET_FAST_SETTLE(pin, amp_en, dsp_en, mode)` | configure the Reg-0 override |
+| `SET_DIGOUT(pin, enable)` | select the GPIO mirrored to `auxout` |
 
-Default banks preloaded at init (Slot 1 = aux@10 kHz, Slot 2 = temp/supply/link, Slot 3 = no-op).
-Fast settle and ad-hoc register access share Slot 3; on a collision **fast settle wins** and the
-register op waits one cycle.
+## PL module boundaries (separately testable in xsim)
 
-### PL module boundaries (built for separable testing)
+| Module | Responsibility | Testbench |
+|---|---|---|
+| `aux_command_bank.sv` | per-slot BRAM + banks; advance index; emit command; atomic bank/length swap | load banks → clock N packets → assert command sequence, wrap, atomic swap+length |
+| `override_layer.sv` | Reg-0 bit5 / Reg-3 shadow / digout / DSP bit-H; Slot-1-only replacement | feed commands + TTL edges → assert Slot-1-only replacement, shadow coherence, invariant |
+| `aux_capture.sv` | pair results with originating command across the readback delay; emit labeled triples | synthetic delayed results → assert correct command↔result pairing incl. boundary |
+| `data_generator_core.sv` | compose: auto-convert / table / banks → override → COPI; capture → frame | integration TB |
 
-| Module | Responsibility | Pure function of | Testbench |
-|--------|----------------|------------------|-----------|
-| `aux_command_bank.sv` | bank RAM + banks/slot; advance indices; emit per-slot command + meas index | host-loaded RAM, packet boundary, bank-select | load known banks → clock N packets → assert command sequence, index wrap, atomic swap |
-| `fast_settle_override.sv` | amp-settle replace (Slot 3 only), reg-0 bit5, DSP bit-H | command stream + trigger/software | feed known commands + trigger edges → assert Slot-3-only replacement, bit forcing, invariant |
-| `data_generator_core.sv` | compose into COPI assembly (auto-gen converts + 3 slots + override) | — | integration TB |
+## Three-layer contract changes (keep in sync — CLAUDE.md)
 
-## Three-layer contract changes (keep in sync — see CLAUDE.md)
+- **PL:** new `aux_command_bank.sv`, `override_layer.sv`, `aux_capture.sv`; auto-generate
+  `CONVERT(0..31)`; per-slot BRAM windows + bank-select/active status; fast-settle/digout config;
+  Reg-3 shadow; command-echo metadata.
+- **PS** (`main.h`, `pl_control.c`): bank upload/select + confirm handshake; `READ/WRITE_REGISTER`;
+  fast-settle/digout config; `status_response_t` additions (active banks, fast-settle/digout state).
+- **Host** (`net.py`): bank programming; command-echo decode; new `CMD_*`; packet-size update.
 
-- **PL:** new `aux_command_bank.sv` + `fast_settle_override.sv`; auto-generate `CONVERT(0..31)`; AXI
-  regs/window for bank RAM upload, per-slot length/loop + bank-select, fast-settle source; new packet metadata.
-- **PS** (`main.h`, `pl_control.c`): bank-upload + select API; `READ/WRITE_REGISTER`; fast-settle
-  config; `status_response_t` additions (fast-settle state, meas indices).
-- **Host** (`net.py`): bank programming + `measurement_map`; index-tag decode; new `CMD_*`;
-  `calculate_packet_size` for the new metadata.
+## Resolved / open
 
-## Open decisions
-
-1. **Decode:** positional vs tagged → **tagged** (per-packet `meas_index`). ✅ decided.
-2. **Slot count:** 3 — Slot 1 aux@10 kHz, Slots 2–3 everything else. ✅ decided.
-3. **Bank contents:** aux-only (PL auto-generates converts); multi-bank swappable. ✅ decided.
-4. **Bank depth (M)** and **upload path:** AXI register burst vs a dedicated BRAM window — open.
-5. **Fast settle:** edge-following, pin software-selectable, DSP-reset also GPIO-pulsable
-   (together/separate). ✅ decided.
-6. **Housekeeping loop length** and final must-have entries — open (defaults proposed above).
-7. **Impedance:** implement as a bank swapped into Slot 1 during a Z-check, or defer to its own epic — open.
+- ✅ Decode = **command-echo** (self-describing), align in PL, self-contained packets.
+- ✅ Storage = **3 independent per-slot BRAMs**, ≥2 banks, **length bound to bank**, double-buffer swap.
+- ✅ Slots: 1 = real-time digout+fast-settle (Reg-3 shadow), 2 = ADC-only accel @ 10 kHz,
+  3 = config + supply/temp/link (banked).
+- ✅ Reg 3 sharing resolved by a coherent **shadow + override**.
+- ☐ Bank depth (banks/slot) and Slot-3 housekeeping length N (≈30) — finalize.
+- ☐ Temperature: single-point (default) vs differential (needs a temp sequencer).
+- ☐ Impedance: implement as a swap-in bank (Zcheck DAC) on a slot, or defer to its own epic.
