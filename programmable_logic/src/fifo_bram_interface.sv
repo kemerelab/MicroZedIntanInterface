@@ -49,6 +49,13 @@ localparam int FIFO_COUNT_WIDTH = $clog2(FIFO_DEPTH + 1);
 localparam int BRAM_WORD_ADDR_WIDTH = $clog2(BRAM_DEPTH_WORDS);
 
 // FIFO storage - 64-bit data + 4-bit channel mask + 1-bit packet end flag
+// Mapped to distributed RAM (LUTRAM): one synchronous write port + one asynchronous
+// read port, and NOT reset element-by-element (see reset block below). Resetting every
+// element forces flip-flop inference (~17.7k FFs) plus a 256:1 read mux and a giant
+// reset fanout; leaving the contents unreset lets Vivado infer memory instead. This
+// mirrors the no-reset pattern used by the capture buffer in bram.sv.
+// Production follow-up: convert to block RAM (requires a synchronous/registered read).
+(* ram_style = "distributed" *)
 logic [68:0] write_fifo [0:FIFO_DEPTH-1]; // 64-bit data + 4-bit mask + 1-bit flag
 logic [FIFO_PTR_WIDTH-1:0] fifo_write_ptr;
 logic [FIFO_PTR_WIDTH-1:0] fifo_read_ptr;
@@ -157,10 +164,12 @@ always_ff @(posedge clk) begin
         bram_we_reg <= 4'h0;
         write_address <= '0;
         packet_boundary_address <= '0;
-        
-        for (int i = 0; i < FIFO_DEPTH; i++) begin
-            write_fifo[i] <= 69'h0;
-        end
+
+        // write_fifo (the FIFO storage array) is intentionally NOT reset here. Clearing
+        // every element would force FF inference + a ~21k-load reset net; leaving it
+        // unreset lets it map to distributed RAM. Safe because an entry is only ever
+        // read after it has been written (reads are gated by fifo_count > 0, and
+        // read_ptr trails write_ptr by exactly fifo_count written entries).
 
     end else begin
         

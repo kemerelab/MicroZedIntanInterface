@@ -36,3 +36,7 @@ vitis_project/
 *.swp
 .DS_Store
 
+
+# Routing analysis report dumps (regenerable)
+routing_analysis/
+analysis_*/

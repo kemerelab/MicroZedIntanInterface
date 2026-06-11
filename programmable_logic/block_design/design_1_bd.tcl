@@ -738,13 +738,13 @@ proc create_root_design { parentCell } {
   [get_bd_ports led1]
   connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0_84M/peripheral_aresetn] \
   [get_bd_pins axi_lite_registers/pl_rstn] \
-  [get_bd_pins led_status_controller/rstn]
+  [get_bd_pins led_status_controller/rstn] \
+  [get_bd_pins data_generator/rstn]
   connect_bd_net -net proc_sys_reset_175MHz_interconnect_aresetn  [get_bd_pins proc_sys_reset_175MHz/interconnect_aresetn] \
   [get_bd_pins smartconnect_0/aresetn] \
   [get_bd_pins smartconnect_1/aresetn] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn] \
-  [get_bd_pins axi_lite_registers/s_axi_aresetn] \
-  [get_bd_pins data_generator/rstn]
+  [get_bd_pins axi_lite_registers/s_axi_aresetn]
   connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
   [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
   [get_bd_pins clk_wiz_0_84M_175M/clk_in1]
