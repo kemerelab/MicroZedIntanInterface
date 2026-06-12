@@ -115,13 +115,22 @@ consumer of the register/packet contract** (after firmware and `net.py`) — `In
 duplicates `net.py`'s `CMD_*` set.
 
 Current gaps (plugin is WIP):
-- [ ] **Packet alignment** — reads data flat (`dataWords[ch/2]`, `IntanSocket.cpp:481`) with **no
+- [x] **Packet alignment** — reads data flat (`dataWords[ch/2]`, `IntanSocket.cpp:481`) with **no
       +2 pipeline shift** and ignores metadata words [6–9]. Needs the PL-side alignment +
       command-echo (Epics A/C) to get correctly-labeled neural + aux channels.
-- [ ] **Aux split + scaling** — allocates 3 aux/bank + `aux_data_scale` but doesn't actually
+      **Done**: `fix/channel-reorg-aux-deskew` added the +2 de-skew + stream de-interleave;
+      `claude/aux-test-tooling` adds the command-echo decode (header words 4/5).
+- [x] **Aux split + scaling** — allocates 3 aux/bank + `aux_data_scale` but doesn't actually
       separate/align them; wire to the echo metadata.
-- [ ] **Command parity** — add the new `CMD_*` (aux bank write, fast settle, digout, register R/W)
-      to `IntanInterface`, in lockstep with `net.py` + firmware.
+      **Done 2026-06-12** (`claude/aux-test-tooling`): per-packet flag-driven parse — legacy
+      cycles 34/0/1 vs sequencer-mode echo-identified accel de-interleave (1 axis/packet,
+      sample-and-hold). Absolute aux calibration (engineering units) still pending.
+- [x] **Command parity (testing subset)** — add the new `CMD_*` (aux bank write, fast settle,
+      digout, register R/W) to `IntanInterface`, in lockstep with `net.py` + firmware.
+      **Done 2026-06-12** for bank write/select/seq-en, fast settle, READ_REGISTER + 98-byte
+      status, with GUI controls (STATUS / SETTLE / AUX SEQ buttons, TTL-settle dropdown — all
+      live during acquisition). Remaining: SET_DIGOUT and WRITE_REGISTER are defined as command
+      IDs but have no GUI affordance yet.
 - [ ] **Contract single-source** (see Epic H) — make the plugin consume the generated
       packet/register/`CMD` definition so all 3 consumers stay in sync. *This is the real coupling.*
 
