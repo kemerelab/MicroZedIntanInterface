@@ -14,8 +14,9 @@ module led_status_controller #(
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
     input  wire        rstn,
     
-    // Status register input (7 registers from data generator)
-    input  wire [32*11-1:0] status_regs_pl,
+    // Status register input (width matches axi_lite_registers N_STATUS;
+    // only status reg 0 is read here)
+    input  wire [32*13-1:0] status_regs_pl,
     
     // LED outputs
     (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 LED0 DATA" *)

@@ -17,8 +17,11 @@ module data_generator #(
     input  wire        rstn,
     
     // Control and status interfaces
-    input  wire [32*22-1:0] ctrl_regs_pl,
-    output wire [32*11-1:0]  status_regs_pl,
+    // Widths must match axi_lite_registers (N_CTRL=25, N_STATUS=13). Control
+    // regs 0..21 are the legacy map; 22..24 configure the aux command
+    // sequencer / override layer. Status 11 = aux status, 12 = read result.
+    input  wire [32*25-1:0] ctrl_regs_pl,
+    output wire [32*13-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
     input  wire [7:0]  digital_in,
@@ -90,8 +93,10 @@ module data_generator #(
     wire [8:0]  fifo_count;
     wire [13:0] current_bram_address;
     
-    // Data generator status (only 10 registers - wrapper adds 11th)
+    // Data generator status (only 10 registers - wrapper adds 11th..13th)
     wire [32*10-1:0] data_gen_status;
+    wire [31:0] aux_status;
+    wire [31:0] aux_read_result;
 
     // Instantiate the data generator core
     data_generator_core data_gen_inst (
@@ -99,6 +104,8 @@ module data_generator #(
         .rstn(rstn),
         .ctrl_regs_pl(ctrl_regs_pl),
         .status_regs_pl(data_gen_status),  // Only 10 registers
+        .aux_status(aux_status),
+        .aux_read_result(aux_read_result),
         
         // FIFO interface
         .fifo_write_en(fifo_write_en),
@@ -161,5 +168,9 @@ module data_generator #(
     assign status_regs_pl[9*32 +: 32] = data_gen_status[9*32 +: 32];  // Generator status 9
 
     assign status_regs_pl[10*32 +: 32] = {9'd0, fifo_count, current_bram_address}; // FIFO + BRAM status
+
+    // Aux command sequencer status (see data_generator_core for bit layout)
+    assign status_regs_pl[11*32 +: 32] = aux_status;
+    assign status_regs_pl[12*32 +: 32] = aux_read_result;
 
 endmodule

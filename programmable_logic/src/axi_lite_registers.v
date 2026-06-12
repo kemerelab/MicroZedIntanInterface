@@ -1,6 +1,6 @@
 module axi_lite_registers #(
-    parameter integer N_CTRL = 22,     // default (22 control regs)
-    parameter integer N_STATUS = 11     // default (11 status regs)
+    parameter integer N_CTRL = 25,     // 22 legacy + 3 aux-sequencer control regs
+    parameter integer N_STATUS = 13    // 11 legacy + aux status + aux read result
 )(
     input  wire                     s_axi_aclk,
     input  wire                     s_axi_aresetn,

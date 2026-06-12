@@ -338,6 +338,161 @@ const uint16_t cable_length_cmd_sequence[35] = {
 //    48, 49, 50, 51, 52, 53, 54, 55 - could be string version of chip name
 
 // ============================================================================
+// AUX COMMAND SEQUENCER CONTROL
+// ============================================================================
+// The banked aux sequencer sources COPI cycles 32..34 when AUX_CTRL_SEQ_EN is
+// set. Banks are double-buffered: upload to the standby bank (allowed DURING
+// acquisition), select it, then confirm the swap landed (bank_active poll).
+
+// One word through the bank write port: payload to reg 23, then flip the
+// write toggle in reg 24 (the PL edge-detects the toggle into a 1-cycle
+// strobe; the payload is long stable by the time the toggle crosses the CDC).
+static void aux_strobe_write(uint32_t payload) {
+    uint32_t strobe = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_STROBE_OFFSET);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_WRITE_OFFSET, payload);
+    strobe ^= AUX_STROBE_WRITE_TOGGLE;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_STROBE_OFFSET, strobe);
+    usleep(2);   // > a few PL clocks for the CDC + strobe
+}
+
+void pl_aux_write_word(int slot, int bank, int addr, uint16_t data) {
+    aux_strobe_write(AUX_WRITE_PACK(slot, bank, 0, addr, data));
+}
+
+void pl_aux_write_length(int slot, int bank, int loop_idx, int end_idx) {
+    aux_strobe_write(AUX_WRITE_PACK(slot, bank, 1, 0, AUX_LENGTH_DATA(loop_idx, end_idx)));
+}
+
+// Upload a whole program (commands + its length record) into one bank.
+// loop_idx < n allows a run-once preamble: entries 0..loop_idx-1 play once,
+// then loop_idx..n-1 loop forever.
+int pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop_idx) {
+    if (n < 1 || n > AUX_BANK_ENTRIES || loop_idx < 0 || loop_idx >= n) {
+        send_message("ERROR: aux bank upload: bad length %d / loop %d\r\n", n, loop_idx);
+        return 0;
+    }
+    for (int i = 0; i < n; i++)
+        pl_aux_write_word(slot, bank, i, cmds[i]);
+    pl_aux_write_length(slot, bank, loop_idx, n - 1);
+    send_message("Aux slot %d bank %d: %d commands loaded (loop at %d)\r\n",
+                 slot, bank, n, loop_idx);
+    return 1;
+}
+
+void pl_aux_select_bank(int slot, int bank) {
+    uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
+    uint32_t bit = 1u << (AUX_CTRL_BANK_SEL_SHIFT + slot);
+    if (bank) ctrl |= bit; else ctrl &= ~bit;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
+}
+
+// Confirm-before-reuse handshake: the swap latches at a packet boundary
+// (immediately when not streaming). Returns 1 once bank_active[slot]==bank.
+int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
+    for (int waited = 0; waited <= timeout_ms * 1000; waited += 100) {
+        uint32_t s11 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET);
+        if (((s11 >> slot) & 1u) == (uint32_t)(bank ? 1 : 0))
+            return 1;
+        usleep(100);
+    }
+    send_message("ERROR: aux bank swap confirm timeout (slot %d bank %d)\r\n", slot, bank);
+    return 0;
+}
+
+void pl_aux_seq_enable(int enable) {
+    uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
+    if (enable) {
+        Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl | AUX_CTRL_SEQ_EN);
+        send_message("Aux sequencer ENABLED\r\n");
+    } else {
+        // Ordering matters: once SEQ_EN drops, the override layer can no
+        // longer reach the chip, so clear the fast-settle/dsp/digout sources
+        // first and let one packet carry the OFF injection.
+        uint32_t live = AUX_CTRL_FS_SW | AUX_CTRL_FS_GPIO_EN |
+                        AUX_CTRL_DSP_SW | AUX_CTRL_DSP_GPIO_EN |
+                        AUX_CTRL_DIGOUT_SW | AUX_CTRL_DIGOUT_GPIO_EN;
+        if (ctrl & live) {
+            Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl & ~live);
+            usleep(200);   // > 2 packets at 30 ksps
+            ctrl &= ~live;
+        }
+        Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl & ~AUX_CTRL_SEQ_EN);
+        send_message("Aux sequencer DISABLED\r\n");
+    }
+}
+
+int pl_aux_seq_is_enabled(void) {
+    return (Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET) & AUX_CTRL_SEQ_EN) ? 1 : 0;
+}
+
+// cfg carries the AUX_CTRL fast-settle + DSP fields (bits [13:4])
+void pl_aux_set_fast_settle(uint32_t cfg) {
+    const uint32_t mask = AUX_CTRL_FS_SW | AUX_CTRL_FS_GPIO_EN | AUX_CTRL_FS_GPIO_SEL_MASK |
+                          AUX_CTRL_DSP_SW | AUX_CTRL_DSP_GPIO_EN | AUX_CTRL_DSP_GPIO_SEL_MASK;
+    uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
+    ctrl = (ctrl & ~mask) | (cfg & mask);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
+    send_message("Fast settle config: sw=%d gpio_en=%d pin=%d dsp_sw=%d dsp_gpio=%d dsp_pin=%d\r\n",
+                 !!(cfg & AUX_CTRL_FS_SW), !!(cfg & AUX_CTRL_FS_GPIO_EN),
+                 (int)((cfg & AUX_CTRL_FS_GPIO_SEL_MASK) >> AUX_CTRL_FS_GPIO_SEL_SHIFT),
+                 !!(cfg & AUX_CTRL_DSP_SW), !!(cfg & AUX_CTRL_DSP_GPIO_EN),
+                 (int)((cfg & AUX_CTRL_DSP_GPIO_SEL_MASK) >> AUX_CTRL_DSP_GPIO_SEL_SHIFT));
+}
+
+// cfg carries the digout fields (bits [18:14]) + reg3_static (bits [31:24])
+void pl_aux_set_digout(uint32_t cfg) {
+    const uint32_t mask = AUX_CTRL_DIGOUT_SW | AUX_CTRL_DIGOUT_GPIO_EN |
+                          AUX_CTRL_DIGOUT_GPIO_SEL_MASK | AUX_CTRL_REG3_STATIC_MASK;
+    uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
+    ctrl = (ctrl & ~mask) | (cfg & mask);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
+    send_message("Digout config: sw=%d gpio_en=%d pin=%d reg3_static=0x%02X\r\n",
+                 !!(cfg & AUX_CTRL_DIGOUT_SW), !!(cfg & AUX_CTRL_DIGOUT_GPIO_EN),
+                 (int)((cfg & AUX_CTRL_DIGOUT_GPIO_SEL_MASK) >> AUX_CTRL_DIGOUT_GPIO_SEL_SHIFT),
+                 (unsigned)((cfg & AUX_CTRL_REG3_STATIC_MASK) >> AUX_CTRL_REG3_STATIC_SHIFT));
+}
+
+// One-shot command injection via slot 3 (sequencer freezes that slot's
+// program for the packet). Requires streaming + sequencer enabled; the
+// response returns two SPI commands later and is captured into STATUS_REG_12.
+int pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms) {
+    if (!pl_is_transmission_active() || !pl_aux_seq_is_enabled()) {
+        send_message("ERROR: inject requires streaming + aux sequencer enabled\r\n");
+        return 0;
+    }
+    uint32_t ack_before = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET) & AUX_STATUS_INJECT_ACK;
+    uint32_t strobe = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_STROBE_OFFSET);
+    strobe = (strobe & ~(0xFFFFu << AUX_STROBE_INJECT_CMD_SHIFT))
+             | ((uint32_t)cmd << AUX_STROBE_INJECT_CMD_SHIFT);
+    strobe ^= AUX_STROBE_INJECT_TOGGLE;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_STROBE_OFFSET, strobe);
+
+    // ack flips when the response lands (next packet, cycle 1): ~70 us typ.
+    for (int waited = 0; waited <= timeout_ms * 1000; waited += 50) {
+        uint32_t s11 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET);
+        if ((s11 & AUX_STATUS_INJECT_ACK) != ack_before) {
+            if (result)
+                *result = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_12_OFFSET);
+            return 1;
+        }
+        usleep(50);
+    }
+    send_message("ERROR: inject ack timeout (cmd 0x%04X)\r\n", cmd);
+    return 0;
+}
+
+int pl_read_rhd_register(int reg, uint32_t *result) {
+    return pl_aux_inject(RHD_CMD_READ(reg), result, 10);
+}
+
+int pl_write_rhd_register(int reg, uint8_t value, uint32_t *result) {
+    // Note: WRITE(0)/WRITE(3) pass through the override layer's coherence
+    // rules (D5 forced to the live fast-settle state; Reg-3 data replaced by
+    // the shadow) -- use pl_aux_set_fast_settle / pl_aux_set_digout for those.
+    return pl_aux_inject(RHD_CMD_WRITE(reg, value), result, 10);
+}
+
+// ============================================================================
 // CABLE TEST IMPLEMENTATION
 // ============================================================================
 
