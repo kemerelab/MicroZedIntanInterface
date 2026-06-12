@@ -99,16 +99,33 @@ Part is `xc7z020clg400-1` (set in `scripts/create_vivado_project.tcl`).
 **PS (Vitis, 2025.1):**
 ```bash
 source ~/Xilinx/2025.1/Vitis/settings64.sh
-vitis -s scripts/create_vitis_project.py    # creates workspace + builds both cores
+vitis -s scripts/create_vitis_project.py    # creates vitis_workspace/ + builds both cores
 vitis -s scripts/build_vitis_project.py     # incremental rebuild of firmware only
 ```
 Firmware builds at **-O3** (cannot meet timing at -O0). Core 0 loads at DDR `0x100000`,
 core 1 at `0x20000000`.
 
+- After **any PL change**, regenerate the platform with the **`create_`** script (it
+  rebuilds the platform from the new `.xsa`). `build_vitis_project.py` only recompiles the
+  apps — its `update_hw(...)` is commented out, so it would build against *stale* hardware.
+  `create_` needs a clean workspace, so remove/move `vitis_workspace/` first.
+- The firmware ELFs and FSBL don't depend on the PL clocks, so a PL-only change needs only
+  a bitstream re-stage + `bootgen` (below), not a firmware rebuild.
+- A clean PL build is ~13–16 min (longer if it congests).
+
 **Bootable SD card:**
 ```bash
 bootgen -image scripts/boot.bif -o BOOT.bin -w   # copy BOOT.bin to FAT32 'Boot' partition
 ```
+`boot.bif` packs FSBL + bitstream + both core ELFs, and references the bitstream by an
+**explicit path** (`vitis_workspace/klab-firmware/_ide/bitstream/klab_project.bit`), *not*
+the copy inside the `.xsa`. After a PL rebuild, stage the fresh bitstream there first:
+```bash
+mkdir -p vitis_workspace/klab-firmware/_ide/bitstream
+cp vivado_project/klab_project.runs/impl_1/design_1_wrapper.bit \
+   vitis_workspace/klab-firmware/_ide/bitstream/klab_project.bit
+```
+The repo keeps the current bootable image at `blobs/BOOT.bin`.
 
 **Host testing:**
 ```bash
@@ -119,10 +136,22 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 
 ## Conventions & gotchas
 
-- `vivado_project/` and `vitis_project/` are **generated and gitignored** — never commit
+- `vivado_project/` and `vitis_workspace/` are **generated and gitignored** — never commit
   them. Regenerate from the `scripts/` tcl/py files.
-- The PL crosses two clock domains (AXI clk ↔ 84 MHz PL clk) via two-stage synchronizers
-  in `axi_lite_registers.v`. Status/control are flat 32×N bit busses.
+- The PL crosses two clock domains (131.25 MHz AXI fabric ↔ 84 MHz PL data path) via
+  two-stage synchronizers in `axi_lite_registers.v` plus the dual-port capture BRAM.
+  Status/control are flat 32×N bit busses. The two clocks are declared **asynchronous**
+  (`constraints/zzz_clock_groups.xdc`) — they communicate only through those CDC structures,
+  so don't add single-cycle paths between them or time them as synchronous.
+- The PL data path (`data_generator`, 84 MHz) must be reset from the **84 MHz**
+  `proc_sys_reset_0_84M`, **not** the AXI/175-domain reset — a cross-domain reset fails
+  timing on ~20k endpoints. (Root-caused in `docs/routing_report.md`.)
+- `write_fifo` in `fifo_bram_interface.sv` must **not** be reset element-by-element — that
+  forces ~18k flip-flops + a 256:1 read mux and a routing-congestion hotspot. Leaving the
+  array unreset makes it infer LUTRAM (safe: entries are only read after being written).
+- The AXI fabric clock is **131.25 MHz** (was 175 MHz, over-spec for the `-1` part's AXI-GP
+  port — it caused the only remaining setup violations). ~525 MB/s BRAM bandwidth still far
+  exceeds the ~9 MB/s stream.
 - Many control regs are **only latched while transmission is inactive** (see the "safe
   control register" logic in `data_generator_core.sv`) — changing phase/channel/COPI
   words mid-stream has no effect until you stop and restart.

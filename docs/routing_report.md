@@ -1,5 +1,11 @@
 # PL Routing / Efficiency Report — `main` baseline
 
+> **Status:** fixes implemented & verified — see **§0** for the changes and final numbers.
+> **§1 onward is the original pre-fix diagnosis of the `main` baseline**, kept as the
+> rationale for those changes (don't "fix" them back: the AXI clock is intentionally
+> 131.25 MHz, `write_fifo` is intentionally un-reset, and the data path is reset from the
+> 84 MHz domain). Reproduce the raw reports with `scripts/routing_analysis.tcl`.
+
 **Build:** clean rebuild from `main` HEAD (`2be1513`), Vivado 2025.1, part `xc7z020clg400-1`.
 Flow: `create_vivado_project.tcl` → `build_bitstream.tcl` (synth → impl → route → write_bitstream → XSA).
 **Result:** synthesis, implementation, routing, and `write_bitstream` all completed; `klab_project.xsa`
