@@ -12,33 +12,50 @@ Remember the three-layer contract: every register/packet change touches
 
 ## A. Intan chip feature-completeness (expose RHD2000 capabilities)
 
-- [ ] **Fast settle — software trigger** — amp fast settle = write reg 0 bit 5: `0x80FE` on,
+- [x] **Fast settle — software trigger** — amp fast settle = write reg 0 bit 5: `0x80FE` on,
       `0x80DE` off (datasheet pulse ~2.5/fH). Optional DSP-reset variant = OR the CONVERT LSB
       ("bit H") to reset the digital high-pass filter. *(top 5)*
-- [ ] **Fast settle — GPIO trigger** — software-selectable `digital_in_0[*]` pin, edge-triggered
+      **Done 2026-06-11** (`claude/aux-seq-v2`: `override_layer.sv` + `CMD_SET_FAST_SETTLE`;
+      pulse duration is host policy). Sim-verified; needs on-hardware validation.
+- [x] **Fast settle — GPIO trigger** — software-selectable `digital_in_0[*]` pin, edge-triggered
       injection of `0x80FE`/`0x80DE` into one aux command slot (Intan-style: preserves throughput
       except on transition packets). Refs: `data_generator_core.sv:273,312`; Intan
       [`rhythm/main.v`](https://github.com/open-ephys/rhythm/blob/master/main.v)`:750-767,1028-1030`.
-      Decisions pending: pin, edge vs one-shot, DSP-bit yes/no, which aux slot to sacrifice. *(top 5)*
-      **OPEN:** does a fast-settle GPIO *replace* Slot 1's command (current plan), or instead
-      *block/inject into* Slot 3's sequence? Revisit when building the override layer.
-- [ ] **Digital output (`auxout`) — GPIO mirror** — drive the chip's `auxout` pin from a
+      **Done 2026-06-11**: pin software-selectable (`fast_settle gpio <pin>`), level sampled
+      once per packet, edge → one injection packet each way; DSP bit-H independent (sw or pin).
+      **RESOLVED (was OPEN):** the injection *replaces Slot 1's command* on transition packets
+      (the design doc's Slot-1-only invariant) — Slot 1 is the real-time-control slot whose
+      default program is just a Reg-3 carrier, so Slots 2/3 (accel, housekeeping) are never
+      perturbed; the only loss is one digout refresh on the transition packet.
+- [x] **Digital output (`auxout`) — GPIO mirror** — drive the chip's `auxout` pin from a
       software-selectable controller GPIO in real time (Slot 1 Reg-3 override; confirmed Intan
       `main.v:1252` routes `TTL_in[ch]` → digout bit). Pairs with the Reg-3 shadow.
+      **Done 2026-06-11**: Reg-3 shadow (host-owned D7..D1 + live D0), any-slot WRITE(3)
+      coherence, `CMD_SET_DIGOUT` / `digout gpio <pin>`. ~1-packet latency.
 - [ ] **Configurable amplifier bandwidth** — upper/lower cutoff registers (RH1/RH2/RL),
       host command + firmware sequence instead of the hardcoded init.
 - [ ] **DSP high-pass / offset removal** config (register 0 DSP cutoff bits).
 - [ ] **ADC self-calibration** command exposed to host (currently buried in the init blob).
 - [ ] **Aux ADC inputs** — read aux1/aux2/aux3 (temperature sensor, supply voltage) and
       surface them in the packet + status.
+      *Mechanism done 2026-06-11*: slot-2 default = accel sweep @10 kHz, slot-3 default =
+      supply/temp/chip-ID loop; results land in packet words 34/0/1 labeled by command echo.
+      Remaining: host-side scaling/labeling into engineering units (°C, V) + recording format.
 - [ ] **Impedance testing** — test-current injection + capacitor-DAC select (regs 5/6/7),
       host workflow to sweep electrode impedance.
 - [ ] **ADC format config** — two's-complement vs offset-binary, absolute-value mode.
 - [ ] **Configurable digital inputs** capture into the packet (`:273` TODO).
-- [ ] **Generalize COPI sequences** — replace the hardcoded `convert`/`init`/`cable_test`
+- [x] **Generalize COPI sequences** — replace the hardcoded `convert`/`init`/`cable_test`
       blobs in `pl_control.c` with host-configurable, **looping aux command banks** + a
       fast-settle override layer. **Design: [`docs/command-bank-design.md`](docs/command-bank-design.md).**
       This is the foundation the fast-settle items (above) and impedance/temp/supply build on.
+      **Done 2026-06-11** (`claude/aux-seq-v2`): `aux_command_sequencer.sv` — 3 slots, 2 banks
+      each, length bound to bank, atomic packet-boundary swap, live bank upload + confirm
+      handshake, one-shot injection for runtime register R/W (`CMD_READ_/WRITE_REGISTER`),
+      command-echo identity in the packet header. Default OFF — datapath proven bit-identical
+      to main when disabled. See `docs/NIGHT_LOG-2026-06-11.md`.
+      *(Init/calibration/cable-test keep the legacy full-table path by design — they run while
+      stopped; the banks cover the streaming-time use cases.)*
 
 ## B. Board-rev sensor / IO interfaces (2 ADC + 2 DAC + 9-axis IMU)
 
