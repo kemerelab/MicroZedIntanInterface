@@ -77,8 +77,11 @@ typedef struct {
     uint32_t param2;
 } cmd_packet_t;
 
-// Static receive buffer for handling partial commands
-static uint8_t recv_buffer[CMD_PACKET_SIZE];
+// Static receive buffer for handling partial commands.
+// Explicitly word-aligned: it is cast to cmd_packet_t*, and the TCP payload
+// it is filled from is NOT word-aligned (14-byte Ethernet header), so the
+// alignment must come from this buffer itself.
+static uint8_t recv_buffer[CMD_PACKET_SIZE] __attribute__((aligned(8)));
 static uint16_t recv_buffer_pos = 0;
 
 // TCP connection tracking for hotplug support
@@ -492,11 +495,21 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
         }
     }
     
-    // Process complete commands directly from TCP buffer
+    // Process complete commands from the TCP buffer.
+    //
+    // IMPORTANT: copy each command into a word-aligned struct instead of
+    // casting into the pbuf payload. The TCP payload sits at a halfword
+    // boundary (14-byte Ethernet header), so a cmd_packet_t* into it is
+    // misaligned. Plain LDRs tolerate that on the A9 (SCTLR.A=0), which is
+    // why this "worked" for years -- but the compiler is allowed to merge
+    // adjacent field reads into LDRD, which ALIGNMENT-FAULTS on non-word
+    // addresses regardless. -O3 did exactly that for one handler (the aux
+    // bank-select case) and hard-wedged the CPU in the abort handler.
     while (data_pos + CMD_PACKET_SIZE <= data_len) {
-        cmd_packet_t *cmd = (cmd_packet_t *)&data[data_pos];
-        if (cmd->magic == CMD_MAGIC) {
-            process_command(tpcb, cmd);
+        cmd_packet_t cmd_aligned __attribute__((aligned(8)));
+        memcpy(&cmd_aligned, &data[data_pos], CMD_PACKET_SIZE);
+        if (cmd_aligned.magic == CMD_MAGIC) {
+            process_command(tpcb, &cmd_aligned);
             data_pos += CMD_PACKET_SIZE;
         } else {
             // Skip bad data and look for next magic
