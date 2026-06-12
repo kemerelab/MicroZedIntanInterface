@@ -15,6 +15,10 @@ volatile command_flags_t *command_flags = (volatile command_flags_t *)SHARED_MEM
 #define PRINT_BUFFER_ADDRESS (SHARED_MEM_BASE + ALIGN4(sizeof(command_flags_t)))
 
 volatile print_buffer_t *print_buffer = (volatile print_buffer_t*)PRINT_BUFFER_ADDRESS;
+
+// DEBUG (aux wedge investigation): raw single-character UART breadcrumb --
+// bypasses the ring, cannot be dropped, blocks only on UART TX drain.
+void dbgc(char c) { XUartPs_SendByte(STDOUT_BASEADDRESS, c); }
 void init_command_flags(void) {
     command_flags->lock = 0;
     command_flags->enable_streaming_flag = 0;
@@ -164,11 +168,14 @@ void send_message(const char *format, ...) {
     // Wait if the buffer is full, with a timeout to prevent deadlock
     int timeout = 100;
     uint32_t write_idx = print_buffer->write_idx;
+    if (print_buffer->entries[write_idx].data_present == 1)
+        dbgc('~');   // DEBUG: entering the ring-full wait path
     while ((print_buffer->entries[write_idx].data_present == 1) && timeout -- > 0) { // Someone already wrote to this buffer!
-        usleep(100); 
+        usleep(100);
     }
 
     if (timeout <= 0) {
+        dbgc('!');   // DEBUG: message dropped (ring stayed full)
         return;
     }
 

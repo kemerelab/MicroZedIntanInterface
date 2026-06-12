@@ -64,6 +64,11 @@ ID   | Command          | Param1              | Param2
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
 
+// DEBUG (aux wedge investigation): dbgc() emits single-character breadcrumbs
+// straight to the UART TX FIFO (defined in shared_print.c) -- they bypass the
+// shared print ring entirely, cannot be dropped, and block only on UART
+// drain. REVERT with the other breadcrumbs.
+
 typedef struct {
     uint32_t magic;
     uint32_t cmd_id;
@@ -240,7 +245,10 @@ static void send_response(struct tcp_pcb *tpcb, uint32_t ack_id, uint8_t status,
 
 static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
     uint8_t status = ACK_SUCCESS;
-    
+
+    dbgc('<');
+    dbgc("0123456789ABCDEF"[cmd->cmd_id & 0xF]);   // low nibble of command id
+
     switch (cmd->cmd_id) {
         case CMD_START:
             command_flags->enable_streaming_flag = 1;
@@ -429,6 +437,7 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
     }
     
     send_ack(tpcb, cmd->ack_id, status);
+    dbgc('>');
 }
 
 // ============================================================================
@@ -448,6 +457,8 @@ static void tcp_err_cb(void *arg, err_t err) {
 err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     (void)arg;
     (void)err;
+
+    dbgc('{');
 
     if (!p) {
         // Client closed connection gracefully
@@ -502,6 +513,7 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     
     tcp_recved(tpcb, p->len);
     pbuf_free(p);
+    dbgc('}');
     return ERR_OK;
 }
 

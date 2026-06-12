@@ -24,6 +24,8 @@ typedef struct {
 void init_print_buffer(void);
 void send_message(const char *format, ...);
 void print_handler_loop(void);
+// DEBUG (aux wedge investigation): raw UART char breadcrumb, see shared_print.c
+void dbgc(char c);
 
 
 typedef struct {
