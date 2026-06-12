@@ -191,7 +191,7 @@
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
 
-// Status response structure (86 bytes total)
+// Status response structure (98 bytes total)
 typedef struct __attribute__((packed)) {
     // Version and identification (8 bytes)
     uint16_t version;

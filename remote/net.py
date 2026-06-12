@@ -37,6 +37,54 @@ CMD_GET_STATUS = 0x40
 CMD_DUMP_BRAM = 0x41
 CMD_SET_UDP_DEST = 0x50
 CMD_PING = 0x60
+# Aux command sequencer / override layer (mirror firmware/src-core0/network.c)
+CMD_AUX_WRITE_WORD = 0x70   # param1 = slot | bank<<8 | is_len<<16; param2 = addr<<16 | data
+CMD_AUX_BANK_SELECT = 0x71  # param1 = slot; param2 = bank
+CMD_AUX_SEQ_EN = 0x72       # param1 = 0/1
+CMD_READ_REGISTER = 0x73    # param1 = reg -> 4-byte {cipo1, cipo0} response
+CMD_WRITE_REGISTER = 0x74   # param1 = reg; param2 = value -> 4-byte echo response
+CMD_SET_FAST_SETTLE = 0x75  # param1 = amp: sw|gpio_en<<1|pin<<4; param2 = dsp: same layout
+CMD_SET_DIGOUT = 0x76       # param1 = sw|gpio_en<<1|pin<<4; param2 = reg3_static byte
+
+AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
+
+# RHD2000 SPI command encodings (datasheet-confirmed; see docs/)
+def rhd_convert(ch, h=0):
+    """CONVERT(ch); h=1 sets bit H (DSP high-pass reset when DSP enabled)"""
+    return ((ch & 0x3F) << 8) | (h & 1)
+
+def rhd_write(reg, val):
+    """WRITE(reg, val)"""
+    return 0x8000 | ((reg & 0x3F) << 8) | (val & 0xFF)
+
+def rhd_read(reg):
+    """READ(reg)"""
+    return 0xC000 | ((reg & 0x3F) << 8)
+
+def rhd_decode(cmd):
+    """Human-readable form of an echoed RHD command word"""
+    top = (cmd >> 14) & 0x3
+    arg = (cmd >> 8) & 0x3F
+    if top == 0:
+        names = {32: 'aux1/accelX', 33: 'aux2/accelY', 34: 'aux3/accelZ',
+                 48: 'supply', 49: 'temp'}
+        tag = f" ({names[arg]})" if arg in names else ""
+        h = " +H" if (cmd & 1) else ""
+        return f"CONVERT({arg}){tag}{h}"
+    if top == 2:
+        return f"WRITE({arg}, 0x{cmd & 0xFF:02X})"
+    if top == 3:
+        return f"READ({arg})"
+    if cmd == 0x5500:
+        return "CALIBRATE"
+    return f"0x{cmd:04X}"
+
+# Default aux slot programs (command-bank-design.md slot roles)
+AUX_SLOT0_DEFAULT = [rhd_write(3, 0x02)]                # RT slot: Reg-3 carrier (rewritten by shadow)
+AUX_SLOT1_DEFAULT = [rhd_convert(32), rhd_convert(33), rhd_convert(34)]  # accel @ 10 kHz
+AUX_SLOT2_DEFAULT = [rhd_convert(48), rhd_convert(49),  # supply, temp
+                     rhd_read(63), rhd_read(62),        # chip ID, #amps
+                     rhd_read(40), rhd_read(41), rhd_read(42), rhd_read(43), rhd_read(44)]  # 'INTAN'
 
 # ACK status codes
 ACK_SUCCESS = 0x06
@@ -641,6 +689,33 @@ class DataValidator:
             hex_words = ' '.join(f'{w:08X}' for w in chunk)
             print(f"{i:2d}: {hex_words}")
 
+    def print_aux_info(self):
+        """Decode the aux command-echo metadata of the last received packet.
+        Header 64-bit word 2 (32-bit words 4/5):
+          word4 = {echo_slot0[15:0], flags[7:0], digital_in[7:0]}
+          word5 = {echo_slot2_prev[15:0], echo_slot1_prev[15:0]}
+        Result locations (SPI 2-command pipeline): slot-0's result is THIS
+        packet's data word 34; slot-1/2 echoes label data words 0 and 1."""
+        if self.last_packet_words is None or len(self.last_packet_words) < 6:
+            print("[AUX] No packet captured yet")
+            return
+        w4, w5 = self.last_packet_words[4], self.last_packet_words[5]
+        digital_in = w4 & 0xFF
+        flags = (w4 >> 8) & 0xFF
+        if not (flags & 0x01):
+            print(f"[AUX] Sequencer inactive in last packet (digital_in=0x{digital_in:02X})")
+            return
+        echo0 = (w4 >> 16) & 0xFFFF
+        echo1 = w5 & 0xFFFF
+        echo2 = (w5 >> 16) & 0xFFFF
+        print(f"[AUX] digital_in=0x{digital_in:02X}  "
+              f"fast_settle={bool(flags & 0x02)} digout={bool(flags & 0x04)} "
+              f"dsp={bool(flags & 0x08)} echo_valid={bool(flags & 0x10)} "
+              f"inject_result_in_word1={bool(flags & 0x20)}")
+        print(f"[AUX] slot0 (result @ data word 34): {rhd_decode(echo0)}")
+        print(f"[AUX] slot1 (result @ data word 0):  {rhd_decode(echo1)}")
+        print(f"[AUX] slot2 (result @ data word 1):  {rhd_decode(echo2)}")
+
     def print_statistics(self):
         elapsed = time.time() - self.start_time if self.start_time else 0
         rate = self.packet_count / elapsed if elapsed > 0 else 0
@@ -731,16 +806,102 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
     finally:
         sock.settimeout(None)
 
+def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
+    """Upload a command program (with its length record) into a standby bank.
+    Works during acquisition; swap it live with aux_bank_select()."""
+    if not (1 <= len(cmds) <= AUX_BANK_ENTRIES) or not (0 <= loop_idx < len(cmds)):
+        print(f"[AUX] Bad program: {len(cmds)} cmds, loop {loop_idx}")
+        return False
+    p1 = (slot & 3) | ((bank & 1) << 8)
+    for i, c in enumerate(cmds):
+        ok, _ = send_binary_command(sock, CMD_AUX_WRITE_WORD, p1, (i << 16) | (c & 0xFFFF))
+        if not ok:
+            print(f"[AUX] Upload failed at word {i}")
+            return False
+    length_data = (loop_idx & 0x3F) | (((len(cmds) - 1) & 0x3F) << 8)
+    ok, _ = send_binary_command(sock, CMD_AUX_WRITE_WORD, p1 | (1 << 16), length_data)
+    if ok:
+        print(f"[AUX] Slot {slot} bank {bank}: {len(cmds)} commands (loop at {loop_idx})")
+    return ok
+
+def aux_bank_select(sock, slot, bank):
+    """Atomically swap a slot to a bank at the next packet boundary.
+    The firmware confirms the swap (bank_active poll) before ACKing."""
+    ok, _ = send_binary_command(sock, CMD_AUX_BANK_SELECT, slot & 3, bank & 1)
+    print(f"[AUX] Slot {slot} -> bank {bank}: {'OK' if ok else 'FAILED'}")
+    return ok
+
+def aux_seq_enable(sock, enable):
+    ok, _ = send_binary_command(sock, CMD_AUX_SEQ_EN, 1 if enable else 0)
+    print(f"[AUX] Sequencer {'enabled' if enable else 'disabled'}: {'OK' if ok else 'FAILED'}")
+    return ok
+
+def read_register(sock, reg):
+    """Read an RHD register at runtime (injected via the sequencer; requires
+    streaming + sequencer enabled). Returns (cipo0_value, cipo1_value)."""
+    ok, data = send_binary_command(sock, CMD_READ_REGISTER, reg & 0x3F)
+    if not ok or data is None or len(data) != 4:
+        print(f"[AUX] READ_REGISTER {reg} failed")
+        return None
+    result = struct.unpack('<I', data)[0]
+    c0, c1 = result & 0xFFFF, (result >> 16) & 0xFFFF
+    print(f"[AUX] Register {reg}: CIPO0=0x{c0:04X} CIPO1=0x{c1:04X}")
+    return (c0, c1)
+
+def write_register(sock, reg, value):
+    """Write an RHD register at runtime. The chip echoes the data byte in the
+    low byte of the result (upper byte all-ones) -- verified here.
+    Note: Reg 0 D5 and all of Reg 3 are owned by the override layer; use
+    set_fast_settle()/set_digout() for those bits."""
+    ok, data = send_binary_command(sock, CMD_WRITE_REGISTER, reg & 0x3F, value & 0xFF)
+    if not ok or data is None or len(data) != 4:
+        print(f"[AUX] WRITE_REGISTER {reg} failed")
+        return False
+    result = struct.unpack('<I', data)[0]
+    echo_ok = (result & 0xFF) == (value & 0xFF)
+    print(f"[AUX] Register {reg} <= 0x{value & 0xFF:02X}: echo "
+          f"{'confirmed' if echo_ok else f'MISMATCH (0x{result:08X})'}")
+    return echo_ok
+
+def set_fast_settle(sock, amp_sw=False, amp_gpio_en=False, amp_pin=0,
+                    dsp_sw=False, dsp_gpio_en=False, dsp_pin=0):
+    """Configure amplifier fast settle (Reg-0 D5 via Slot-1 injection) and the
+    DSP-reset bit-H. Software levels and/or a digital_in pin trigger."""
+    p1 = (1 if amp_sw else 0) | (2 if amp_gpio_en else 0) | ((amp_pin & 7) << 4)
+    p2 = (1 if dsp_sw else 0) | (2 if dsp_gpio_en else 0) | ((dsp_pin & 7) << 4)
+    ok, _ = send_binary_command(sock, CMD_SET_FAST_SETTLE, p1, p2)
+    print(f"[AUX] Fast settle config: {'OK' if ok else 'FAILED'}")
+    return ok
+
+def set_digout(sock, sw=False, gpio_en=False, pin=0, reg3_static=0x00):
+    """Configure the auxout digital-output mirror and the host-owned Reg-3
+    static bits (D7..D1: MUX load, tempS2/S1/tempen, digout HiZ). HiZ (D1)
+    must be 0 in reg3_static for auxout to drive."""
+    p1 = (1 if sw else 0) | (2 if gpio_en else 0) | ((pin & 7) << 4)
+    ok, _ = send_binary_command(sock, CMD_SET_DIGOUT, p1, reg3_static & 0xFF)
+    print(f"[AUX] Digout config: {'OK' if ok else 'FAILED'}")
+    return ok
+
+def aux_demo_setup(sock):
+    """Load the default slot programs and enable the sequencer:
+    slot 0 = Reg-3 carrier (digout mirror), slot 1 = accel sweep @10 kHz,
+    slot 2 = supply/temp/link housekeeping."""
+    if not (aux_upload_bank(sock, 0, 0, AUX_SLOT0_DEFAULT) and
+            aux_upload_bank(sock, 1, 0, AUX_SLOT1_DEFAULT) and
+            aux_upload_bank(sock, 2, 0, AUX_SLOT2_DEFAULT)):
+        return False
+    return aux_seq_enable(sock, True)
+
 def get_status(sock):
     """Get full status from device"""
     success, data = send_binary_command(sock, CMD_GET_STATUS)
-    
+
     if not success or data is None:
         print("[TCP] Failed to get status")
         return None
-    
-    if len(data) != 86:
-        print(f"[TCP] Invalid status response length: {len(data)}")
+
+    if len(data) != 98:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 98)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -764,7 +925,11 @@ def get_status(sock):
     # UDP Stream Information (12 bytes)
     udp_dest_ip, udp_dest_port, udp_packet_format, udp_bytes_sent = \
         struct.unpack('<IHHi', data[74:86])
-    
+
+    # Aux command sequencer status (12 bytes)
+    aux_read_result, aux_bank_active, aux_flags, aux_i0, aux_i1, aux_i2 = \
+        struct.unpack('<IBBBBB3x', data[86:98])
+
     status = {
         'version': version,
         'device_type': device_type,
@@ -792,9 +957,16 @@ def get_status(sock):
         'udp_dest_ip': ipaddress.IPv4Address(udp_dest_ip),
         'udp_dest_port': udp_dest_port,
         'udp_packet_format': udp_packet_format,
-        'udp_bytes_sent': udp_bytes_sent
+        'udp_bytes_sent': udp_bytes_sent,
+        'aux_seq_enabled': bool(aux_flags & 0x01),
+        'aux_fast_settle': bool(aux_flags & 0x02),
+        'aux_digout': bool(aux_flags & 0x04),
+        'aux_dsp_reset': bool(aux_flags & 0x08),
+        'aux_bank_active': aux_bank_active,
+        'aux_indices': (aux_i0, aux_i1, aux_i2),
+        'aux_read_result': aux_read_result
     }
-    
+
     return status
 
 def print_status(status):
@@ -838,6 +1010,16 @@ def print_status(status):
     print(f"Destination: {status['udp_dest_ip']}:{status['udp_dest_port']}")
     print(f"Packet Format: 0x{status['udp_packet_format']:04X}")
     print(f"Bytes Sent: {status['udp_bytes_sent']}")
+
+    print("\n--- Aux Sequencer ---")
+    print(f"Enabled: {status['aux_seq_enabled']}, "
+          f"Fast Settle: {status['aux_fast_settle']}, "
+          f"Digout: {status['aux_digout']}, "
+          f"DSP Reset: {status['aux_dsp_reset']}")
+    ba = status['aux_bank_active']
+    print(f"Active Banks: slot0={ba & 1}, slot1={(ba >> 1) & 1}, slot2={(ba >> 2) & 1}")
+    print(f"Slot Indices: {status['aux_indices']}")
+    print(f"Last Inject Result: 0x{status['aux_read_result']:08X}")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):
@@ -1042,6 +1224,10 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  auto_cable_detect - Automated cable detection!")
+        print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
+        print(f"       read_reg <r>, write_reg <r> <v>")
+        print(f"       fast_settle <0|1> [dsp] | gpio <pin> | off")
+        print(f"       digout <0|1> | gpio <pin> | hiz")
         print(f"  Utility: help, quit")
         
         while True:
@@ -1130,6 +1316,60 @@ def tcp_control():
                     validator.print_statistics()
                 elif cmd == "hex":
                     validator.print_last_packet_hex()
+                elif cmd == "aux":
+                    validator.print_aux_info()
+                elif cmd == "aux_demo":
+                    aux_demo_setup(sock)
+                elif cmd.startswith("aux_en "):
+                    try:
+                        aux_seq_enable(sock, int(cmd.split()[1]))
+                    except (ValueError, IndexError):
+                        print("Usage: aux_en <0|1>")
+                elif cmd.startswith("aux_bank "):
+                    try:
+                        parts = cmd.split()
+                        aux_bank_select(sock, int(parts[1]), int(parts[2]))
+                    except (ValueError, IndexError):
+                        print("Usage: aux_bank <slot> <bank>")
+                elif cmd.startswith("read_reg "):
+                    try:
+                        read_register(sock, int(cmd.split()[1]))
+                    except (ValueError, IndexError):
+                        print("Usage: read_reg <reg 0-63>")
+                elif cmd.startswith("write_reg "):
+                    try:
+                        parts = cmd.split()
+                        val = int(parts[2], 16) if parts[2].startswith('0x') else int(parts[2])
+                        write_register(sock, int(parts[1]), val)
+                    except (ValueError, IndexError):
+                        print("Usage: write_reg <reg> <value>")
+                elif cmd.startswith("fast_settle "):
+                    try:
+                        parts = cmd.split()
+                        if parts[1] in ("0", "1"):           # fast_settle <0|1> [dsp]
+                            set_fast_settle(sock, amp_sw=parts[1] == "1",
+                                            dsp_sw=(len(parts) > 2 and parts[2] == "1"))
+                        elif parts[1] == "gpio":             # fast_settle gpio <pin>
+                            set_fast_settle(sock, amp_gpio_en=True, amp_pin=int(parts[2]))
+                        elif parts[1] == "off":
+                            set_fast_settle(sock)
+                        else:
+                            print("Usage: fast_settle <0|1> [dsp] | gpio <pin> | off")
+                    except (ValueError, IndexError):
+                        print("Usage: fast_settle <0|1> [dsp] | gpio <pin> | off")
+                elif cmd.startswith("digout "):
+                    try:
+                        parts = cmd.split()
+                        if parts[1] in ("0", "1"):           # digout <0|1>  (HiZ off)
+                            set_digout(sock, sw=parts[1] == "1", reg3_static=0x00)
+                        elif parts[1] == "gpio":             # digout gpio <pin>
+                            set_digout(sock, gpio_en=True, pin=int(parts[2]), reg3_static=0x00)
+                        elif parts[1] == "hiz":              # digout hiz (release the pin)
+                            set_digout(sock, reg3_static=0x02)
+                        else:
+                            print("Usage: digout <0|1> | gpio <pin> | hiz")
+                    except (ValueError, IndexError):
+                        print("Usage: digout <0|1> | gpio <pin> | hiz")
                 elif cmd == "help":
                     print("Commands:")
                     print("  start, stop, reset_timestamp")
@@ -1141,6 +1381,14 @@ def tcp_control():
                     print("  set_udp <ip> <port>, get_status, ping")
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, quit")
+                    print("Aux sequencer (bank-programmable aux commands):")
+                    print("  aux_demo            - load default slot programs + enable")
+                    print("  aux_en <0|1>        - enable/disable the sequencer")
+                    print("  aux_bank <slot> <bank> - atomic bank swap (live)")
+                    print("  aux                 - decode last packet's command echo")
+                    print("  read_reg <r> / write_reg <r> <v> - runtime RHD register access")
+                    print("  fast_settle <0|1> [dsp] | gpio <pin> | off")
+                    print("  digout <0|1> | gpio <pin> | hiz")
                 else:
                     print(f"Unknown command: '{cmd}'. Type 'help' for list.")
 
