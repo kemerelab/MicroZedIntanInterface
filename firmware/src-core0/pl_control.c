@@ -348,15 +348,11 @@ const uint16_t cable_length_cmd_sequence[35] = {
 // write toggle in reg 24 (the PL edge-detects the toggle into a 1-cycle
 // strobe; the payload is long stable by the time the toggle crosses the CDC).
 static void aux_strobe_write(uint32_t payload) {
-    // DEBUG breadcrumb: one line per word so the console shows exactly how
-    // far the upload burst gets.
-    send_message("AUXW: payload=0x%08X\r\n", payload);
     uint32_t strobe = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_STROBE_OFFSET);
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_WRITE_OFFSET, payload);
     strobe ^= AUX_STROBE_WRITE_TOGGLE;
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_STROBE_OFFSET, strobe);
     usleep(2);   // > a few PL clocks for the CDC + strobe
-    send_message("AUXW: done (strobe=0x%08X)\r\n", strobe);
 }
 
 void pl_aux_write_word(int slot, int bank, int addr, uint16_t data) {
@@ -384,34 +380,21 @@ int pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop
 }
 
 void pl_aux_select_bank(int slot, int bank) {
-    // DEBUG breadcrumbs (aux bank-select wedge investigation): raw UART chars
-    // bracket every step -- unlike send_message these cannot be dropped.
-    dbgc('a');
     uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
-    dbgc('b');
     uint32_t bit = 1u << (AUX_CTRL_BANK_SEL_SHIFT + slot);
     if (bank) ctrl |= bit; else ctrl &= ~bit;
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
-    dbgc('c');
-    send_message("AUXSEL: slot=%d bank=%d ctrl22=0x%08X\r\n", slot, bank, ctrl);
-    dbgc('s');
 }
 
 // Confirm-before-reuse handshake: the swap latches at a packet boundary
 // (immediately when not streaming). Returns 1 once bank_active[slot]==bank.
 int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
-    dbgc('d');
     for (int waited = 0; waited <= timeout_ms * 1000; waited += 100) {
         uint32_t s11 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET);
-        if (waited == 0)
-            dbgc('e');
-        if (((s11 >> slot) & 1u) == (uint32_t)(bank ? 1 : 0)) {
-            dbgc('f');
+        if (((s11 >> slot) & 1u) == (uint32_t)(bank ? 1 : 0))
             return 1;
-        }
         usleep(100);
     }
-    dbgc('g');
     send_message("ERROR: aux bank swap confirm timeout (slot %d bank %d)\r\n", slot, bank);
     return 0;
 }
