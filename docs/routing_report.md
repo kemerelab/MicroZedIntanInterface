@@ -24,34 +24,38 @@ Three changes were made and re-built clean (synth → impl → route → bitstre
 - **B — memory-backed FIFO** (`programmable_logic/src/fifo_bram_interface.sv`): added
   `(* ram_style = "distributed" *)` and removed the per-element reset loop, so `write_fifo` infers
   LUTRAM instead of ~17.7k flip-flops + a 256:1 read mux. (FSM logic unchanged; async read preserved.)
+- **C — AXI fabric clock** (`programmable_logic/block_design/design_1_bd.tcl`): clk_wiz `clk_out2`
+  lowered **175 → 131.25 MHz** (MMCM output divider 6→8; same 1050 MHz VCO, so the 84 MHz data clock
+  is unchanged). The remaining 16 failing endpoints after A+A2+B were all inside the hardened PS7 on
+  its AXI-GP port, which the Zynq-7020 ‑1 rates at ~150 MHz — 175 MHz was over-spec. 131.25 MHz is the
+  next clean MMCM divider below the spec limit; BRAM read bandwidth (~525 MB/s) still dwarfs the
+  ~9 MB/s stream. No firmware/host change (nothing depends on the AXI clock value).
 
 ### Verified results
 
-| Metric | `main` baseline | + A | **+ A + A2 + B (verified)** |
-|---|---|---|---|
-| WNS | −4.551 ns | −2.147 ns | **−1.214 ns** |
-| Failing endpoints | 23,429 | 1,041 | **16** |
-| Data-path timing (intra-84 MHz) | −1.953 ns | −0.100 ns | **+0.322 ns — PASS** |
-| 84↔175 CDC crossings | timed → failing | timed → failing | **async — not timed** |
-| Congestion window | `fifo_bram_inst` 99% | — | **none above level 5** |
-| Slice LUTs | 9,246 (17.4%) | — | **4,556 (8.6%)** |
-| Flip-flops | 26,701 (25.1%) | — | **8,715 (8.2%)** |
-| F7 / F8 muxes | 2,858 / 1,254 | — | **553 / 116** |
-| `fifo_bram_inst` | 5,222 LUT / 18,209 FF | — | **542 LUT / 237 FF** (368 LUTRAM) |
-| Block RAM | 16 / 140 | — | 16 / 140 (LUTRAM, no BRAM added) |
+| Metric | `main` baseline | + A | + A + A2 + B | **+ A + A2 + B + C (final)** |
+|---|---|---|---|---|
+| WNS | −4.551 ns | −2.147 ns | −1.214 ns | **+0.275 ns** |
+| Failing endpoints | 23,429 | 1,041 | 16 | **0** |
+| Timing verdict | not met | not met | not met | **ALL constraints met** |
+| Data-path (intra-84 MHz) | −1.953 ns | −0.100 ns | +0.322 ns | **+0.450 ns** |
+| AXI fabric (clk_out2) | −1.647 ns @175 | −0.782 | −1.214 | **+0.275 ns @131.25** |
+| 84↔131 CDC crossings | timed → failing | failing | async | **async — not timed** |
+| Congestion window | `fifo_bram_inst` 99% | — | none | **none** |
+| Slice LUTs | 9,246 (17.4%) | — | 4,556 | **4,500 (8.5%)** |
+| Flip-flops | 26,701 (25.1%) | — | 8,715 | **8,715 (8.2%)** |
+| F7 / F8 muxes | 2,858 / 1,254 | — | 553 / 116 | **553 / 116** |
+| `fifo_bram_inst` | 5,222 LUT / 18,209 FF | — | 542 / 237 | **542 LUT / 237 FF** (368 LUTRAM) |
+| Block RAM | 16 / 140 | — | 16 | **16 / 140** |
 
-**Outcome:** all data-path / user-RTL timing now meets, the sole congestion hotspot is gone, and the
-design uses **~67% fewer flip-flops and ~51% fewer LUTs** — large headroom for the planned features.
+**Outcome — timing fully closed (WNS +0.275 ns, 0 failing endpoints, "All user specified timing
+constraints are met").** The sole congestion hotspot is gone and the design uses **~67% fewer
+flip-flops and ~51% fewer LUTs** than the `main` baseline — large headroom for the planned features.
 
-### One residual item (pre-existing, NOT from these fixes)
-
-The remaining 16 failing endpoints (WNS −1.214 ns) are **all inside the hardened `processing_system7_0`
-(PS7) block, on the 175 MHz AXI-GP interface** (`clk_out2`, 5.714 ns). They were present in `main` too,
-masked by the −4.551 ns reset failure. The Zynq-7020 ‑1 PS AXI-GP ports are rated to ~150 MHz, so
-clocking the AXI fabric at **175 MHz is over-spec**. This is independent of the reset/FIFO work.
-**Recommended fix (separate):** drop `clk_out2` (the AXI fabric clock) from 175 → ≤150 MHz in the
-clk_wiz. BRAM read bandwidth at 150 MHz is ~600 MB/s, far above the ~9 MB/s stream, so no functional
-impact. (Left unimplemented — it's a clocking decision for the maintainers.)
+> Verified at build/route level only (no hardware on this machine). A is connectivity, A2/C are
+> timing/clocking, and B keeps the FIFO FSM bit-identical (async read preserved) — low functional
+> risk — but an on-hardware capture is the recommended final check. Production follow-up for B: a true
+> block-RAM FIFO (synchronous read) to also free the LUTRAM — needs a small FSM refactor + testbench.
 
 ---
 
