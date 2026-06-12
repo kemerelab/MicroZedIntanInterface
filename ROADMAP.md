@@ -1,0 +1,160 @@
+# Roadmap — toward a feature-complete Intan acquisition system
+
+Working TODO list for the MicroZed/Intan DAQ. Grouped into epics; check items off as
+they land. Chip-feature details should be confirmed against the datasheets in `docs/`
+(`Intan_RHD2000_series_datasheet.pdf`, `Intan_RHD2164_datasheet.pdf`) before implementing.
+
+Remember the three-layer contract: every register/packet change touches
+`programmable_logic/` (PL), `firmware/include/main.h` + `pl_control.c` (PS), and
+`remote/net.py` (host). See CLAUDE.md.
+
+---
+
+## A. Intan chip feature-completeness (expose RHD2000 capabilities)
+
+- [ ] **Fast settle — software trigger** — amp fast settle = write reg 0 bit 5: `0x80FE` on,
+      `0x80DE` off (datasheet pulse ~2.5/fH). Optional DSP-reset variant = OR the CONVERT LSB
+      ("bit H") to reset the digital high-pass filter. *(top 5)*
+- [ ] **Fast settle — GPIO trigger** — software-selectable `digital_in_0[*]` pin, edge-triggered
+      injection of `0x80FE`/`0x80DE` into one aux command slot (Intan-style: preserves throughput
+      except on transition packets). Refs: `data_generator_core.sv:273,312`; Intan
+      [`rhythm/main.v`](https://github.com/open-ephys/rhythm/blob/master/main.v)`:750-767,1028-1030`.
+      Decisions pending: pin, edge vs one-shot, DSP-bit yes/no, which aux slot to sacrifice. *(top 5)*
+      **OPEN:** does a fast-settle GPIO *replace* Slot 1's command (current plan), or instead
+      *block/inject into* Slot 3's sequence? Revisit when building the override layer.
+- [ ] **Digital output (`auxout`) — GPIO mirror** — drive the chip's `auxout` pin from a
+      software-selectable controller GPIO in real time (Slot 1 Reg-3 override; confirmed Intan
+      `main.v:1252` routes `TTL_in[ch]` → digout bit). Pairs with the Reg-3 shadow.
+- [ ] **Configurable amplifier bandwidth** — upper/lower cutoff registers (RH1/RH2/RL),
+      host command + firmware sequence instead of the hardcoded init.
+- [ ] **DSP high-pass / offset removal** config (register 0 DSP cutoff bits).
+- [ ] **ADC self-calibration** command exposed to host (currently buried in the init blob).
+- [ ] **Aux ADC inputs** — read aux1/aux2/aux3 (temperature sensor, supply voltage) and
+      surface them in the packet + status.
+- [ ] **Impedance testing** — test-current injection + capacitor-DAC select (regs 5/6/7),
+      host workflow to sweep electrode impedance.
+- [ ] **ADC format config** — two's-complement vs offset-binary, absolute-value mode.
+- [ ] **Configurable digital inputs** capture into the packet (`:273` TODO).
+- [ ] **Generalize COPI sequences** — replace the hardcoded `convert`/`init`/`cable_test`
+      blobs in `pl_control.c` with host-configurable, **looping aux command banks** + a
+      fast-settle override layer. **Design: [`docs/command-bank-design.md`](docs/command-bank-design.md).**
+      This is the foundation the fast-settle items (above) and impedance/temp/supply build on.
+
+## B. Board-rev sensor / IO interfaces (2 ADC + 2 DAC + 9-axis IMU)
+
+- [ ] **ADC SPI master** (new PL module) — develop test-first in sim against the
+      converter datasheet timing. + testbench.
+- [ ] **DAC SPI master** (new PL module) + testbench.
+- [ ] **AXI registers** — DAC setpoints (PS→PL), ADC config; wire into `axi_lite_registers.v`.
+- [ ] **Integrate 2 ADC samples into the packet** — fills the external-ADC metadata slots
+      that are currently `0x0` (ties into Epic C).
+- [ ] **Firmware control API + host commands** for DAC output / ADC config.
+- [ ] **Constraints/pinout** for the new board revision (`programmable_logic/constraints/`).
+- [ ] **9-axis IMU (BNO055) — absolute orientation.** I²C sensor; on-chip fusion outputs
+      quaternion / Euler / linear-accel / gravity / temp / calibration. Read via the **Zynq PS
+      hard-I²C (EMIO)** — mostly firmware, little/no new PL RTL — and stamp ~100 Hz into packet
+      metadata (Epic C). **Physical layer (proven by the OE 3D headstage):** RHD2164 DDR uses a
+      *single* MISO pair, so the **second MISO pair's two cable conductors are repurposed as
+      dedicated SDA/SCL** (12-pin Omnetics: pin3=SDA, pin4=SCL). Our system uses the same DDR
+      topology → same cable trick applies. Refs:
+      [low-profile-headstage-64ch-3d](https://github.com/open-ephys/low-profile-headstage-64ch-3d)
+      (RHD2164+BNO055 schematic); host decode
+      [acquisition-board](https://github.com/open-ephys-plugins/acquisition-board) `AcqBoardONI.cpp`.
+- [ ] **(Free win) Analog accelerometer via aux** — an ADXL335 on auxin1/2/3 is already captured
+      by `CONVERT(32/33/34)`; needs only host-side decode/labeling (see Epic A aux item).
+
+## C. Packet / metadata payload completion
+
+- [ ] **Fill header words 3–4 + the 8 external ADC values** (presently hardwired `0x0`).
+      Ref: `data_generator_core.sv:352` breadcrumb.
+- [ ] **64-bit non-neural metadata state** in the exfil FSM (fast-settle flag, digital in,
+      discrete-ADC values, IMU quaternion/accel, status).
+- [ ] **Keep the 3-layer contract in sync** (PL ↔ `main.h` ↔ `net.py`).
+
+## D. PL→PS throughput / DMA
+
+- [ ] **Characterize the current BRAM-polling path** — measure the real ceiling vs the
+      ~9 MB/s figure; find where it saturates (PS read loop? BRAM bandwidth? UDP?).
+- [ ] **Re-attempt DMA, simulation-first** — AXI-DMA / AXI-DataMover from FIFO/stream to
+      DDR. Prove the `tlast`/backpressure/burst-boundary handshake in a testbench before
+      any bitstream (this is what bit the previous attempt).
+- [ ] **Double-buffer + interrupt** scheme to replace polling.
+- [ ] **Benchmark** against the current path; document the win.
+
+## E. Firmware robustness / networking
+
+- [ ] **Hotplug + DHCP** — finish lwIP hotplug init and add a DHCP/discovery option.
+      Refs: `main.c:421-422`.
+- [ ] **Fix the 10 ms print timeout** that stalls RX (`shared_print.c:163`).
+- [ ] **Error-state recovery** — track timestamp-gap duration on recovery (`main.c:143`).
+- [ ] **De-hardcode IPs** — config mechanism instead of baked-in 192.168.18.x.
+
+## F. OpenEphys integration (`ephys-socket` plugin)
+
+Target: [`ckemere/ephys-socket`](https://github.com/ckemere/ephys-socket) (clone at
+`~/Code/ephys-socket`) — a forked OpenEphys "Ephys Socket" `DataThread`, already MicroZed-specific
+(`IntanInterface` = UDP recv + TCP control; `IntanSocket` = parse → GUI buffer). It is the **third
+consumer of the register/packet contract** (after firmware and `net.py`) — `IntanInterface`
+duplicates `net.py`'s `CMD_*` set.
+
+Current gaps (plugin is WIP):
+- [ ] **Packet alignment** — reads data flat (`dataWords[ch/2]`, `IntanSocket.cpp:481`) with **no
+      +2 pipeline shift** and ignores metadata words [6–9]. Needs the PL-side alignment +
+      command-echo (Epics A/C) to get correctly-labeled neural + aux channels.
+- [ ] **Aux split + scaling** — allocates 3 aux/bank + `aux_data_scale` but doesn't actually
+      separate/align them; wire to the echo metadata.
+- [ ] **Command parity** — add the new `CMD_*` (aux bank write, fast settle, digout, register R/W)
+      to `IntanInterface`, in lockstep with `net.py` + firmware.
+- [ ] **Contract single-source** (see Epic H) — make the plugin consume the generated
+      packet/register/`CMD` definition so all 3 consumers stay in sync. *This is the real coupling.*
+
+Integration approach (must stay installable via the OpenEphys Plugin Installer, which requires a
+standalone repo + releases):
+- [ ] **Decide submodule vs subtree** for co-locating in this repo:
+      - *Submodule* (recommended): plugin stays its own repo (source of truth, installable); this
+        repo references it at e.g. `openephys-plugin/`. Standard, low-risk; bump pointer on change.
+      - *Subtree*: plugin code lives in this repo (primary dev); `git subtree push` to the
+        standalone repo to cut installable releases. Smoother co-dev, more arcane.
+      - Either way the standalone repo + its CMake/CI/releases persist for installability.
+- [ ] **Build + docs** for the plugin within this repo.
+
+## G. Verification infrastructure (scoped to where iteration cost is highest)
+
+- [ ] **RTL elaboration/synth smoke check** — cheap; catches width/latch/multi-driver/loop
+      errors in minutes. Run on every RTL change.
+- [ ] **Testbenches for NEW modules** — ADC/DAC SPI masters, the DMA datapath, packet
+      packing. (Not the proven legacy datapath.)
+- [ ] **Python mock board** — UDP packet generator + TCP responder so `net.py`'s
+      `DataValidator`/`CableDetection` run with no hardware.
+- [ ] **Host-side unit tests** — pure logic (`calculate_packet_size`, struct unpacking).
+- [ ] **Native-gcc firmware unit tests** for pure logic (packet-size math, struct packing).
+
+## H. Maintainability
+
+- [ ] **Single-source register/packet contract** — one definition that generates the PL
+      params, `main.h` offsets, and `net.py` constants. Kills hand-sync duplication.
+- [ ] **Fix CLAUDE.md toolchain path** — tools are at `/opt/Xilinx/2025.1/`, not `~/Xilinx/`.
+- [ ] **Build/CI smoke** — scripted elaborate + firmware compile (`scripts/clean_build_all.sh`
+      already does a full Vivado→XSA→Vitis build end-to-end).
+
+---
+
+## Reference designs (OpenEphys / Intan open source)
+
+References mined while scoping the above. Note OE's 3rd-gen path uses **liboni/ONI framing**
+(a software protocol), *not* ONIX coax hardware — the 3D headstage still connects over the
+standard Intan SPI Omnetics cable.
+
+- [open-ephys/rhythm](https://github.com/open-ephys/rhythm) — Intan/OE **Rhythm FPGA** Verilog:
+  fast-settle injection, looping **aux command banks** (template for "generalize COPI sequences"),
+  DDR/MISO phase handling.
+- [open-ephys/low-profile-headstage-64ch-3d](https://github.com/open-ephys/low-profile-headstage-64ch-3d)
+  — OE 64ch **3D headstage** (RHD2164 + **BNO055**); KiCad schematic proves the dedicated SDA/SCL
+  cable wiring (2nd MISO pair → I²C).
+- [open-ephys-plugins/acquisition-board](https://github.com/open-ephys-plugins/acquisition-board)
+  — OE GUI plugin; `AcqBoardONI.cpp` decodes the BNO frame;
+  `rhythm-api/rhd2000registers.cpp::createCommandListTempSensor` builds the aux/accelerometer/
+  temp/supply command bank.
+- [open-ephys/commutator-controller](https://github.com/open-ephys/commutator-controller) — RP2040
+  commutator firmware (JSON-`{turn}` follower; does *not* read the IMU).
+- Intan **RHD2000 Rhythm** USB/FPGA reference (`RHD2000InterfaceXEM6010`, from intantech.com downloads).
