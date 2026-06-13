@@ -59,8 +59,10 @@ end
 
 // DUTs ----------------------------------------------------------------------
 logic n_fifo_we, l_fifo_we, n_pkt_end, l_pkt_end;
-logic [63:0] n_fifo_wd, l_fifo_wd;
-logic [3:0]  n_mask, l_mask;
+logic [127:0] n_fifo_wd;          // new core: 128-bit (dual-port)
+logic [63:0]  l_fifo_wd;          // legacy core: 64-bit
+logic [7:0]  n_mask;              // new core: 8-bit channel mask
+logic [3:0]  l_mask;              // legacy core: 4-bit
 logic n_csn, n_sclk, n_copi, l_csn, l_sclk, l_copi;
 logic [32*10-1:0] n_status, l_status;
 logic [31:0] aux_status, aux_read_result;
@@ -76,6 +78,7 @@ data_generator_core dut_new (
     .fifo_packet_end_flag(n_pkt_end),
     .csn(n_csn), .sclk(n_sclk), .copi(n_copi),
     .cipo0(cipo0), .cipo1(cipo1),
+    .cipo2(1'b0), .cipo3(1'b0),       // port 1 unused in this TB (single-port identity)
     .digital_in(digital_in)
 );
 
@@ -138,13 +141,20 @@ bit identity_checking = 0;
 always @(posedge clk) begin
     if (identity_checking) begin
         n_checks++;
-        if ({n_csn, n_sclk, n_copi, n_fifo_we, n_pkt_end, n_mask} !==
+        // Single-port path: SPI pins, write-enable, packet-end, and the LOW
+        // nibble of the mask must match the legacy 64-bit core exactly; the
+        // port-1 upper nibble + upper 64 data bits must be zero (port-1 off).
+        if ({n_csn, n_sclk, n_copi, n_fifo_we, n_pkt_end, n_mask[3:0]} !==
             {l_csn, l_sclk, l_copi, l_fifo_we, l_pkt_end, l_mask})
-            err($sformatf("identity: pin mismatch new={%b%b%b %b %b %h} leg={%b%b%b %b %b %h}",
-                n_csn, n_sclk, n_copi, n_fifo_we, n_pkt_end, n_mask,
-                l_csn, l_sclk, l_copi, l_fifo_we, l_pkt_end, l_pkt_end));
-        if (n_fifo_we && (n_fifo_wd !== l_fifo_wd))
-            err($sformatf("identity: fifo data new=%016h leg=%016h", n_fifo_wd, l_fifo_wd));
+            err($sformatf("identity: pin/mask mismatch new={%b%b%b %b %b %h} leg={%b%b%b %b %b %h}",
+                n_csn, n_sclk, n_copi, n_fifo_we, n_pkt_end, n_mask[3:0],
+                l_csn, l_sclk, l_copi, l_fifo_we, l_pkt_end, l_mask));
+        if (n_mask[7:4] !== 4'h0)
+            err($sformatf("identity: port-1 mask not zero (%h)", n_mask[7:4]));
+        if (n_fifo_we && (n_fifo_wd[63:0] !== l_fifo_wd))
+            err($sformatf("identity: fifo data new=%016h leg=%016h", n_fifo_wd[63:0], l_fifo_wd));
+        if (n_fifo_we && (n_fifo_wd[127:64] !== 64'h0))
+            err($sformatf("identity: port-1 data not zero (%016h)", n_fifo_wd[127:64]));
         if (n_status !== l_status)
             err("identity: status regs mismatch");
     end
@@ -198,9 +208,9 @@ int hdr_cnt = 0;
 logic [63:0] hdr_word2 = '0;
 bit in_packet_hdr = 0;
 always @(posedge clk) begin
-    if (n_fifo_we && n_mask == 4'hF) begin   // header writes are fully-valid
+    if (n_fifo_we && n_mask == 8'h0F) begin   // header writes are low-4-segment valid
         hdr_cnt++;
-        if (hdr_cnt == 3) hdr_word2 <= n_fifo_wd;
+        if (hdr_cnt == 3) hdr_word2 <= n_fifo_wd[63:0];
     end
     if (n_pkt_end && n_fifo_we) hdr_cnt <= 0;
 end

@@ -22,10 +22,11 @@ module data_generator_core (
     output logic [31:0] aux_status,
     output logic [31:0] aux_read_result,
     
-    // FIFO interface (64-bit, gets converted to 32-bit for BRAM)
+    // FIFO interface (128-bit = up to 8 x 16-bit segments: 2 SPI ports x
+    // {regular,DDR} x {CIPO0,CIPO1}; gets packed to 32-bit for BRAM)
     output logic        fifo_write_en,
-    output logic [63:0] fifo_write_data,
-    output logic [3:0]  fifo_channel_mask,     // Which 16-bit segments are valid
+    output logic [127:0] fifo_write_data,
+    output logic [7:0]  fifo_channel_mask,     // Which 16-bit segments are valid
 
     input  logic        fifo_full,
     input  logic [8:0]  fifo_count,
@@ -36,8 +37,10 @@ module data_generator_core (
     output logic        csn,        // Chip select (active low)
     output logic        sclk,       // Serial clock
     output logic        copi,       // Controller Out, Peripheral In
-    input  logic        cipo0,      // Controller In, Peripheral Out 0
-    input  logic        cipo1,       // Controller In, Peripheral Out 1
+    input  logic        cipo0,      // Port 0 (cable A) Controller In, Peripheral Out 0
+    input  logic        cipo1,      // Port 0 (cable A) Controller In, Peripheral Out 1
+    input  logic        cipo2,      // Port 1 (cable B) CIPO0  (dual-port; tie 0 if unused)
+    input  logic        cipo3,      // Port 1 (cable B) CIPO1
 
     // External digital input
     input  logic [7:0]  digital_in
@@ -55,8 +58,10 @@ logic reset_timestamp_reg;
 logic debug_mode_reg;
 logic [31:0] loop_count_reg;
 logic [3:0] phase0_reg;
-logic [3:0] phase1_reg; 
-logic [3:0] channel_enable_reg;
+logic [3:0] phase1_reg;
+logic [3:0] phase2_reg;       // port 1 (cable B) CIPO0 cable-delay phase
+logic [3:0] phase3_reg;       // port 1 (cable B) CIPO1 cable-delay phase
+logic [7:0] channel_enable_reg;  // [3:0] = port 0 streams, [7:4] = port 1 streams
 // Protected COPI message words (36 x 16-bit words) - only updated when transmission inactive
 logic [15:0] copi_words_reg [0:35];
 
@@ -71,7 +76,9 @@ always_ff @(posedge clk) begin
         loop_count_reg <= 32'd0;
         phase0_reg <= 4'd0;
         phase1_reg <= 4'd0;
-        channel_enable_reg <= 4'b1111;  // Default: all channels enabled
+        phase2_reg <= 4'd0;
+        phase3_reg <= 4'd0;
+        channel_enable_reg <= 8'b0000_1111;  // Default: port-0 all channels, port-1 off (bit-identical)
         
         // Initialize COPI words to safe defaults
         for (int j = 0; j < 36; j++) begin
@@ -83,9 +90,16 @@ always_ff @(posedge clk) begin
             reset_timestamp_reg <= ctrl_regs_pl[0*32 + 1];
             debug_mode_reg <= ctrl_regs_pl[0*32 + 3];
             loop_count_reg <= ctrl_regs_pl[1*32 +: 32];
-            phase0_reg <= ctrl_regs_pl[2*32 + 3 : 2*32 + 0];
-            phase1_reg <= ctrl_regs_pl[2*32 + 7 : 2*32 + 4];
-            channel_enable_reg <= ctrl_regs_pl[2*32 + 11 : 2*32 + 8];
+            // CTRL_REG_2 layout (widened for the second port; low bits unchanged
+            // so a host that only writes the original 4-bit channel_enable at
+            // [11:8] gets port-1 streams = 0 -> single-port path is unchanged):
+            //   [3:0] phase0, [7:4] phase1, [15:8] channel_enable (8-bit),
+            //   [19:16] phase2, [23:20] phase3
+            phase0_reg <= ctrl_regs_pl[2*32 + 3  : 2*32 + 0];
+            phase1_reg <= ctrl_regs_pl[2*32 + 7  : 2*32 + 4];
+            channel_enable_reg <= ctrl_regs_pl[2*32 + 8 +: 8];
+            phase2_reg <= ctrl_regs_pl[2*32 + 16 +: 4];
+            phase3_reg <= ctrl_regs_pl[2*32 + 20 +: 4];
             
             // Update COPI words from control registers 4-21 (18 registers total)
             for (int j = 0; j < 18; j++) begin
@@ -97,16 +111,23 @@ always_ff @(posedge clk) begin
 end
 
 // CIPO received data storage (4 separate 16-bit registers per cycle)
-logic [31:0] cipo0_data [0:34];  // CIPO0 line, register A (low 16 bits) and B (upper 16 bits)
-logic [31:0] cipo1_data [0:34];  // CIPO1 line, register A
+logic [31:0] cipo0_data [0:34];  // Port 0 CIPO0 line, register A (low 16 bits) and B (upper 16 bits)
+logic [31:0] cipo1_data [0:34];  // Port 0 CIPO1 line
+logic [31:0] cipo2_data [0:34];  // Port 1 CIPO0 line (dual-port)
+logic [31:0] cipo3_data [0:34];  // Port 1 CIPO1 line
 
-// Registers for COPI data from CIPO 0 and CIPO 1
+// Registers for COPI data from the 4 CIPO lines (2 per port)
 reg [73:0] cipo0_4x_oversampled;
 reg [73:0] cipo1_4x_oversampled;
+reg [73:0] cipo2_4x_oversampled;
+reg [73:0] cipo3_4x_oversampled;
 reg [31:0] cipo0_phase_selected;
 reg [31:0] cipo1_phase_selected;
+reg [31:0] cipo2_phase_selected;
+reg [31:0] cipo3_phase_selected;
 
-// Instantiate phase selector modules that correct for CIPO delay because of long cable length
+// Instantiate phase selector modules that correct for CIPO delay because of long cable length.
+// Port 1's two lines have their OWN phase (phase2/phase3) since cable B may differ in length.
 CIPO_combined_phase_selector cipo0_selector(
     .phase_select(phase0_reg),
     .CIPO4x(cipo0_4x_oversampled),
@@ -116,6 +137,16 @@ CIPO_combined_phase_selector cipo1_selector(
     .phase_select(phase1_reg),
     .CIPO4x(cipo1_4x_oversampled),
     .CIPO(cipo1_phase_selected)
+);
+CIPO_combined_phase_selector cipo2_selector(
+    .phase_select(phase2_reg),
+    .CIPO4x(cipo2_4x_oversampled),
+    .CIPO(cipo2_phase_selected)
+);
+CIPO_combined_phase_selector cipo3_selector(
+    .phase_select(phase3_reg),
+    .CIPO4x(cipo3_4x_oversampled),
+    .CIPO(cipo3_phase_selected)
 );
 
 // Control counters
@@ -478,23 +509,31 @@ always_ff @(posedge clk) begin
     end
 end
 
-// CIPO data sampling - 4 registers total (2 per input line)
+// CIPO data sampling - 8 registers total (2 per input line, 2 lines per port)
 always_ff @(posedge clk) begin
     if (!rstn) begin
         // Reset all received data
         for (int j = 0; j < 35; j++) begin
             cipo0_data[j] <= 32'h0;
             cipo1_data[j] <= 32'h0;
+            cipo2_data[j] <= 32'h0;
+            cipo3_data[j] <= 32'h0;
         end
         cipo0_4x_oversampled <= 74'h0;
         cipo1_4x_oversampled <= 74'h0;
+        cipo2_4x_oversampled <= 74'h0;
+        cipo3_4x_oversampled <= 74'h0;
     end else begin
         if (transmission_active && (state_counter >= 7'd2) && (state_counter <= 75)) begin
             cipo0_4x_oversampled[state_counter - 2] <= cipo0; // Latch data into the phase selector input
             cipo1_4x_oversampled[state_counter - 2] <= cipo1;
+            cipo2_4x_oversampled[state_counter - 2] <= cipo2;
+            cipo3_4x_oversampled[state_counter - 2] <= cipo3;
         end else if(transmission_active && state_counter == 7'd76) begin
             cipo0_data[cycle_counter] <= cipo0_phase_selected; // Get the phase selector output
             cipo1_data[cycle_counter] <= cipo1_phase_selected; // It's ready one clock cycle after being latched in
+            cipo2_data[cycle_counter] <= cipo2_phase_selected;
+            cipo3_data[cycle_counter] <= cipo3_phase_selected;
         end
     end
 end
@@ -524,8 +563,8 @@ end
 always_ff @(posedge clk) begin
     if (!rstn) begin
         fifo_write_en <= 1'b0;
-        fifo_write_data <= 64'h0;
-        fifo_channel_mask <= 4'h0;
+        fifo_write_data <= 128'h0;
+        fifo_channel_mask <= 8'h0;
         packets_sent <= 32'd0;
         fifo_packet_end_flag <= 1'b0;
 
@@ -539,7 +578,10 @@ always_ff @(posedge clk) begin
             if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3, 7'd4}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
-                    fifo_channel_mask <= 4'b1111;  // Header is always fully valid
+                    // Header is one 64-bit value -> exactly the low 4 segments,
+                    // upper 4 masked off (port-2 streams never appear in the
+                    // header). Bit-identical to the single-port header.
+                    fifo_channel_mask <= 8'b0000_1111;
                     fifo_packet_end_flag <= 1'b0;  // Header words are never at the end
                     case (state_counter)
                         7'd0: fifo_write_data <= {MAGIC_NUMBER_HIGH, MAGIC_NUMBER_LOW}; // magic number
@@ -565,35 +607,51 @@ always_ff @(posedge clk) begin
                 end
             end 
             
-            // Data writes - Pack both CIPO lines into single 64-bit write with channel mask
+            // Data writes - Pack both ports' CIPO lines into one 128-bit write
+            // with the 8-bit channel mask. Segment order (low->high):
+            //   port0 cipo0{reg,ddr}, port0 cipo1{reg,ddr},  (low 64 = bits[63:0])
+            //   port1 cipo0{reg,ddr}, port1 cipo1{reg,ddr}.  (high 64 = bits[127:64])
+            // When channel_enable_reg[7:4]==0 the high 64 bits are masked off and
+            // the packet is byte-identical to the single-port datapath.
             if (state_counter == 7'd77) begin
                 fifo_write_en <= 1'b1;
-                fifo_channel_mask <= channel_enable_reg;  // Use current channel enable settings
+                fifo_channel_mask <= channel_enable_reg;  // 8-bit channel enable
                 fifo_packet_end_flag <= is_last_cycle;    // Only last cycle's data word ends the packet
-                
+
                 if (!debug_mode_reg) begin
-                    // Pack real CIPO data: CIPO1 in upper 32 bits, CIPO0 in lower 32 bits
-                    fifo_write_data <= {cipo1_data[cycle_counter], cipo0_data[cycle_counter]};
+                    // Real CIPO data, both ports.
+                    fifo_write_data <= {cipo3_data[cycle_counter], cipo2_data[cycle_counter],
+                                        cipo1_data[cycle_counter], cipo0_data[cycle_counter]};
                 end else begin
-                    // Load debug data with sine wave data
+                    // Debug synthetic sine. Phase 1 bandwidth test: port 1 is
+                    // filled too (phase-offset from port 0 so it is visibly
+                    // distinct) so a doubled-size packet exercises the PS->UDP path.
                     logic [5:0] channel_offset;  // Only needs 6 bits for values 0-32
                     logic [15:0] cipo0_regular_val, cipo0_ddr_val, cipo1_regular_val, cipo1_ddr_val;
+                    logic [15:0] cipo2_regular_val, cipo2_ddr_val, cipo3_regular_val, cipo3_ddr_val;
                     logic [8:0] base_phase;         // index into 512-entry LUT
-                    
+                    logic [8:0] base_phase_p1;      // port-1 phase (offset half a period)
+
                     // Calculate base sample index (0-32 for cycles 2-34)
                     channel_offset = (cycle_counter >= 6'd2) ? (cycle_counter - 6'd2) : 6'd0;
-                    
+
                     // Base phase for this sample (9 bits total)
                     base_phase = dummy_data_index + channel_offset;
-                    
+                    base_phase_p1 = base_phase + 9'd128;   // port-1 phase offset (90 deg)
+
                     // Generate sine values with frequency multiplication using left shifts
                     cipo0_regular_val = sine_lut[base_phase];                       // 1× = 58.6 Hz
-                    cipo0_ddr_val     = sine_lut[(base_phase << 1) & 9'h1FF];       // 2× = 117.2 Hz  
+                    cipo0_ddr_val     = sine_lut[(base_phase << 1) & 9'h1FF];       // 2× = 117.2 Hz
                     cipo1_regular_val = sine_lut[(base_phase << 2) & 9'h1FF];       // 4× = 234.4 Hz
                     cipo1_ddr_val     = sine_lut[(base_phase << 3) & 9'h1FF];       // 8× = 468.8 Hz
-                    
-                    // Pack debug data: CIPO1 in upper 32 bits, CIPO0 in lower 32 bits
-                    fifo_write_data <= {{cipo1_ddr_val, cipo1_regular_val}, {cipo0_ddr_val, cipo0_regular_val}};
+                    cipo2_regular_val = sine_lut[base_phase_p1];                    // port1, offset
+                    cipo2_ddr_val     = sine_lut[(base_phase_p1 << 1) & 9'h1FF];
+                    cipo3_regular_val = sine_lut[(base_phase_p1 << 2) & 9'h1FF];
+                    cipo3_ddr_val     = sine_lut[(base_phase_p1 << 3) & 9'h1FF];
+
+                    fifo_write_data <= {
+                        {cipo3_ddr_val, cipo3_regular_val}, {cipo2_ddr_val, cipo2_regular_val},
+                        {cipo1_ddr_val, cipo1_regular_val}, {cipo0_ddr_val, cipo0_regular_val}};
                 end
             end
                     
@@ -621,16 +679,21 @@ assign status_regs_pl[0*32 +: 32] = {
     transmission_active   // [0] - 1 bit
 };
 
-// Status Register 1: Reflected control parameters (registered versions)
+// Status Register 1: Reflected control parameters (registered versions).
+// channel_enable[3:0] stays at [23:20] (unchanged position for existing
+// firmware/host); the new port-1 nibble channel_enable[7:4] goes in the
+// former reserved [27:24]. phase2/phase3 are read back via the CTRL_REG_2
+// mirror (status reg 8).
 assign status_regs_pl[1*32 +: 32] = {
-    8'd0,                 // [31:24] - reserved
-    channel_enable_reg,   // [23:20] - 4 bits
-    phase1_reg,           // [19:16] - 4 bits
-    phase0_reg,           // [15:12] - 4 bits  
-    8'd0,                 // [11:4] - reserved
-    debug_mode_reg,       // [3] - 1 bit
-    1'b0,                 // [2] - reserved
-    reset_timestamp_reg,  // [1] - 1 bit
+    4'd0,                     // [31:28] - reserved
+    channel_enable_reg[7:4],  // [27:24] - port-1 channel enable
+    channel_enable_reg[3:0],  // [23:20] - port-0 channel enable
+    phase1_reg,               // [19:16] - 4 bits
+    phase0_reg,               // [15:12] - 4 bits
+    8'd0,                     // [11:4] - reserved
+    debug_mode_reg,           // [3] - 1 bit
+    1'b0,                     // [2] - reserved
+    reset_timestamp_reg,      // [1] - 1 bit
     enable_transmission   // [0] - 1 bit (current value, not registered)
 };
 

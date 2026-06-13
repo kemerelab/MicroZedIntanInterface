@@ -86,8 +86,8 @@ module data_generator #(
     
     // FIFO interface signals
     wire        fifo_write_en;
-    wire [63:0] fifo_write_data;
-    wire [3:0]  fifo_channel_mask;      // Channel metadata for selective copying
+    wire [127:0] fifo_write_data;       // 128-bit: up to 8 x 16-bit segments (2 ports)
+    wire [7:0]  fifo_channel_mask;      // Channel metadata for selective copying
     wire        fifo_packet_end_flag;   // Channel metadata for tagging packets
     wire        fifo_full;
     wire [8:0]  fifo_count;
@@ -109,18 +109,23 @@ module data_generator #(
         
         // FIFO interface
         .fifo_write_en(fifo_write_en),
-        .fifo_write_data(fifo_write_data),          // 64-bit data
-        .fifo_channel_mask(fifo_channel_mask),      // 4-bit channel metadata
+        .fifo_write_data(fifo_write_data),          // 128-bit data
+        .fifo_channel_mask(fifo_channel_mask),      // 8-bit channel metadata
         .fifo_full(fifo_full),
-        .fifo_count(fifo_count),                    // Count of 64-bit entries
+        .fifo_count(fifo_count),                    // Count of entries
         .fifo_packet_end_flag(fifo_packet_end_flag),
-        
+
         // Serial interface
         .csn(csn),
         .sclk(sclk),
         .copi(copi),
         .cipo0(cipo0),
         .cipo1(cipo1),
+        // Port 1 (cable B) CIPO inputs. Phase 1 ties these off -- the second
+        // port's real LVDS pins arrive in Phase 2; the bandwidth test uses
+        // debug-mode synthetic data which does not read these.
+        .cipo2(1'b0),
+        .cipo3(1'b0),
 
         // Digital input
         .digital_in(digital_in)
@@ -138,8 +143,8 @@ module data_generator #(
         
         // FIFO interface - 64-bit with additional metadata
         .fifo_write_en(fifo_write_en),
-        .fifo_write_data(fifo_write_data),          // 64-bit data
-        .fifo_channel_mask(fifo_channel_mask),      // 4-bit channel metadata
+        .fifo_write_data(fifo_write_data),          // 128-bit data
+        .fifo_channel_mask(fifo_channel_mask),      // 8-bit channel metadata
         .fifo_full(fifo_full),
         .fifo_count(fifo_count),                    // Count of 64-bit entries
         .fifo_packet_end_flag(fifo_packet_end_flag),
