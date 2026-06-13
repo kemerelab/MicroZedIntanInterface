@@ -174,12 +174,18 @@ FSM, master outputs fanned out to both ports' pins), but **independent per-port 
 phase** from the start. Keep default-OFF / bit-identical to the single-port path when the
 second port is disabled, the same discipline used for the aux sequencer.
 
-- [ ] **Phase 1 — datapath + bandwidth characterization (debug mode).** Widen the FIFO word
+- [x] **Phase 1 — datapath + bandwidth characterization (debug mode).** Widen the FIFO word
       64→128-bit `{cipo3,cipo2,cipo1,cipo0}`, extend `channel_enable` 4→8 bits + per-port phase
       regs, extend the packet format and the three-layer contract (`main.h`/`pl_control.c`/
       `net.py`). Have **debug mode synthesize port-2 data** so packets are full doubled size,
       then measure whether PS core-0's BRAM-poll + lwIP UDP loop sustains ~18 MB/s. No real
       CIPO-capture risk yet — pure datapath/throughput. Feeds, and is gated by, **Epic D**.
+      **RTL/firmware/host DONE 2026-06-13 (`claude/dual-port`):** 128-bit packer (4-chunk),
+      core/wrapper/contract widened, default-OFF & proven bit-identical (FIFO-packer TB 423
+      checks + integration TB 26,006 checks incl. 25,910-cycle co-sim vs main). Full build
+      routes & meets timing (WNS +0.646, 0 failing endpoints, no congestion; LUTRAM 368→933).
+      `blobs/BOOT.bin` rebuilt. **Remaining: run the on-hardware bandwidth measurement**
+      (debug mode + `set_channels 0xFF` → ~150-word packets; confirm PS→UDP sustains ~18 MB/s).
 - [ ] **Phase 2 — real second-port capture + independent cable detection.** Add the two
       `IBUFDS` + phase selectors and `phase2`/`phase3`; extend `auto_cable_detect` / `net.py`
       INTAN-pattern sweep to run **per port** (different cable lengths → different optimal phase).
