@@ -1,6 +1,6 @@
 module axi_lite_registers #(
-    parameter integer N_CTRL = 22,     // default (22 control regs)
-    parameter integer N_STATUS = 11     // default (11 status regs)
+    parameter integer N_CTRL = 25,     // 22 legacy + 3 aux-sequencer control regs
+    parameter integer N_STATUS = 13    // 11 legacy + aux status + aux read result
 )(
     input  wire                     s_axi_aclk,
     input  wire                     s_axi_aresetn,
@@ -60,8 +60,18 @@ always @(posedge s_axi_aclk) begin
         for (i = 0; i < N_CTRL; i = i + 1)
             ctrl_regs_axi[i] <= 32'b0;
     end else begin
-        s_axi_awready <= ~s_axi_awready & s_axi_awvalid;
-        s_axi_wready  <= ~s_axi_wready  & s_axi_wvalid;
+        // Joint accept: assert AWREADY and WREADY together, and only when
+        // BOTH valids are present (and no write response is pending). The
+        // previous form toggled each ready independently against its own
+        // valid; with AWVALID and WVALID asserted one cycle apart the two
+        // readys oscillate in anti-phase and the accept condition below is
+        // never true in any single cycle -- the write never completes, BVALID
+        // never asserts, and the ARM core hangs mid-store on the GP port
+        // (proven in sim/axi_lite_write_tb.sv; observed on hardware as a
+        // silent CPU wedge during the aux bank-select command). A slave
+        // waiting for both VALIDs before READY is explicitly AXI-compliant.
+        s_axi_awready <= ~s_axi_awready & s_axi_awvalid & s_axi_wvalid & ~s_axi_bvalid;
+        s_axi_wready  <= ~s_axi_wready  & s_axi_awvalid & s_axi_wvalid & ~s_axi_bvalid;
 
         if (s_axi_awready & s_axi_awvalid & s_axi_wready & s_axi_wvalid) begin
             if (s_axi_awaddr[11:2] < N_CTRL) begin
@@ -92,8 +102,11 @@ always @(posedge s_axi_aclk) begin
         s_axi_arready <= 0;
         status_read_axi <= 0;
     end else begin
-        s_axi_arready <= ~s_axi_arready & s_axi_arvalid;
-        
+        // Hold off a new read acceptance while a response is still pending
+        // (single-channel handshake cannot anti-phase lock like the write
+        // side, but this prevents a pipelined AR from clobbering rdata).
+        s_axi_arready <= ~s_axi_arready & s_axi_arvalid & ~s_axi_rvalid;
+
         // Clear read pulses by default
         status_read_axi <= 0;
 

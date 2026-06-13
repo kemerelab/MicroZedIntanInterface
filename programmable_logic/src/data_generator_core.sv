@@ -12,10 +12,15 @@
 module data_generator_core (
     input  logic        clk,
     input  logic        rstn,
-    
+
     // Control and status interfaces
-    input  logic [32*22-1:0] ctrl_regs_pl,
+    // Regs 0..21 are the legacy map; 22..24 configure the aux command
+    // sequencer / override layer (see firmware/include/main.h).
+    input  logic [32*25-1:0] ctrl_regs_pl,
     output logic [32*10-1:0]  status_regs_pl,  // Only 10 registers, including mirroring 4 control - wrapper adds 11th
+    // Aux sequencer / override status (wrapper maps these to status regs 11/12)
+    output logic [31:0] aux_status,
+    output logic [31:0] aux_read_result,
     
     // FIFO interface (64-bit, gets converted to 32-bit for BRAM)
     output logic        fifo_write_en,
@@ -39,7 +44,11 @@ module data_generator_core (
 );
 
 // Extract control bits
-logic enable_transmission = ctrl_regs_pl[0*32 + 0];
+wire enable_transmission = ctrl_regs_pl[0*32 + 0];
+
+// Declared ahead of first use (the safe-control block below) so the file also
+// elaborates under xsim, which rejects use-before-declaration.
+logic transmission_active;
 
 // Safe control registers - only updated when transmission is not active
 logic reset_timestamp_reg;
@@ -52,7 +61,7 @@ logic [3:0] channel_enable_reg;
 logic [15:0] copi_words_reg [0:35];
 
 // Reserved control registers for future use
-logic [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
+wire [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
 
 // Safe control register updates - only when transmission is not active
 always_ff @(posedge clk) begin
@@ -118,9 +127,8 @@ localparam logic [31:0] MAGIC_NUMBER_LOW  = 32'hDEADBEEF;
 localparam logic [31:0] MAGIC_NUMBER_HIGH = 32'hCAFEBABE;
 logic [63:0] timestamp;
 
-// Status tracking
+// Status tracking (transmission_active is declared near the top of the module)
 logic [31:0] packets_sent;
-logic        transmission_active;
 logic        loop_limit_reached;
 logic [31:0] loop_counter;
 
@@ -140,9 +148,181 @@ initial begin
 end
 
 // Helper signals for state machine logic
-logic is_last_state = (state_counter == 7'd79);
-logic is_first_cycle = (cycle_counter == 6'd0);
-logic is_last_cycle = (cycle_counter == 6'd34);
+wire is_last_state = (state_counter == 7'd79);
+wire is_first_cycle = (cycle_counter == 6'd0);
+wire is_last_cycle = (cycle_counter == 6'd34);
+
+// ============================================================================
+// AUX COMMAND SEQUENCER + OVERRIDE LAYER (default OFF -> bit-identical)
+// ============================================================================
+// Control register decode (regs 22..24, already PL-domain after the CDC):
+//   reg 22: [0] aux_seq_en, [3:1] bank_select, [4] fs_sw, [5] fs_gpio_en,
+//           [8:6] fs_gpio_sel, [9] dsp_sw, [10] dsp_gpio_en, [13:11] dsp_gpio_sel,
+//           [14] digout_sw, [15] digout_gpio_en, [18:16] digout_gpio_sel,
+//           [31:24] reg3_static (host-owned Reg-3 bits D7..D1; D0 substituted)
+//   reg 23: bank write port payload: [15:0] data, [21:16] addr, [23:22] slot,
+//           [24] bank, [25] is_length
+//   reg 24: [0] write toggle (edge = strobe one word), [1] inject toggle,
+//           [31:16] inject command (one-shot slot-3 injection)
+wire        aux_seq_en      = ctrl_regs_pl[22*32 + 0];
+wire [2:0]  aux_bank_sel    = ctrl_regs_pl[22*32 + 1 +: 3];
+wire        aux_fs_sw       = ctrl_regs_pl[22*32 + 4];
+wire        aux_fs_gpio_en  = ctrl_regs_pl[22*32 + 5];
+wire [2:0]  aux_fs_gpio_sel = ctrl_regs_pl[22*32 + 6 +: 3];
+wire        aux_dsp_sw      = ctrl_regs_pl[22*32 + 9];
+wire        aux_dsp_gpio_en = ctrl_regs_pl[22*32 + 10];
+wire [2:0]  aux_dsp_gpio_sel = ctrl_regs_pl[22*32 + 11 +: 3];
+wire        aux_dig_sw      = ctrl_regs_pl[22*32 + 14];
+wire        aux_dig_gpio_en = ctrl_regs_pl[22*32 + 15];
+wire [2:0]  aux_dig_gpio_sel = ctrl_regs_pl[22*32 + 16 +: 3];
+wire [7:0]  aux_reg3_static = ctrl_regs_pl[22*32 + 24 +: 8];
+wire [15:0] aux_wr_data     = ctrl_regs_pl[23*32 + 0 +: 16];
+wire [5:0]  aux_wr_addr     = ctrl_regs_pl[23*32 + 16 +: 6];
+wire [1:0]  aux_wr_slot     = ctrl_regs_pl[23*32 + 22 +: 2];
+wire        aux_wr_bank     = ctrl_regs_pl[23*32 + 24];
+wire        aux_wr_is_len   = ctrl_regs_pl[23*32 + 25];
+wire        aux_wr_toggle   = ctrl_regs_pl[24*32 + 0];
+wire        aux_inj_toggle  = ctrl_regs_pl[24*32 + 1];
+wire [15:0] aux_inj_cmd     = ctrl_regs_pl[24*32 + 16 +: 16];
+
+// Toggle -> 1-cycle pulse converters (payload regs are written by the host in
+// prior AXI transactions, so they are long stable when the toggle flips).
+logic aux_wr_toggle_d, aux_inj_toggle_d;
+logic aux_wr_en, aux_inj_req;
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        aux_wr_toggle_d  <= 1'b0;
+        aux_inj_toggle_d <= 1'b0;
+        aux_wr_en        <= 1'b0;
+        aux_inj_req      <= 1'b0;
+    end else begin
+        aux_wr_toggle_d  <= aux_wr_toggle;
+        aux_inj_toggle_d <= aux_inj_toggle;
+        aux_wr_en        <= aux_wr_toggle  ^ aux_wr_toggle_d;
+        aux_inj_req      <= aux_inj_toggle ^ aux_inj_toggle_d;
+    end
+end
+
+// Packet strobes. packet_start = first state of each transmitted packet (same
+// instant digital_in is latched); seq_advance = last state (use-then-advance,
+// so the first packet after start plays bank entry 0).
+wire packet_start = transmission_active && is_first_cycle && (state_counter == 7'd0);
+wire seq_advance  = transmission_active && is_last_cycle  && is_last_state;
+
+// aux_seq_en latched once per packet boundary: the command-source mux and the
+// override can never change source mid-packet.
+logic aux_seq_en_pkt;
+always_ff @(posedge clk) begin
+    if (!rstn)
+        aux_seq_en_pkt <= 1'b0;
+    else if (!transmission_active || (is_last_cycle && is_last_state))
+        aux_seq_en_pkt <= aux_seq_en;
+end
+
+logic [47:0] aux_seq_cmds;     // raw sequencer outputs (slot i at [i*16 +: 16])
+logic [47:0] aux_cmds_final;   // post-override commands actually serialized
+logic [2:0]  aux_bank_active;
+logic [17:0] aux_slot_indices;
+logic        aux_inject_active;
+logic        aux_dsp_force_h, aux_fs_active, aux_digout_state;
+
+aux_command_sequencer #(.ADDR_W(6), .NSLOTS(3)) aux_seq_inst (
+    .clk          (clk),
+    .rstn         (rstn),
+    .seq_advance  (seq_advance),
+    .seq_hold     (!transmission_active || !aux_seq_en),
+    .bank_select  (aux_bank_sel),
+    .wr_en        (aux_wr_en),
+    .wr_slot      (aux_wr_slot),
+    .wr_bank      (aux_wr_bank),
+    .wr_is_length (aux_wr_is_len),
+    .wr_addr      (aux_wr_addr),
+    .wr_data      (aux_wr_data),
+    .inject_req   (aux_inj_req),
+    .inject_cmd   (aux_inj_cmd),
+    .inject_active(aux_inject_active),
+    .aux_cmds     (aux_seq_cmds),
+    .bank_active  (aux_bank_active),
+    .slot_indices (aux_slot_indices)
+);
+
+override_layer override_inst (
+    .clk               (clk),
+    .rstn              (rstn),
+    .packet_start      (packet_start),
+    .enable            (aux_seq_en_pkt),
+    .digital_in        (digital_in),
+    .fs_sw             (aux_fs_sw),
+    .fs_gpio_en        (aux_fs_gpio_en),
+    .fs_gpio_sel       (aux_fs_gpio_sel),
+    .dsp_sw            (aux_dsp_sw),
+    .dsp_gpio_en       (aux_dsp_gpio_en),
+    .dsp_gpio_sel      (aux_dsp_gpio_sel),
+    .digout_sw         (aux_dig_sw),
+    .digout_gpio_en    (aux_dig_gpio_en),
+    .digout_gpio_sel   (aux_dig_gpio_sel),
+    .reg3_static       (aux_reg3_static),
+    .cmds_in           (aux_seq_cmds),
+    .cmds_out          (aux_cmds_final),
+    .dsp_force_h       (aux_dsp_force_h),
+    .fast_settle_active(aux_fs_active),
+    .digout_state      (aux_digout_state)
+);
+
+// Command-echo identity (command-bank-design.md). SPI readback alignment:
+// the response to the command issued at cycle C is captured at cycle C+2, so
+// packet word 34 = response to THIS packet's slot-1 command (cycle 32) and
+// packet words 0/1 = responses to the PREVIOUS packet's slot-2/3 commands
+// (cycles 33/34). The header therefore echoes {this slot-1, prev slot-2,
+// prev slot-3} -- each packet fully labels its own aux payload.
+logic [15:0] echo_slot2_prev, echo_slot3_prev;
+logic        echo_valid;           // 0 for the first packet after start
+logic        inject_result_pkt;    // word 1 of THIS packet answers an injection
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        echo_slot2_prev   <= 16'h0;
+        echo_slot3_prev   <= 16'h0;
+        echo_valid        <= 1'b0;
+        inject_result_pkt <= 1'b0;
+    end else if (!transmission_active) begin
+        echo_valid        <= 1'b0;
+        inject_result_pkt <= 1'b0;
+    end else if (seq_advance) begin
+        echo_slot2_prev   <= aux_cmds_final[31:16];
+        echo_slot3_prev   <= aux_cmds_final[47:32];
+        echo_valid        <= 1'b1;
+        inject_result_pkt <= aux_inject_active;
+    end
+end
+
+// One-shot injection result capture: the response to an injected slot-3
+// command (cycle 34 of packet N) lands in cipoX_data[1] of packet N+1
+// (written at state 76 of cycle 1). Latch it one state later and flip the
+// ack toggle for the firmware handshake. [15:0] of each CIPO word is the
+// regular (non-DDR) stream.
+logic        aux_inj_ack;
+logic [31:0] aux_read_result_reg;
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        aux_inj_ack         <= 1'b0;
+        aux_read_result_reg <= 32'h0;
+    end else if (transmission_active && inject_result_pkt &&
+                 (cycle_counter == 6'd1) && (state_counter == 7'd77)) begin
+        aux_read_result_reg <= {cipo1_data[1][15:0], cipo0_data[1][15:0]};
+        aux_inj_ack         <= ~aux_inj_ack;
+    end
+end
+
+// Packet metadata flags (header word 2 bits [15:8]; 0 when sequencer is off)
+logic [7:0] aux_flags;
+assign aux_flags = aux_seq_en_pkt ? {2'b00,
+                                     inject_result_pkt,   // [5]
+                                     echo_valid,          // [4]
+                                     aux_dsp_force_h,     // [3]
+                                     aux_digout_state,    // [2]
+                                     aux_fs_active,       // [1]
+                                     1'b1}                // [0] aux_seq active
+                                  : 8'h00;
 
 // State machine and control logic 
 always_ff @(posedge clk) begin
@@ -270,12 +450,28 @@ always_ff @(posedge clk) begin
             // Uses copi_words_reg[cycle_counter] as the source for each cycle's transmission  
             // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
 
-            // TODO: Add fast settle bit as a toggle and a configurable digital input. 
-            //       Fast settle should only be set or reset once per packet.
-
             if  (state_counter <= 7'd63) begin //removed part of conditional
-                logic [3:0] bit_index = ~state_counter[5:2];  // MSB first: ~0=15, ~1=14, ..., ~15=0
-                copi <= copi_words_reg[cycle_counter][bit_index];
+                logic [3:0]  bit_index;
+                logic [1:0]  aux_slot;
+                logic [15:0] tx_word;
+                bit_index = ~state_counter[5:2];  // MSB first: ~0=15, ~1=14, ..., ~15=0
+                // Aux slot for cycles 32..34 (32->0, 33->1, 34->2); 0 elsewhere
+                // so the part-select below is always in range.
+                aux_slot = (cycle_counter >= 6'd32) ? cycle_counter[1:0] : 2'd0;
+                // Command-source mux: when the aux sequencer is enabled (latched
+                // per packet) the 3 aux cycles come from the post-override
+                // sequencer bundle; otherwise the legacy static table -- with
+                // aux_seq_en==0 this is bit-identical to the original datapath.
+                if (aux_seq_en_pkt && (cycle_counter >= 6'd32))
+                    tx_word = aux_cmds_final[aux_slot*16 +: 16];
+                else
+                    tx_word = copi_words_reg[cycle_counter];
+                // DSP reset ("digital fast settle"): force bit H on channel
+                // CONVERTs (cycles 0..31) while requested.
+                if (aux_seq_en_pkt && aux_dsp_force_h &&
+                    (cycle_counter < 6'd32) && (tx_word[15:14] == 2'b00))
+                    tx_word[0] = 1'b1;
+                copi <= tx_word[bit_index];
             end
             
         end
@@ -309,7 +505,8 @@ end
 logic [7:0] digital_in_latched;
 
 // Latch digital inputs at the start of each packet
-// TODO: Add the ability to toggle fast settle based on a configured pin
+// (Fast settle / digout GPIO triggers sample digital_in at the same instant,
+// inside override_layer.)
 
 always_ff @(posedge clk) begin
     if (!rstn) begin
@@ -347,7 +544,19 @@ always_ff @(posedge clk) begin
                     case (state_counter)
                         7'd0: fifo_write_data <= {MAGIC_NUMBER_HIGH, MAGIC_NUMBER_LOW}; // magic number
                         7'd1: fifo_write_data <= timestamp;
-                        7'd2: fifo_write_data <= {56'h0, digital_in_latched};           // Digital inputs + reserved
+                        // Digital inputs + aux flags + command-echo identity:
+                        //   [7:0]   digital_in, [15:8] aux_flags (0 when seq off),
+                        //   [31:16] this packet's slot-1 command (result @ word 34),
+                        //   [47:32] prev packet's slot-2 command (result @ word 0),
+                        //   [63:48] prev packet's slot-3 command (result @ word 1).
+                        // With aux_seq_en==0 everything above [7:0] is 0 -> the
+                        // word is bit-identical to the legacy header.
+                        7'd2: fifo_write_data <= {
+                            aux_seq_en_pkt ? echo_slot3_prev      : 16'h0,
+                            aux_seq_en_pkt ? echo_slot2_prev      : 16'h0,
+                            aux_seq_en_pkt ? aux_cmds_final[15:0] : 16'h0,
+                            aux_flags,
+                            digital_in_latched};
                         7'd3: fifo_write_data <= 64'h0;  // BREADCRUMB: Future analog channels 0-3 (4x16-bit values)
                         7'd4: fifo_write_data <= 64'h0;  // BREADCRUMB: Future analog channels 4-7 (4x16-bit values)                        // TODO: Add another state here to transmit 64 bits of non-neural input and other sample-specific metadata
                         // Metadata - value of the current "extra" register read from this cycle
@@ -434,6 +643,28 @@ assign status_regs_pl[7*32 +: 32] = ctrl_regs_pl[1*32 +: 32]; // reflected
 assign status_regs_pl[8*32 +: 32] = ctrl_regs_pl[2*32 +: 32]; // reflected
 assign status_regs_pl[9*32 +: 32] = ctrl_regs_pl[3*32 +: 32]; // reflected
 
-// Status register 11 will be added by wrapper
+// Status register 11 will be added by wrapper (FIFO/BRAM). Aux sequencer
+// status goes out via dedicated ports -> wrapper status regs 11/12:
+//   aux_status: [2:0] bank_active, [3] aux_seq_en (per-packet latched),
+//               [4] fast_settle_active, [5] digout_state, [6] dsp_force_h,
+//               [7] inject ack toggle, [13:8] slot-0 index, [21:16] slot-1
+//               index, [29:24] slot-2 index.
+//   aux_read_result: {cipo1_regular[15:0], cipo0_regular[15:0]} of the last
+//               injected command's response (firmware READ_REGISTER path).
+assign aux_status = {
+    2'b00,
+    aux_slot_indices[17:12],   // [29:24] slot-2 (cycle 34) index
+    2'b00,
+    aux_slot_indices[11:6],    // [21:16] slot-1 (cycle 33) index
+    2'b00,
+    aux_slot_indices[5:0],     // [13:8]  slot-0 (cycle 32) index
+    aux_inj_ack,               // [7]
+    aux_dsp_force_h,           // [6]
+    aux_digout_state,          // [5]
+    aux_fs_active,             // [4]
+    aux_seq_en_pkt,            // [3]
+    aux_bank_active            // [2:0]
+};
+assign aux_read_result = aux_read_result_reg;
 
 endmodule

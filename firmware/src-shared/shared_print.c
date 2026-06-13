@@ -165,7 +165,7 @@ void send_message(const char *format, ...) {
     int timeout = 100;
     uint32_t write_idx = print_buffer->write_idx;
     while ((print_buffer->entries[write_idx].data_present == 1) && timeout -- > 0) { // Someone already wrote to this buffer!
-        usleep(100); 
+        usleep(100);
     }
 
     if (timeout <= 0) {

@@ -52,9 +52,18 @@ ID   | Command          | Param1              | Param2
 #define CMD_DUMP_BRAM       0x41
 #define CMD_SET_UDP_DEST    0x50
 #define CMD_PING            0x60
+// Aux command sequencer / override layer (Epic A)
+#define CMD_AUX_WRITE_WORD  0x70   // param1 = slot | bank<<8 | is_len<<16; param2 = addr<<16 | data
+#define CMD_AUX_BANK_SELECT 0x71   // param1 = slot; param2 = bank (confirms swap before ACK)
+#define CMD_AUX_SEQ_EN      0x72   // param1 = 0/1
+#define CMD_READ_REGISTER   0x73   // param1 = reg; responds 4-byte {cipo1,cipo0} result
+#define CMD_WRITE_REGISTER  0x74   // param1 = reg; param2 = value; responds 4-byte echo
+#define CMD_SET_FAST_SETTLE 0x75   // param1 = amp: sw | gpio_en<<1 | pin<<4; param2 = dsp: same layout
+#define CMD_SET_DIGOUT      0x76   // param1 = sw | gpio_en<<1 | pin<<4; param2 = reg3_static byte
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
+
 
 typedef struct {
     uint32_t magic;
@@ -64,8 +73,11 @@ typedef struct {
     uint32_t param2;
 } cmd_packet_t;
 
-// Static receive buffer for handling partial commands
-static uint8_t recv_buffer[CMD_PACKET_SIZE];
+// Static receive buffer for handling partial commands.
+// Explicitly word-aligned: it is cast to cmd_packet_t*, and the TCP payload
+// it is filled from is NOT word-aligned (14-byte Ethernet header), so the
+// alignment must come from this buffer itself.
+static uint8_t recv_buffer[CMD_PACKET_SIZE] __attribute__((aligned(8)));
 static uint16_t recv_buffer_pos = 0;
 
 // TCP connection tracking for hotplug support
@@ -184,6 +196,15 @@ void collect_status_data(status_response_t* status) {
     // Get FIFO count
     uint32_t status10 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET);
     status->fifo_count = (status10 >> 14) & 0x1FF;
+
+    // Aux command sequencer status
+    uint32_t s11 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET);
+    status->aux_read_result = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_12_OFFSET);
+    status->aux_bank_active = s11 & AUX_STATUS_BANK_ACTIVE_MASK;
+    status->aux_flags       = (s11 >> 3) & 0x1F;
+    status->aux_idx[0]      = (s11 >> AUX_STATUS_IDX0_SHIFT) & AUX_STATUS_IDX_MASK;
+    status->aux_idx[1]      = (s11 >> AUX_STATUS_IDX1_SHIFT) & AUX_STATUS_IDX_MASK;
+    status->aux_idx[2]      = (s11 >> AUX_STATUS_IDX2_SHIFT) & AUX_STATUS_IDX_MASK;
 }
 
 // ============================================================================
@@ -223,7 +244,7 @@ static void send_response(struct tcp_pcb *tpcb, uint32_t ack_id, uint8_t status,
 
 static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
     uint8_t status = ACK_SUCCESS;
-    
+
     switch (cmd->cmd_id) {
         case CMD_START:
             command_flags->enable_streaming_flag = 1;
@@ -316,6 +337,87 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             return;  // Early return - don't call send_ack
         }
             
+        case CMD_AUX_WRITE_WORD: {
+            int slot   = cmd->param1 & 0x3;
+            int bank   = (cmd->param1 >> 8) & 0x1;
+            int is_len = (cmd->param1 >> 16) & 0x1;
+            int addr   = (cmd->param2 >> 16) & 0x3F;
+            uint16_t data = cmd->param2 & 0xFFFF;
+            if (is_len)
+                pl_aux_write_length(slot, bank, data & 0x3F, (data >> 8) & 0x3F);
+            else
+                pl_aux_write_word(slot, bank, addr, data);
+            break;
+        }
+
+        case CMD_AUX_BANK_SELECT: {
+            int slot = cmd->param1 & 0x3;
+            int bank = cmd->param2 & 0x1;
+            pl_aux_select_bank(slot, bank);
+            if (!pl_aux_confirm_bank(slot, bank, 50))
+                status = ACK_ERROR;
+            send_message("Binary Command: AUX_BANK_SELECT slot=%d bank=%d %s\r\n",
+                         slot, bank, status == ACK_SUCCESS ? "OK" : "TIMEOUT");
+            break;
+        }
+
+        case CMD_AUX_SEQ_EN:
+            pl_aux_seq_enable(cmd->param1 ? 1 : 0);
+            send_message("Binary Command: AUX_SEQ_EN %u\r\n", cmd->param1 ? 1 : 0);
+            break;
+
+        case CMD_READ_REGISTER: {
+            uint32_t result = 0;
+            if (pl_read_rhd_register(cmd->param1 & 0x3F, &result)) {
+                send_response(tpcb, cmd->ack_id, ACK_SUCCESS, &result, sizeof(result));
+                send_message("Binary Command: READ_REGISTER %u -> 0x%08X\r\n",
+                             cmd->param1 & 0x3F, result);
+                return;  // response already sent
+            }
+            status = ACK_ERROR;
+            send_message("Binary Command: READ_REGISTER %u FAILED\r\n", cmd->param1 & 0x3F);
+            break;
+        }
+
+        case CMD_WRITE_REGISTER: {
+            uint32_t result = 0;
+            if (pl_write_rhd_register(cmd->param1 & 0x3F, cmd->param2 & 0xFF, &result)) {
+                send_response(tpcb, cmd->ack_id, ACK_SUCCESS, &result, sizeof(result));
+                send_message("Binary Command: WRITE_REGISTER %u 0x%02X -> 0x%08X\r\n",
+                             cmd->param1 & 0x3F, cmd->param2 & 0xFF, result);
+                return;
+            }
+            status = ACK_ERROR;
+            send_message("Binary Command: WRITE_REGISTER %u FAILED\r\n", cmd->param1 & 0x3F);
+            break;
+        }
+
+        case CMD_SET_FAST_SETTLE: {
+            uint32_t cfg = 0;
+            if (cmd->param1 & 0x1) cfg |= AUX_CTRL_FS_SW;
+            if (cmd->param1 & 0x2) cfg |= AUX_CTRL_FS_GPIO_EN;
+            cfg |= ((cmd->param1 >> 4) & 0x7) << AUX_CTRL_FS_GPIO_SEL_SHIFT;
+            if (cmd->param2 & 0x1) cfg |= AUX_CTRL_DSP_SW;
+            if (cmd->param2 & 0x2) cfg |= AUX_CTRL_DSP_GPIO_EN;
+            cfg |= ((cmd->param2 >> 4) & 0x7) << AUX_CTRL_DSP_GPIO_SEL_SHIFT;
+            pl_aux_set_fast_settle(cfg);
+            send_message("Binary Command: SET_FAST_SETTLE 0x%X 0x%X\r\n",
+                         cmd->param1, cmd->param2);
+            break;
+        }
+
+        case CMD_SET_DIGOUT: {
+            uint32_t cfg = 0;
+            if (cmd->param1 & 0x1) cfg |= AUX_CTRL_DIGOUT_SW;
+            if (cmd->param1 & 0x2) cfg |= AUX_CTRL_DIGOUT_GPIO_EN;
+            cfg |= ((cmd->param1 >> 4) & 0x7) << AUX_CTRL_DIGOUT_GPIO_SEL_SHIFT;
+            cfg |= (cmd->param2 & 0xFF) << AUX_CTRL_REG3_STATIC_SHIFT;
+            pl_aux_set_digout(cfg);
+            send_message("Binary Command: SET_DIGOUT 0x%X reg3=0x%02X\r\n",
+                         cmd->param1, cmd->param2 & 0xFF);
+            break;
+        }
+
         case CMD_DUMP_BRAM:
             command_flags->dump_bram_flag = 1;
             command_flags->start_bram_addr = cmd->param1;
@@ -383,11 +485,21 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
         }
     }
     
-    // Process complete commands directly from TCP buffer
+    // Process complete commands from the TCP buffer.
+    //
+    // IMPORTANT: copy each command into a word-aligned struct instead of
+    // casting into the pbuf payload. The TCP payload sits at a halfword
+    // boundary (14-byte Ethernet header), so a cmd_packet_t* into it is
+    // misaligned. Plain LDRs tolerate that on the A9 (SCTLR.A=0), which is
+    // why this "worked" for years -- but the compiler is allowed to merge
+    // adjacent field reads into LDRD, which ALIGNMENT-FAULTS on non-word
+    // addresses regardless. -O3 did exactly that for one handler (the aux
+    // bank-select case) and hard-wedged the CPU in the abort handler.
     while (data_pos + CMD_PACKET_SIZE <= data_len) {
-        cmd_packet_t *cmd = (cmd_packet_t *)&data[data_pos];
-        if (cmd->magic == CMD_MAGIC) {
-            process_command(tpcb, cmd);
+        cmd_packet_t cmd_aligned __attribute__((aligned(8)));
+        memcpy(&cmd_aligned, &data[data_pos], CMD_PACKET_SIZE);
+        if (cmd_aligned.magic == CMD_MAGIC) {
+            process_command(tpcb, &cmd_aligned);
             data_pos += CMD_PACKET_SIZE;
         } else {
             // Skip bad data and look for next magic

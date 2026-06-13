@@ -52,25 +52,92 @@
 // AXI Lite control interface base address
 #define PL_CTRL_BASE_ADDR 0x40000000
 
+// Number of PL control registers (must match axi_lite_registers N_CTRL --
+// the status registers are read back starting right after the control block)
+#define PL_N_CTRL_REGS      25
+
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
 #define CTRL_REG_1_OFFSET   (1 * 4)   // Loop count
 #define CTRL_REG_2_OFFSET   (2 * 4)   // Phase select, channel enable
 #define CTRL_REG_MOSI_START_OFFSET  (CTRL_REG_0_OFFSET + (4 * 4)) // Offset for MOSI control words
 
-// Status register offsets
-#define STATUS_REG_0_OFFSET  (22 * 4)  // Dynamic status + counters
-#define STATUS_REG_1_OFFSET  (23 * 4)  // Reflected control parameters
-#define STATUS_REG_2_OFFSET  (24 * 4)  // Packets sent
-#define STATUS_REG_3_OFFSET  (25 * 4)  // Timestamp low [31:0]
-#define STATUS_REG_4_OFFSET  (26 * 4)  // Timestamp high [63:32]
-#define STATUS_REG_5_OFFSET  (27 * 4)  // Loop count (registered)
+// Aux command sequencer / override layer control registers (PL regs 22..24)
+#define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // enable, bank select, fast settle/digout/dsp config
+#define CTRL_REG_AUX_WRITE_OFFSET   (23 * 4)  // bank write port payload
+#define CTRL_REG_AUX_STROBE_OFFSET  (24 * 4)  // write/inject toggles + inject command
+
+// CTRL_REG_AUX_CTRL bit fields
+#define AUX_CTRL_SEQ_EN             (1u << 0)
+#define AUX_CTRL_BANK_SEL_SHIFT     1          // [3:1] bank select, 1 bit per slot
+#define AUX_CTRL_BANK_SEL_MASK      (0x7u << 1)
+#define AUX_CTRL_FS_SW              (1u << 4)  // software amp fast settle level
+#define AUX_CTRL_FS_GPIO_EN         (1u << 5)
+#define AUX_CTRL_FS_GPIO_SEL_SHIFT  6          // [8:6] digital_in pin select
+#define AUX_CTRL_FS_GPIO_SEL_MASK   (0x7u << 6)
+#define AUX_CTRL_DSP_SW             (1u << 9)  // software DSP-reset (CONVERT bit H) level
+#define AUX_CTRL_DSP_GPIO_EN        (1u << 10)
+#define AUX_CTRL_DSP_GPIO_SEL_SHIFT 11         // [13:11]
+#define AUX_CTRL_DSP_GPIO_SEL_MASK  (0x7u << 11)
+#define AUX_CTRL_DIGOUT_SW          (1u << 14) // software digout level
+#define AUX_CTRL_DIGOUT_GPIO_EN     (1u << 15)
+#define AUX_CTRL_DIGOUT_GPIO_SEL_SHIFT 16      // [18:16]
+#define AUX_CTRL_DIGOUT_GPIO_SEL_MASK  (0x7u << 16)
+#define AUX_CTRL_REG3_STATIC_SHIFT  24         // [31:24] RHD Reg-3 bits D7..D1 (D0 = live digout)
+#define AUX_CTRL_REG3_STATIC_MASK   (0xFFu << 24)
+
+// CTRL_REG_AUX_WRITE packing: [15:0] data, [21:16] addr, [23:22] slot,
+// [24] bank, [25] is_length (length record data = {2'b0,end[5:0],2'b0,loop[5:0]})
+#define AUX_WRITE_PACK(slot, bank, is_len, addr, data) \
+    ( ((uint32_t)(data) & 0xFFFFu)            | \
+      (((uint32_t)(addr) & 0x3Fu)   << 16)    | \
+      (((uint32_t)(slot) & 0x3u)    << 22)    | \
+      (((uint32_t)(bank) & 0x1u)    << 24)    | \
+      (((uint32_t)(is_len) & 0x1u)  << 25) )
+#define AUX_LENGTH_DATA(loop_idx, end_idx) \
+    ( ((uint32_t)(loop_idx) & 0x3Fu) | (((uint32_t)(end_idx) & 0x3Fu) << 8) )
+
+// CTRL_REG_AUX_STROBE bits
+#define AUX_STROBE_WRITE_TOGGLE     (1u << 0)
+#define AUX_STROBE_INJECT_TOGGLE    (1u << 1)
+#define AUX_STROBE_INJECT_CMD_SHIFT 16         // [31:16] injected command
+
+// Bank size (entries per bank; matches aux_command_sequencer ADDR_W=6)
+#define AUX_BANK_ENTRIES            64
+
+// Status register offsets (status block starts after the control block)
+#define STATUS_REG_BASE      (PL_N_CTRL_REGS * 4)
+#define STATUS_REG_0_OFFSET  (STATUS_REG_BASE + 0 * 4)   // Dynamic status + counters
+#define STATUS_REG_1_OFFSET  (STATUS_REG_BASE + 1 * 4)   // Reflected control parameters
+#define STATUS_REG_2_OFFSET  (STATUS_REG_BASE + 2 * 4)   // Packets sent
+#define STATUS_REG_3_OFFSET  (STATUS_REG_BASE + 3 * 4)   // Timestamp low [31:0]
+#define STATUS_REG_4_OFFSET  (STATUS_REG_BASE + 4 * 4)   // Timestamp high [63:32]
+#define STATUS_REG_5_OFFSET  (STATUS_REG_BASE + 5 * 4)   // Loop count (registered)
 // Mirrored control registers in status space
-#define STATUS_REG_6_OFFSET  (28 * 4)  // Mirror of CTRL_REG_0 (enable, reset, etc.)
-#define STATUS_REG_7_OFFSET  (29 * 4)  // Mirror of CTRL_REG_1 (loop count)
-#define STATUS_REG_8_OFFSET  (30 * 4)  // Mirror of CTRL_REG_2 (phase select, debug mode)
-#define STATUS_REG_9_OFFSET  (31 * 4)  // Mirror of CTRL_REG_3 (reserved)
-#define STATUS_REG_10_OFFSET (32 * 4)  // BRAM write address + FIFO count (added by wrapper)
+#define STATUS_REG_6_OFFSET  (STATUS_REG_BASE + 6 * 4)   // Mirror of CTRL_REG_0 (enable, reset, etc.)
+#define STATUS_REG_7_OFFSET  (STATUS_REG_BASE + 7 * 4)   // Mirror of CTRL_REG_1 (loop count)
+#define STATUS_REG_8_OFFSET  (STATUS_REG_BASE + 8 * 4)   // Mirror of CTRL_REG_2 (phase select, debug mode)
+#define STATUS_REG_9_OFFSET  (STATUS_REG_BASE + 9 * 4)   // Mirror of CTRL_REG_3 (reserved)
+#define STATUS_REG_10_OFFSET (STATUS_REG_BASE + 10 * 4)  // BRAM write address + FIFO count (added by wrapper)
+#define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
+#define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
+
+// STATUS_REG_11 bit fields
+#define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
+#define AUX_STATUS_SEQ_EN            (1u << 3) // per-packet latched aux_seq_en
+#define AUX_STATUS_FS_ACTIVE         (1u << 4)
+#define AUX_STATUS_DIGOUT            (1u << 5)
+#define AUX_STATUS_DSP_ACTIVE        (1u << 6)
+#define AUX_STATUS_INJECT_ACK        (1u << 7) // toggles when an injection result lands
+#define AUX_STATUS_IDX0_SHIFT        8         // [13:8]  slot-0 index
+#define AUX_STATUS_IDX1_SHIFT        16        // [21:16] slot-1 index
+#define AUX_STATUS_IDX2_SHIFT        24        // [29:24] slot-2 index
+#define AUX_STATUS_IDX_MASK          0x3Fu
+
+// RHD2000 SPI command encodings (datasheet-confirmed)
+#define RHD_CMD_CONVERT(ch)     ((uint16_t)(((ch) & 0x3F) << 8))
+#define RHD_CMD_WRITE(reg, val) ((uint16_t)(0x8000 | (((reg) & 0x3F) << 8) | ((val) & 0xFF)))
+#define RHD_CMD_READ(reg)       ((uint16_t)(0xC000 | (((reg) & 0x3F) << 8)))
 
 // Control register bits
 #define CTRL_ENABLE_TRANSMISSION (1 << 0)
@@ -124,7 +191,7 @@
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
 
-// Status response structure (86 bytes total)
+// Status response structure (98 bytes total)
 typedef struct __attribute__((packed)) {
     // Version and identification (8 bytes)
     uint16_t version;
@@ -164,7 +231,14 @@ typedef struct __attribute__((packed)) {
     uint16_t udp_dest_port;
     uint16_t udp_packet_format;
     uint32_t udp_bytes_sent;
-    
+
+    // Aux command sequencer status (12 bytes; appended -- keep net.py in sync)
+    uint32_t aux_read_result;   // last injected command's response {cipo1, cipo0}
+    uint8_t  aux_bank_active;   // [2:0] active bank per slot
+    uint8_t  aux_flags;         // bit0 seq_en, bit1 fs_active, bit2 digout, bit3 dsp, bit4 inject_ack
+    uint8_t  aux_idx[3];        // per-slot sequence index
+    uint8_t  reserved5[3];
+
 } status_response_t;
 
 // Flag definitions
@@ -267,6 +341,21 @@ int pl_set_copi_commands_safe(const uint16_t copi_array[35], const char* sequenc
 void pl_set_convert_sequence(void);
 void pl_set_initialization_sequence(void);
 void pl_set_cable_length_sequence(void);
+
+// Aux command sequencer control (bank upload works DURING acquisition:
+// write the standby bank, select it, then confirm the swap)
+void pl_aux_write_word(int slot, int bank, int addr, uint16_t data);
+void pl_aux_write_length(int slot, int bank, int loop_idx, int end_idx);
+int  pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop_idx);
+void pl_aux_select_bank(int slot, int bank);
+int  pl_aux_confirm_bank(int slot, int bank, int timeout_ms);
+void pl_aux_seq_enable(int enable);
+int  pl_aux_seq_is_enabled(void);
+void pl_aux_set_fast_settle(uint32_t cfg);   // AUX_CTRL fs/dsp bit fields [13:4]
+void pl_aux_set_digout(uint32_t cfg);        // AUX_CTRL digout fields [18:14] + reg3_static [31:24]
+int  pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms);
+int  pl_read_rhd_register(int reg, uint32_t *result);
+int  pl_write_rhd_register(int reg, uint8_t value, uint32_t *result);
 
 // Command to go through all possible cable lengths for cable optimization
 void pl_run_full_cable_test(void);
