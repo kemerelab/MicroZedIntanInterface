@@ -1,6 +1,11 @@
 // File: fifo_bram_interface.sv
-// FIFO stores 64-bit words + 4-bit channel metadata, BRAM writes 32-bit words
-// 3-state FSM: PROCESS_CHUNK (with chunk_index), FINALIZE_PACKET
+// FIFO stores 128-bit words + 8-bit channel metadata, BRAM writes 32-bit words.
+// The 128-bit word holds up to EIGHT 16-bit segments (two SPI ports x 4 streams
+// each); the 8-bit channel mask selects which segments are valid and they are
+// packed tightly into the BRAM/packet. With only the low nibble set (port 0 /
+// single-port mode) the BRAM write stream is bit-identical to the original
+// 64-bit design -- the upper two chunks simply contribute zero segments.
+// FSM: PROCESS_CHUNK (chunk_index 0..3), FINALIZE_PACKET.
 
 module fifo_bram_interface #(
     parameter int BRAM_ADDR_WIDTH = 16,        // Byte address width
@@ -10,19 +15,19 @@ module fifo_bram_interface #(
 )(
     input  logic        clk,
     input  logic        rstn,
-    
+
     // FIFO interface (input side)
-    input  logic        fifo_write_en,
-    input  logic [63:0] fifo_write_data,      // 64-bit data
-    input  logic [3:0]  fifo_channel_mask,    // Which 16-bit segments are valid (travels along with every fifo word)
-    input logic         fifo_packet_end_flag, // Signals end of packet (travels along with every fifo word)
+    input  logic         fifo_write_en,
+    input  logic [127:0] fifo_write_data,     // 128-bit data (up to 8 x 16-bit segments)
+    input  logic [7:0]   fifo_channel_mask,   // Which 16-bit segments are valid (travels along with every fifo word)
+    input  logic         fifo_packet_end_flag,// Signals end of packet (travels along with every fifo word)
 
     output logic        fifo_full,
-    output logic [8:0]  fifo_count,           // Count of 64-bit entries
-    
+    output logic [8:0]  fifo_count,           // Count of 128-bit entries
+
     // Status output for PS monitoring
     output logic [13:0] current_bram_address,
-    
+
     // BRAM interface (output side)
     output logic [15:0] bram_addr,
     output logic [31:0] bram_din,
@@ -38,7 +43,7 @@ initial begin
         $error("FIFO_DEPTH (%d) too large - maximum 512 entries", FIFO_DEPTH);
     end
     if (BRAM_DEPTH_WORDS > (1 << (BRAM_ADDR_WIDTH - 2))) begin
-        $error("BRAM_DEPTH_WORDS (%d) exceeds address space (%d words)", 
+        $error("BRAM_DEPTH_WORDS (%d) exceeds address space (%d words)",
                BRAM_DEPTH_WORDS, (1 << (BRAM_ADDR_WIDTH - 2)));
     end
 end
@@ -48,29 +53,29 @@ localparam int FIFO_PTR_WIDTH = $clog2(FIFO_DEPTH);
 localparam int FIFO_COUNT_WIDTH = $clog2(FIFO_DEPTH + 1);
 localparam int BRAM_WORD_ADDR_WIDTH = $clog2(BRAM_DEPTH_WORDS);
 
-// FIFO storage - 64-bit data + 4-bit channel mask + 1-bit packet end flag
+// FIFO entry = 128-bit data + 8-bit channel mask + 1-bit packet-end flag = 137 bits.
 // Mapped to distributed RAM (LUTRAM): one synchronous write port + one asynchronous
 // read port, and NOT reset element-by-element (see reset block below). Resetting every
-// element forces flip-flop inference (~17.7k FFs) plus a 256:1 read mux and a giant
-// reset fanout; leaving the contents unreset lets Vivado infer memory instead. This
-// mirrors the no-reset pattern used by the capture buffer in bram.sv.
+// element forces flip-flop inference plus a wide read mux and a giant reset fanout;
+// leaving the contents unreset lets Vivado infer memory instead. This mirrors the
+// no-reset pattern used by the capture buffer in bram.sv.
 // Production follow-up: convert to block RAM (requires a synchronous/registered read).
 (* ram_style = "distributed" *)
-logic [68:0] write_fifo [0:FIFO_DEPTH-1]; // 64-bit data + 4-bit mask + 1-bit flag
+logic [136:0] write_fifo [0:FIFO_DEPTH-1]; // 128-bit data + 8-bit mask + 1-bit flag
 logic [FIFO_PTR_WIDTH-1:0] fifo_write_ptr;
 logic [FIFO_PTR_WIDTH-1:0] fifo_read_ptr;
 
 // FIFO status signals
 assign fifo_full = (fifo_count == FIFO_DEPTH);
 
-// State machine for processing 64-bit entries
+// State machine for processing 128-bit entries
 typedef enum logic {
-    PROCESS_CHUNK,    // Process 32-bit chunks (index 0 = low, 1 = high)
+    PROCESS_CHUNK,    // Process 32-bit chunks (index 0..3)
     FINALIZE_PACKET   // Handle leftover 16 bits at packet end
 } process_state_t;
 
 process_state_t process_state;
-logic chunk_index;  // 0 = process lower 32 bits, 1 = process upper 32 bits
+logic [1:0] chunk_index;  // 0..3 = which 32-bit chunk of the 128-bit word
 
 // Data processing registers
 logic [31:0] data_buffer_reg;        // Accumulates 32-bit words for BRAM
@@ -104,8 +109,8 @@ assign current_bram_address = packet_boundary_address;
 
 // Registered FIFO write signals (1 cycle latency)
 logic fifo_write_en_reg;
-logic [63:0] fifo_write_data_reg;
-logic [3:0] fifo_channel_mask_reg;
+logic [127:0] fifo_write_data_reg;
+logic [7:0] fifo_channel_mask_reg;
 
 // Control signals
 logic fifo_write_this_cycle;
@@ -115,11 +120,11 @@ logic fifo_read_this_cycle;
 function automatic logic [31:0] extract_segments(input logic [31:0] word_32, input logic [1:0] mask_2);
     logic [15:0] seg0 = word_32[15:0];
     logic [15:0] seg1 = word_32[31:16];
-    
+
     case (mask_2)
         2'b00: return 32'h0;                   // No segments
         2'b01: return {16'h0, seg0};           // Only segment 0
-        2'b10: return {16'h0, seg1};           // Only segment 1 - TECHNICALLY THIS SHOULD NEVER OCCUR!  
+        2'b10: return {16'h0, seg1};           // Only segment 1 - TECHNICALLY THIS SHOULD NEVER OCCUR!
         2'b11: return {seg1, seg0};            // Both segments
     endcase
 endfunction
@@ -138,17 +143,17 @@ always_ff @(posedge clk) begin
         // FIFO write side
         fifo_write_ptr <= '0;
         fifo_write_en_reg <= 1'b0;
-        fifo_write_data_reg <= 64'h0;
-        fifo_channel_mask_reg <= 4'h0;
-        
+        fifo_write_data_reg <= 128'h0;
+        fifo_channel_mask_reg <= 8'h0;
+
         // FIFO read side
         fifo_read_ptr <= '0;
         fifo_count <= '0;
 
         // State machine
         process_state <= PROCESS_CHUNK;
-        chunk_index <= 1'b0;
-        
+        chunk_index <= 2'd0;
+
         // Data processing
         data_buffer_reg <= 32'h0;
         buffer_valid_reg <= 1'b0;
@@ -156,7 +161,7 @@ always_ff @(posedge clk) begin
         stash_valid <= 1'b0;
         current_packet_end <= 1'b0;
         packet_end_reg <= 1'b0;
-        
+
         // BRAM interface
         bram_addr_reg <= 16'h0;
         bram_din_reg <= 32'h0;
@@ -166,25 +171,25 @@ always_ff @(posedge clk) begin
         packet_boundary_address <= '0;
 
         // write_fifo (the FIFO storage array) is intentionally NOT reset here. Clearing
-        // every element would force FF inference + a ~21k-load reset net; leaving it
+        // every element would force FF inference + a wide reset net; leaving it
         // unreset lets it map to distributed RAM. Safe because an entry is only ever
         // read after it has been written (reads are gated by fifo_count > 0, and
         // read_ptr trails write_ptr by exactly fifo_count written entries).
 
     end else begin
-        
+
         // ====================================================================
         // FIFO WRITE SIDE (Data Generator → FIFO)
         // ====================================================================
-        
+
         // Register the input signals (1 cycle delay for clean timing)
         fifo_write_en_reg <= fifo_write_en;
         fifo_write_data_reg <= fifo_write_data;
         fifo_channel_mask_reg <= fifo_channel_mask;
-        
+
         // Determine if FIFO write will happen this cycle
         fifo_write_this_cycle = fifo_write_en_reg && !fifo_full;
-        
+
         // Perform FIFO write operation
         if (fifo_write_this_cycle) begin
             write_fifo[fifo_write_ptr] <= {fifo_packet_end_flag, fifo_channel_mask_reg, fifo_write_data_reg};
@@ -194,7 +199,7 @@ always_ff @(posedge clk) begin
         // ====================================================================
         // DATA PROCESSING STATE MACHINE
         // ====================================================================
-        
+
         // Default: no BRAM write
         bram_en_reg <= 1'b0;
         bram_we_reg <= 4'h0;
@@ -203,34 +208,38 @@ always_ff @(posedge clk) begin
         buffer_valid_reg <= 1'b0;
 
         case (process_state)
-            
+
             PROCESS_CHUNK: begin
                 // Process current chunk if FIFO has data
                 if (fifo_count > 0) begin
-                    // Read FIFO entry directly (pointer doesn't advance until both chunks done)
-                    logic [68:0] fifo_entry = write_fifo[fifo_read_ptr];
-                    logic packet_end = fifo_entry[68];
-                    logic [3:0] channel_mask = fifo_entry[67:64];
-                    logic [63:0] data_word = fifo_entry[63:0];
-                    
+                    // Read FIFO entry directly (pointer doesn't advance until all chunks done).
+                    // Declared then blocking-assigned (NOT declared-with-initializer) so the
+                    // read re-evaluates every execution: a block-local `logic x = expr;` is a
+                    // run-once static initializer under xsim, which would latch stale data.
+                    logic [136:0] fifo_entry;
+                    logic packet_end;
+                    logic [7:0] channel_mask;
+                    logic [127:0] data_word;
+
                     logic [1:0] chunk_mask;
                     logic [31:0] chunk_word;
                     logic [31:0] extracted;
                     logic [1:0] seg_count;
-                    
+
+                    fifo_entry = write_fifo[fifo_read_ptr];
+                    packet_end = fifo_entry[136];
+                    channel_mask = fifo_entry[135:128];
+                    data_word = fifo_entry[127:0];
+
                     // Store packet end flag for this entry
                     current_packet_end <= packet_end;
 
-                    if (chunk_index == 1'b0) begin
-                        // Process lower 32 bits (chunk 0)
-                        chunk_mask = channel_mask[1:0];    // Bits [1:0]
-                        chunk_word = data_word[31:0];      // Bits [31:0]  
-                    end else begin
-                        // Process upper 32 bits (chunk 1)
-                        chunk_mask = channel_mask[3:2];    // Bits [3:2]
-                        chunk_word = data_word[63:32];     // Bits [63:32]
-                    end
-                    
+                    // Select the 32-bit chunk and its 2-bit sub-mask for this chunk_index
+                    // (chunk 0 = segments 0/1 = port-0 reg/ddr cipo0; ... chunk 3 = the
+                    //  upper port-1 ddr streams).
+                    chunk_mask = channel_mask[chunk_index*2 +: 2];
+                    chunk_word = data_word[chunk_index*32 +: 32];
+
                     // Common processing logic based on channel enable mask
                     extracted = extract_segments(chunk_word, chunk_mask);
                     seg_count = count_segments(chunk_mask);
@@ -265,9 +274,9 @@ always_ff @(posedge clk) begin
                     end
 
                     // State transition logic
-                    if (chunk_index == 1'b1) begin
-                        // Just finished upper chunk
-                        if (current_packet_end && next_stash_valid) begin 
+                    if (chunk_index == 2'd3) begin
+                        // Just finished the last (4th) chunk of this entry
+                        if (current_packet_end && next_stash_valid) begin
                             // Need to finalize the packet with remaining stash
                             process_state <= FINALIZE_PACKET;
                         end else begin
@@ -277,38 +286,38 @@ always_ff @(posedge clk) begin
                             fifo_read_ptr <= fifo_read_ptr + 1;
                             fifo_read_this_cycle = 1'b1;
                             process_state <= PROCESS_CHUNK;
-                            chunk_index <= 1'b0;  // Reset to lower chunk for next entry
+                            chunk_index <= 2'd0;  // Reset to first chunk for next entry
                         end
                     end else begin
-                        // Move from chunk 0 to chunk 1
+                        // Move to the next chunk of this entry
                         process_state <= PROCESS_CHUNK;
-                        chunk_index <= 1'b1;
+                        chunk_index <= chunk_index + 2'd1;
                     end
                 end
             end
-            
+
             FINALIZE_PACKET: begin
                 // Handle leftover stash at packet end
                 data_buffer_reg <= {16'h0000, stash};  // Pad with zeros
                 buffer_valid_reg <= 1'b1;
                 packet_end_reg <= current_packet_end;
                 next_stash_valid = 1'b0; // Cleaned up and ready to go for next
-                
+
                 // Consume FIFO entry and return to normal processing
                 fifo_read_ptr <= fifo_read_ptr + 1;
                 fifo_read_this_cycle = 1'b1;
                 process_state <= PROCESS_CHUNK;
-                chunk_index <= 1'b0;
+                chunk_index <= 2'd0;
             end
-            
+
         endcase
 
         stash_valid <= next_stash_valid;
-        
+
         // ====================================================================
         // BRAM WRITE LOGIC
         // ====================================================================
-        
+
         // Write buffer to BRAM when it's valid
         if (buffer_valid_reg) begin
             logic [BRAM_WORD_ADDR_WIDTH-1:0] next_address;
@@ -317,20 +326,20 @@ always_ff @(posedge clk) begin
             bram_din_reg <= data_buffer_reg;
             bram_en_reg <= 1'b1;
             bram_we_reg <= 4'hF;
-            
+
             // Advance BRAM address
             next_address = (write_address >= (BRAM_DEPTH_WORDS - 1)) ? '0 : (write_address + 1);
             write_address <= next_address;
-            
+
             if (packet_end_reg) begin
                 packet_boundary_address <= next_address;
             end
         end
-        
+
         // ====================================================================
         // FIFO COUNT MANAGEMENT
         // ====================================================================
-        
+
         // Update FIFO count based on operations (perfectly synchronized!)
         case ({fifo_write_this_cycle, fifo_read_this_cycle})
             2'b00: fifo_count <= fifo_count;        // No operations
