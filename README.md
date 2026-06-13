@@ -48,3 +48,49 @@ Here is the carrier PCB bare and with the MicroZed installed.
 Run `bootgen -image scripts/boot.bif -o BOOT.bin -w` and copy the resulting `BOOT.bin` file to the FAT32
 formatted `Boot` partition on your SD card.
 
+A prebuilt, current image is also kept at [`blobs/BOOT.bin`](blobs/BOOT.bin) — copy that
+straight to the `Boot` partition if you don't want to rebuild. After **any PL change** the
+bitstream must be re-staged into the path referenced by `scripts/boot.bif` before running
+`bootgen` (see the build notes in [`CLAUDE.md`](CLAUDE.md)).
+
+## Streaming data to a host
+
+The board boots into a bare-metal application that, once an Ethernet link is up, listens for
+**TCP control** commands on port 6000 and streams acquisition data over **UDP** on port 5000.
+The default device IP is `192.168.18.10` (configure your host on the same subnet). Two host
+clients speak this protocol:
+
+### `remote/net.py` — reference client (Python)
+
+A single-file command-line client used for bring-up, cable/phase auto-detection, and testing:
+
+```bash
+cd remote && python3 net.py        # connects to ZYNQ_IP (default 192.168.18.10)
+```
+
+It auto-detects your host IP and reconfigures the board's UDP destination over TCP, then drops
+into an interactive prompt (`start`, `stop`, `auto_cable_detect`, `get_status`, plus the aux
+command-bank / fast-settle / register-access commands — type `help`). Edit `ZYNQ_IP`/ports at
+the top of the file if your board address differs. `net.py` is the canonical, human-readable
+reference for the TCP command set and the UDP packet format.
+
+### OpenEphys GUI — `ephys-socket` plugin
+
+For real recording and visualization, use the companion **[ephys-socket](https://github.com/ckemere/ephys-socket)**
+plugin — a fork of the OpenEphys "Ephys Socket" `DataThread` that speaks this board's protocol
+directly (TCP control + UDP capture → OpenEphys data buffer). It surfaces chip auto-detection,
+neural + aux/accelerometer channels (faithfully scaled to match the OpenEphys acquisition-board
+plugin), and in-GUI controls for amplifier fast settle and the programmable aux command banks.
+
+Typical flow:
+1. Build/install the plugin against your OpenEphys `plugin-GUI` (see that repo's README).
+2. In OpenEphys, drag **Intan Socket** into the signal chain as the source.
+3. Set the device IP in the editor, click **CONNECT**, then **RESCAN** to detect chips and the
+   optimal cable phase.
+4. Press play to stream; use the **STATUS**, **SETTLE**, and **AUX SEQ** buttons to exercise
+   fast settle and the banked aux/accelerometer features at run time.
+
+The board firmware (`firmware/`), `remote/net.py`, and the plugin are the **three consumers of
+the same register/packet contract** — keep them in sync when changing the protocol (see
+[`CLAUDE.md`](CLAUDE.md) and [`docs/command-bank-design.md`](docs/command-bank-design.md)).
+
