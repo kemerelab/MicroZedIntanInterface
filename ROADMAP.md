@@ -163,6 +163,35 @@ standalone repo + releases):
 - [ ] **Build/CI smoke** — scripted elaborate + firmware compile (`scripts/clean_build_all.sh`
       already does a full Vivado→XSA→Vitis build end-to-end).
 
+## I. Second cable interface (dual headstage port)
+
+The carrier PCB has a **second Omnetics connector already routed to the FPGA** with its own
+SPI signals (CS=IO_L15, SCLK=IO_L17, COPI=IO_L19, CIPO1=IO_L22, CIPO2=IO_L24) — so this is a
+PL→firmware→host→plugin job, **no board respin**. A second cable doubles channel capacity
+(up to 256 ch) but also doubles the PS→UDP stream (~9 → ~18 MB/s), which is the main risk and
+the reason to validate the memory bus first. **Common command set initially** (one acquisition
+FSM, master outputs fanned out to both ports' pins), but **independent per-port cable length /
+phase** from the start. Keep default-OFF / bit-identical to the single-port path when the
+second port is disabled, the same discipline used for the aux sequencer.
+
+- [ ] **Phase 1 — datapath + bandwidth characterization (debug mode).** Widen the FIFO word
+      64→128-bit `{cipo3,cipo2,cipo1,cipo0}`, extend `channel_enable` 4→8 bits + per-port phase
+      regs, extend the packet format and the three-layer contract (`main.h`/`pl_control.c`/
+      `net.py`). Have **debug mode synthesize port-2 data** so packets are full doubled size,
+      then measure whether PS core-0's BRAM-poll + lwIP UDP loop sustains ~18 MB/s. No real
+      CIPO-capture risk yet — pure datapath/throughput. Feeds, and is gated by, **Epic D**.
+- [ ] **Phase 2 — real second-port capture + independent cable detection.** Add the two
+      `IBUFDS` + phase selectors and `phase2`/`phase3`; extend `auto_cable_detect` / `net.py`
+      INTAN-pattern sweep to run **per port** (different cable lengths → different optimal phase).
+- [ ] **Phase 3 — plugin multi-input (acq-board model).** One `DataStream`, channels grouped by
+      port with prefixes (`A_CH1…` / `B_CH1…`, per-port AUX), per-port chip detection in the
+      editor. Mirrors `acquisition-board` `DeviceThread`/`Headstage` (single stream, prefixed
+      headstage groups, `setFirstChannel` offsets).
+- [ ] **Future — independent per-port commands.** Split command generation (or a second light
+      FSM) so one port can run SPI + analog aux while the other runs the I²C-repurpose **digital
+      IMU** (lab has one digital-IMU headstage + two analog). Pins already exist; design the
+      Phase-1 register layout so this stays additive.
+
 ---
 
 ## Reference designs (OpenEphys / Intan open source)
