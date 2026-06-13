@@ -102,7 +102,12 @@ Remember the three-layer contract: every register/packet change touches
 
 - [ ] **Hotplug + DHCP** — finish lwIP hotplug init and add a DHCP/discovery option.
       Refs: `main.c:421-422`.
-- [ ] **Fix the 10 ms print timeout** that stalls RX (`shared_print.c:163`).
+- [x] **Fix the 10 ms print timeout** that stalls RX (`shared_print.c:163`).
+      **Done 2026-06-13 (`claude/dual-port`):** `send_message()` is non-blocking (drops +
+      counts instead of the 10 ms spin); routine status moved off the print ring onto a
+      shared-memory snapshot that **core 1** formats/prints (core 0 only does cheap binary
+      stores), so status reporting never stalls the data pump. Fixed the "`get_status` adds
+      2-7 packet errors while streaming" symptom that surfaced at the dual-port packet size.
 - [ ] **Error-state recovery** — track timestamp-gap duration on recovery (`main.c:143`).
 - [ ] **De-hardcode IPs** — config mechanism instead of baked-in 192.168.18.x.
 
