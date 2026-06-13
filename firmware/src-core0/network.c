@@ -327,7 +327,10 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             break;
 
         case CMD_GET_STATUS: {
-            pl_print_status();
+            // NOTE: pl_print_status() (a ~16-line console flood) is deliberately
+            // NOT called here -- it stalled the data pump on the print ring. The
+            // host gets everything from the binary collect_status_data() response
+            // below; the serial console reads the shared snapshot on core 1.
             status_response_t status_data;
             collect_status_data(&status_data);
             send_response(tpcb, cmd->ack_id, ACK_SUCCESS,

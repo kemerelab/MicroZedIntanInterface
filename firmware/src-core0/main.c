@@ -316,14 +316,60 @@ void process_command_flags(void) {
 }
 
 // Network maintenance loop
+// Publish a binary status snapshot to shared memory for core 1 to format/print.
+// Cheap, bounded, non-blocking: ~15 PL register reads + plain stores, no string
+// formatting and no print ring. seqlock (odd while writing) lets core 1 read a
+// consistent snapshot. This is what replaces the old core-0 console flood.
+static void publish_status_snapshot(void) {
+  uint32_t s0 = psmon->seq;
+  psmon->seq = s0 | 1u;          // mark odd: update in progress
+  dsb();
+
+  uint64_t ts = pl_get_timestamp();
+  psmon->timestamp_lo   = (uint32_t)ts;
+  psmon->timestamp_hi   = (uint32_t)(ts >> 32);
+  psmon->packets_sent   = pl_get_packets_sent();
+  psmon->bram_write_addr= pl_get_bram_write_address();
+  psmon->fifo_count     = (Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET) >> 14) & 0x1FF;
+  psmon->state_counter  = pl_get_state_counter();
+  psmon->cycle_counter  = pl_get_cycle_counter();
+  psmon->channel_enable = pl_get_current_channel_enable();
+  int p0, p1;
+  pl_get_current_phase_select(&p0, &p1);
+  psmon->phase          = (p0 & 0xF) | ((p1 & 0xF) << 4);  // phase2/3 added in Phase 2
+  psmon->flags_pl       = (pl_is_transmission_active() ? PSMON_FLAG_TX_ACTIVE : 0)
+                        | (pl_is_loop_limit_reached()  ? PSMON_FLAG_LOOP_LIMIT : 0)
+                        | (pl_get_current_debug_mode() ? PSMON_FLAG_DEBUG_MODE : 0);
+
+  psmon->packets_received = packets_received_count;
+  psmon->error_count      = error_count;
+  psmon->udp_packets_sent = udp_packets_sent;
+  psmon->udp_send_errors  = udp_send_errors;
+  psmon->ps_read_addr     = ps_read_address;
+  psmon->packet_size      = current_packet_size;
+  psmon->stream_enabled   = stream_enabled;
+
+  dsb();
+  psmon->seq = (s0 | 1u) + 1u;   // even again: snapshot complete
+}
+
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
   static uint32_t last_link_check_time = 0;
+  static uint32_t last_psmon_time = 0;
   counter++;
 
   xemacif_input(&server_netif);
   sys_check_timeouts();
   process_command_flags();
+
+  // Refresh the shared status snapshot at ~200 Hz (every 5 ms). Cheap and
+  // non-blocking; core 1 reads it on demand or for its ~1 Hz monitor.
+  uint32_t now_ms = sys_now();
+  if (now_ms - last_psmon_time >= 5) {
+    last_psmon_time = now_ms;
+    publish_status_snapshot();
+  }
 
   // Poll network link state every 500ms for hotplug detection
   uint32_t current_time = sys_now();
@@ -386,6 +432,7 @@ int main() {
   // Prepare for second core by initializing shared structures
   init_print_buffer();
   memset((void *)command_flags, 0, sizeof(command_flags_t));
+  psmon_init();   // zero the status snapshot before core 1 reads it
   // ========================================================================
 
   // ========================================================================

@@ -59,4 +59,48 @@ typedef struct {
 
 extern volatile command_flags_t *command_flags;
 
+// ============================================================================
+// SHARED STATUS SNAPSHOT (core 0 publishes -> core 1 reads, no print ring)
+// ============================================================================
+// Core 0 (the data pump) periodically copies a binary status snapshot here with
+// cheap stores (no string formatting, no UART, no blocking). Core 1 reads it and
+// does all the formatting/printing on its own time, so status reporting never
+// stalls streaming. `seq` is a seqlock: core 0 makes it odd before writing the
+// fields and even (== old+1) after; core 1 reads it before/after and retries on
+// a tear. All scalars are 32-bit (atomic on the A9).
+typedef struct {
+    volatile uint32_t seq;             // seqlock; even = stable snapshot
+    // --- PL hardware status ---
+    volatile uint32_t timestamp_lo;
+    volatile uint32_t timestamp_hi;
+    volatile uint32_t packets_sent;
+    volatile uint32_t bram_write_addr;
+    volatile uint32_t fifo_count;
+    volatile uint32_t state_counter;
+    volatile uint32_t cycle_counter;
+    volatile uint32_t channel_enable;  // 8-bit (both ports)
+    volatile uint32_t phase;           // phase0 | phase1<<4 | phase2<<8 | phase3<<12
+    volatile uint32_t flags_pl;        // bit0 tx_active, bit1 loop_limit, bit2 debug_mode
+    // --- PS software status ---
+    volatile uint32_t packets_received;
+    volatile uint32_t error_count;
+    volatile uint32_t udp_packets_sent;
+    volatile uint32_t udp_send_errors;
+    volatile uint32_t ps_read_addr;
+    volatile uint32_t packet_size;
+    volatile uint32_t stream_enabled;
+    // --- logging health ---
+    volatile uint32_t events_dropped;  // send_message drops (ring full under load)
+} psmon_t;
+
+extern volatile psmon_t *psmon;
+
+// psmon flag bits
+#define PSMON_FLAG_TX_ACTIVE   (1u << 0)
+#define PSMON_FLAG_LOOP_LIMIT  (1u << 1)
+#define PSMON_FLAG_DEBUG_MODE  (1u << 2)
+
+void psmon_init(void);                 // core 0: zero the snapshot once at startup
+void print_status_local(void);         // core 1: format + print from the snapshot
+
 #endif
