@@ -273,8 +273,8 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             break;
 
         case CMD_SET_CHANNEL_ENABLE:
-            pl_set_channel_enable(cmd->param1 & 0xF);
-            send_message("Binary Command: SET_CHANNEL_ENABLE 0x%X\r\n", cmd->param1 & 0xF);
+            pl_set_channel_enable(cmd->param1 & 0xFF);
+            send_message("Binary Command: SET_CHANNEL_ENABLE 0x%02X\r\n", cmd->param1 & 0xFF);
             break;
 
         case CMD_SET_DEBUG_MODE:

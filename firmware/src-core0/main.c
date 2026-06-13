@@ -58,15 +58,13 @@ static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(6
 uint32_t calculate_data_words(int channel_enable) {
     int num_channels = 0;
     
-    // Count enabled channels
-    if (channel_enable & 0x01) num_channels++; // CIPO0 regular
-    if (channel_enable & 0x02) num_channels++; // CIPO0 DDR
-    if (channel_enable & 0x04) num_channels++; // CIPO1 regular  
-    if (channel_enable & 0x08) num_channels++; // CIPO1 DDR
-    
+    // Count enabled 16-bit streams across both ports (8-bit mask)
+    for (int b = 0; b < 8; b++)
+        if (channel_enable & (1 << b)) num_channels++;
+
     if (num_channels == 0) {
-        send_message("WARNING: No channels enabled, defaulting to all channels\r\n");
-        return 70; // Default to maximum (4 channels × 35 cycles ÷ 2)
+        send_message("WARNING: No channels enabled, defaulting to port-0 all channels\r\n");
+        return 70; // Default to 4 streams (port 0) x 35 cycles / 2
     }
     
     // Calculate 32-bit words needed for the data

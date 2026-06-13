@@ -68,12 +68,13 @@ void pl_set_debug_mode(int enable) {
 
 void pl_set_channel_enable(int channel_enable) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
-    
+
     ctrl_reg_2 &= ~CTRL_CHANNEL_ENABLE_MASK; // Clear existing channel enable bits
-    ctrl_reg_2 |= ((channel_enable & 0xF) << 8); // Set channel enable bits [11:8]
-    
+    ctrl_reg_2 |= ((channel_enable & 0xFF) << CTRL_CHANNEL_ENABLE_SHIFT); // 8-bit, [15:8]
+
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
-    send_message("PL channel enable set to 0x%X\r\n", channel_enable & 0xF);
+    send_message("PL channel enable set to 0x%02X (port0=0x%X port1=0x%X)\r\n",
+                 channel_enable & 0xFF, channel_enable & 0xF, (channel_enable >> 4) & 0xF);
 }
 
 // ============================================================================
@@ -142,7 +143,9 @@ int pl_get_current_debug_mode(void) {
 
 int pl_get_current_channel_enable(void) {
     uint32_t status1 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_1_OFFSET);
-    return (status1 & STATUS_CHANNEL_ENABLE_REG_MASK) >> STATUS_CHANNEL_ENABLE_REG_SHIFT;
+    int lo = (status1 & STATUS_CHANNEL_ENABLE_REG_MASK) >> STATUS_CHANNEL_ENABLE_REG_SHIFT;
+    int hi = (status1 & STATUS_CHANNEL_ENABLE_HI_REG_MASK) >> STATUS_CHANNEL_ENABLE_HI_REG_SHIFT;
+    return (hi << 4) | lo;   // full 8-bit channel enable (both ports)
 }
 
 // uint32_t pl_get_current_control_0_flags(void) {

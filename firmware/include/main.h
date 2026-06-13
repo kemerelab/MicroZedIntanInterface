@@ -38,12 +38,14 @@
 #define BRAM_SIZE_WORDS         16384       // 16384 x 32-bit words (64KB)
 #define BRAM_SIZE_BYTES         (BRAM_SIZE_WORDS * BYTES_PER_WORD)   // 64KB
 
-// Packet size calculation based on channel_enable bits
+// Packet size calculation based on channel_enable bits.
+// channel_enable is now 8 bits: [3:0] = port 0 streams, [7:4] = port 1 (dual
+// cable). Max = 8 streams x 35 cycles / 2 = 140 data words.
 #define PACKET_HEADER_WORDS     10           // Magic number + timestamp
-#define MAX_PACKET_DATA_WORDS   70          // Maximum data words (all 4 channels enabled)
-#define MIN_PACKET_DATA_WORDS   18          // Minimum data words (1 channel enabled)
-#define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 74 words
-#define MIN_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MIN_PACKET_DATA_WORDS) // 22 words
+#define MAX_PACKET_DATA_WORDS   140         // Maximum data words (all 8 streams = both ports)
+#define MIN_PACKET_DATA_WORDS   18          // Minimum data words (1 stream enabled)
+#define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 150 words
+#define MIN_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MIN_PACKET_DATA_WORDS) // 28 words
 
 // ============================================================================
 // AXI LITE CONTROL INTERFACE
@@ -143,9 +145,15 @@
 #define CTRL_ENABLE_TRANSMISSION (1 << 0)
 #define CTRL_RESET_TIMESTAMP     (1 << 1)
 #define CTRL_DEBUG_MODE          (1 << 3)   // Debug mode (send dummy data) [3]
-#define CTRL_PHASE0_MASK         (0xF << 0) // phase0 [3:0] in CTRL_REG_2
-#define CTRL_PHASE1_MASK         (0xF << 4) // phase1 [7:4] in CTRL_REG_2
-#define CTRL_CHANNEL_ENABLE_MASK (0xF << 8) // channel_enable [11:8] in CTRL_REG_2
+// CTRL_REG_2 layout (dual-port): [3:0] phase0, [7:4] phase1,
+//   [15:8] channel_enable (8-bit: [3:0]=port0, [7:4]=port1),
+//   [19:16] phase2 (port1 cipo0), [23:20] phase3 (port1 cipo1)
+#define CTRL_PHASE0_MASK         (0xF << 0)  // phase0 [3:0]  (port0 cipo0)
+#define CTRL_PHASE1_MASK         (0xF << 4)  // phase1 [7:4]  (port0 cipo1)
+#define CTRL_CHANNEL_ENABLE_MASK (0xFF << 8) // channel_enable [15:8]
+#define CTRL_CHANNEL_ENABLE_SHIFT 8
+#define CTRL_PHASE2_MASK         (0xF << 16) // phase2 [19:16] (port1 cipo0)
+#define CTRL_PHASE3_MASK         (0xF << 20) // phase3 [23:20] (port1 cipo1)
 
 // Status register 0 bits (dynamic status + counters)
 #define STATUS_TRANSMISSION_ACTIVE   (1 << 0)
@@ -163,8 +171,10 @@
 #define STATUS_PHASE0_REG_SHIFT         12
 #define STATUS_PHASE1_REG_MASK          (0xF << 16) // [19:16] - 4 bits
 #define STATUS_PHASE1_REG_SHIFT         16
-#define STATUS_CHANNEL_ENABLE_REG_MASK  (0xF << 20) // [23:20] - 4 bits
+#define STATUS_CHANNEL_ENABLE_REG_MASK  (0xF << 20) // [23:20] - port-0 channel enable
 #define STATUS_CHANNEL_ENABLE_REG_SHIFT 20
+#define STATUS_CHANNEL_ENABLE_HI_REG_MASK  (0xF << 24) // [27:24] - port-1 channel enable
+#define STATUS_CHANNEL_ENABLE_HI_REG_SHIFT 24
 
 // ============================================================================
 // TCP RESPONSE PROTOCOL

@@ -486,24 +486,23 @@ class CableDetection:
         return score, has_ddr
 
 def calculate_data_words(channel_enable):
-    """Calculate number of 32-bit data words based on channel enable setting"""
-    num_channels = bin(channel_enable & 0x0F).count('1')
+    """Number of 32-bit data words for the 8-bit channel_enable mask.
+    [3:0] = port 0 streams, [7:4] = port 1 (dual cable)."""
+    num_channels = bin(channel_enable & 0xFF).count('1')
     if num_channels == 0:
         return 70
     total_16bit_words = 35 * num_channels
     return (total_16bit_words + 1) // 2
 
 def calculate_packet_size(channel_enable):
-    """Calculate total packet size in words (header + data)"""
+    """Total packet size in words (header + data). Up to 10 + 140 = 150."""
     return 10 + calculate_data_words(channel_enable)
 
 def channel_enable_to_string(channel_enable):
-    """Convert channel enable bits to human readable string"""
-    channels = []
-    if channel_enable & 0x01: channels.append("CIPO0_REG")
-    if channel_enable & 0x02: channels.append("CIPO0_DDR")
-    if channel_enable & 0x04: channels.append("CIPO1_REG")
-    if channel_enable & 0x08: channels.append("CIPO1_DDR")
+    """Convert channel enable bits to human readable string (both ports)"""
+    names = ["A_CIPO0_REG", "A_CIPO0_DDR", "A_CIPO1_REG", "A_CIPO1_DDR",
+             "B_CIPO0_REG", "B_CIPO0_DDR", "B_CIPO1_REG", "B_CIPO1_DDR"]
+    channels = [names[b] for b in range(8) if channel_enable & (1 << b)]
     return ", ".join(channels) if channels else "NONE"
 
 def get_local_ip():
@@ -1220,7 +1219,7 @@ def tcp_control():
         print(f"\n[TCP] Available commands:")
         print(f"  Basic: start, stop, reset_timestamp, loop <count>")
         print(f"  COPI: convert, init, cable_test, full_cable_test, manual_cable_test")
-        print(f"  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x0-0xF>")
+        print(f"  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  auto_cable_detect - Automated cable detection!")
@@ -1288,13 +1287,13 @@ def tcp_control():
                     try:
                         val = cmd.split()[1]
                         channel_enable = int(val, 16) if val.startswith('0x') else int(val)
-                        if 0 <= channel_enable <= 15:
+                        if 0 <= channel_enable <= 0xFF:
                             if send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, channel_enable)[0]:
                                 validator.set_channel_enable(channel_enable)
                         else:
-                            print("Channel enable must be 0-15")
+                            print("Channel enable must be 0x00-0xFF ([3:0]=port A, [7:4]=port B)")
                     except (ValueError, IndexError):
-                        print("Usage: set_channels <0x0-0xF>")
+                        print("Usage: set_channels <0x00-0xFF>")
                 elif cmd.startswith("set_udp "):
                     try:
                         parts = cmd.split()
@@ -1374,7 +1373,7 @@ def tcp_control():
                     print("Commands:")
                     print("  start, stop, reset_timestamp")
                     print("  loop <count>, set_phase <p0> <p1>")
-                    print("  set_debug <0|1>, set_channels <0x0-0xF>")
+                    print("  set_debug <0|1>, set_channels <0x00-0xFF>")
                     print("  convert, init, cable_test")
                     print("  full_cable_test, manual_cable_test")
                     print("  auto_cable_detect - NEW: Automated detection!")
