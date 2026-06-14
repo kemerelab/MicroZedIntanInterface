@@ -14,8 +14,20 @@ The [carrier PCB](pcb/KiCad-Project/) design has been manufactured at JLCPCB.
 
 Here is the carrier PCB bare and with the MicroZed installed.
 <p align="center">
-  <img src="PCBOnly.jpeg" width="45%" />
-  <img src="PCBWithMicroZed.jpeg" width="45%" />
+  <img src="resources/PCBOnly.jpeg" width="45%" />
+  <img src="resources/PCBWithMicroZed.jpeg" width="45%" />
+</p>
+
+### Omnetics connector epoxy
+
+The Omnetics 12-pin connector for the Intan interface **requires epoxy reinforcement**. The
+pin-to-solder-pad connection alone is not robust enough to survive repeated mating and
+unmating. Apply several layers of UV-curing epoxy (we use Bondic) to bond the connector
+body to the PCB; through-holes placed near the connector are provided specifically to anchor
+the epoxy. **Keep epoxy clear of the pins and the mating face of the connector.**
+
+<p align="center">
+  <img src="resources/EpoxyOmnetics.png" width="55%" />
 </p>
 
 ## Firmware
@@ -81,6 +93,10 @@ plugin — a fork of the OpenEphys "Ephys Socket" `DataThread` that speaks this 
 directly (TCP control + UDP capture → OpenEphys data buffer). It surfaces chip auto-detection,
 neural + aux/accelerometer channels (faithfully scaled to match the OpenEphys acquisition-board
 plugin), and in-GUI controls for amplifier fast settle and the programmable aux command banks.
+
+<p align="center">
+  <img src="ephys-socket.png" width="80%" />
+</p>
 
 Typical flow:
 1. Build/install the plugin against your OpenEphys `plugin-GUI` (see that repo's README).
