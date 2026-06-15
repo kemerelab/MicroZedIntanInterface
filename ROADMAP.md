@@ -202,7 +202,8 @@ second port is disabled, the same discipline used for the aux sequencer.
       `blobs/BOOT.bin` rebuilt. **Remaining: (1) on-hardware bring-up** — plug a 2nd analog
       headstage into port B, sweep `set_phase ... p2 p3` for the INTAN pattern, confirm real
       neural on port B; **(2) automate per-port `auto_cable_detect`** (host-only, best done with
-      the board). **Verify COPI's bank-35 IO_L19 (H15/G15) against the board before power-on.**
+      the board). COPI's bank-35 IO_L19 (H15/G15) **schematic-verified 2026-06-15** — all
+      port-B pins confirmed.
 - [ ] **Phase 3 — plugin multi-input (acq-board model).** One `DataStream`, channels grouped by
       port with prefixes (`A_CH1…` / `B_CH1…`, per-port AUX), per-port chip detection in the
       editor. Mirrors `acquisition-board` `DeviceThread`/`Headstage` (single stream, prefixed
