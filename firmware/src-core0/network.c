@@ -44,6 +44,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_SET_PHASE       0x11
 #define CMD_SET_DEBUG_MODE  0x12
 #define CMD_SET_CHANNEL_ENABLE 0x13
+#define CMD_SET_PHASE_B     0x14   // port B (second cable) CIPO phase
 #define CMD_LOAD_CONVERT    0x20
 #define CMD_LOAD_INIT       0x21
 #define CMD_LOAD_CABLE_TEST 0x22
@@ -268,7 +269,13 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             
         case CMD_SET_PHASE:
             pl_set_phase_select(cmd->param1 & 0xFF, cmd->param2 & 0xFF);
-            send_message("Binary Command: SET_PHASE %u %u\r\n", 
+            send_message("Binary Command: SET_PHASE %u %u\r\n",
+                        cmd->param1 & 0xFF, cmd->param2 & 0xFF);
+            break;
+
+        case CMD_SET_PHASE_B:   // port B (second cable) CIPO phase
+            pl_set_phase_select_b(cmd->param1 & 0xFF, cmd->param2 & 0xFF);
+            send_message("Binary Command: SET_PHASE_B %u %u\r\n",
                         cmd->param1 & 0xFF, cmd->param2 & 0xFF);
             break;
 

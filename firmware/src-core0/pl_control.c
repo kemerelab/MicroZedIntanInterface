@@ -43,13 +43,26 @@ void pl_set_loop_count(uint32_t loop_count) {
 
 void pl_set_phase_select(int phase0, int phase1) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
-    
+
     ctrl_reg_2 &= ~(CTRL_PHASE0_MASK | CTRL_PHASE1_MASK); // Clear existing phase bits
-    
+
     ctrl_reg_2 |= ((phase0 & 0xF) << 0); // Set phase0 bits [3:0]
     ctrl_reg_2 |= ((phase1 & 0xF) << 4); // Set phase1 bits [7:4]
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
-    send_message("PL phase select set to phase0=%d, phase1=%d\r\n", phase0, phase1);
+    send_message("PL phase select (port A) phase0=%d, phase1=%d\r\n", phase0, phase1);
+}
+
+// Port B (second cable) CIPO phase / cable-length compensation. Independent of
+// port A because the two cables may be different lengths. Bits [23:16] of
+// CTRL_REG_2: phase2 [19:16] (port-B cipo0), phase3 [23:20] (port-B cipo1).
+void pl_set_phase_select_b(int phase2, int phase3) {
+    uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
+
+    ctrl_reg_2 &= ~(CTRL_PHASE2_MASK | CTRL_PHASE3_MASK);
+    ctrl_reg_2 |= ((phase2 & 0xF) << 16);
+    ctrl_reg_2 |= ((phase3 & 0xF) << 20);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
+    send_message("PL phase select (port B) phase2=%d, phase3=%d\r\n", phase2, phase3);
 }
 
 void pl_set_debug_mode(int enable) {

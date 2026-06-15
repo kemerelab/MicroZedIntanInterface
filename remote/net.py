@@ -29,6 +29,7 @@ CMD_SET_LOOP_COUNT = 0x10
 CMD_SET_PHASE = 0x11
 CMD_SET_DEBUG_MODE = 0x12
 CMD_SET_CHANNEL_ENABLE = 0x13
+CMD_SET_PHASE_B = 0x14   # port B (second cable) CIPO phase
 CMD_LOAD_CONVERT = 0x20
 CMD_LOAD_INIT = 0x21
 CMD_LOAD_CABLE_TEST = 0x22
@@ -1219,7 +1220,7 @@ def tcp_control():
         print(f"\n[TCP] Available commands:")
         print(f"  Basic: start, stop, reset_timestamp, loop <count>")
         print(f"  COPI: convert, init, cable_test, full_cable_test, manual_cable_test")
-        print(f"  Config: set_phase <p0> <p1>, set_debug <0|1>, set_channels <0x00-0xFF>")
+        print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  auto_cable_detect - Automated cable detection!")
@@ -1271,10 +1272,13 @@ def tcp_control():
                 elif cmd.startswith("set_phase "):
                     try:
                         parts = cmd.split()
-                        if len(parts) == 3:
+                        if len(parts) == 3:   # port A only
                             send_binary_command(sock, CMD_SET_PHASE, int(parts[1]), int(parts[2]))
+                        elif len(parts) == 5: # both ports: p0 p1 p2 p3
+                            send_binary_command(sock, CMD_SET_PHASE, int(parts[1]), int(parts[2]))
+                            send_binary_command(sock, CMD_SET_PHASE_B, int(parts[3]), int(parts[4]))
                         else:
-                            print("Usage: set_phase <phase0> <phase1>")
+                            print("Usage: set_phase <p0> <p1> [p2 p3]   (p2/p3 = port B)")
                     except ValueError:
                         print("Invalid phase values")
                 elif cmd.startswith("set_debug "):

@@ -318,6 +318,7 @@ void pl_set_transmission(int enable);
 void pl_reset_timestamp(void);
 void pl_set_loop_count(uint32_t loop_count);
 void pl_set_phase_select(int phase0, int phase1);
+void pl_set_phase_select_b(int phase2, int phase3);  // port B (second cable)
 void pl_set_debug_mode(int enable);
 void pl_set_channel_enable(int channel_enable);
 
