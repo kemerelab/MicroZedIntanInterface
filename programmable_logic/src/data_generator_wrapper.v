@@ -53,11 +53,27 @@ module data_generator #(
     output wire            copi,         // Controller Out, Peripheral In
     
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi cipo0" *)
-    input  wire        cipo0,      // Controller In, Peripheral Out 0
+    input  wire        cipo0,      // Port A: Controller In, Peripheral Out 0
 
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi cipo1" *)
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF intan_spi, ASSOCIATED_RESET rst_n, ASSOCIATED_CLKEN clk" *)
-    input  wire        cipo1       // Controller In, Peripheral Out 1
+    input  wire        cipo1,      // Port A: Controller In, Peripheral Out 1
+
+    // Second SPI port (cable B). The master signals are the SAME logical
+    // csn/sclk/copi broadcast to both ports (common command set); only the
+    // CIPO return lines differ. Exposed as a second intan_spi bus so the block
+    // design can drop a second (identical) LVDS buffer onto port-B's pins.
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi_b csn" *)
+    output wire            csn_b,
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi_b sclk" *)
+    output wire            sclk_b,
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi_b copi" *)
+    output wire            copi_b,
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi_b cipo0" *)
+    input  wire        cipo2,      // Port B: Controller In, Peripheral Out 0
+    (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi_b cipo1" *)
+    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF intan_spi_b" *)
+    input  wire        cipo3       // Port B: Controller In, Peripheral Out 1
 
 );
 
@@ -121,11 +137,9 @@ module data_generator #(
         .copi(copi),
         .cipo0(cipo0),
         .cipo1(cipo1),
-        // Port 1 (cable B) CIPO inputs. Phase 1 ties these off -- the second
-        // port's real LVDS pins arrive in Phase 2; the bandwidth test uses
-        // debug-mode synthetic data which does not read these.
-        .cipo2(1'b0),
-        .cipo3(1'b0),
+        // Port B (cable B) CIPO inputs, from the second LVDS buffer.
+        .cipo2(cipo2),
+        .cipo3(cipo3),
 
         // Digital input
         .digital_in(digital_in)
@@ -177,5 +191,10 @@ module data_generator #(
     // Aux command sequencer status (see data_generator_core for bit layout)
     assign status_regs_pl[11*32 +: 32] = aux_status;
     assign status_regs_pl[12*32 +: 32] = aux_read_result;
+
+    // Port-B master outputs are the same broadcast commands as port A.
+    assign csn_b  = csn;
+    assign sclk_b = sclk;
+    assign copi_b = copi;
 
 endmodule

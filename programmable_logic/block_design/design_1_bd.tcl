@@ -239,6 +239,9 @@ proc create_root_design { parentCell } {
 
   set spi_lvds_0 [ create_bd_intf_port -mode Master -vlnv kemerelab.org:intan:intan_spi_diff_rtl:1.0 spi_lvds_0 ]
 
+  # Second cable port (port B); same differential interface type as port A.
+  set spi_lvds_1 [ create_bd_intf_port -mode Master -vlnv kemerelab.org:intan:intan_spi_diff_rtl:1.0 spi_lvds_1 ]
+
 
   # Create ports
   set led0 [ create_bd_port -dir O -type data led0 ]
@@ -693,12 +696,25 @@ proc create_root_design { parentCell } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
-  
+
+  # Create instance: intan_spi_lvds_buffer_1 (port B), and set properties
+  set block_name intan_spi_lvds_buffer
+  set block_cell_name intan_spi_lvds_buffer_1
+  if { [catch {set intan_spi_lvds_buffer_1 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $intan_spi_lvds_buffer_1 eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+
   # Create interface connections
   connect_bd_intf_net -intf_net axi_bram_ctrl_0_BRAM_PORTA [get_bd_intf_pins axi_bram_ctrl_0/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram/BRAM_PORTB]
   connect_bd_intf_net -intf_net data_generator_0_BRAM_PORTA [get_bd_intf_pins data_generator/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram/BRAM_PORTA]
   connect_bd_intf_net -intf_net data_generator_intan_spi [get_bd_intf_pins data_generator/intan_spi] [get_bd_intf_pins intan_spi_lvds_buffer_0/intan_spi]
   connect_bd_intf_net -intf_net intan_spi_lvds_buffer_0_spi_lvds [get_bd_intf_ports spi_lvds_0] [get_bd_intf_pins intan_spi_lvds_buffer_0/spi_lvds]
+  connect_bd_intf_net -intf_net data_generator_intan_spi_b [get_bd_intf_pins data_generator/intan_spi_b] [get_bd_intf_pins intan_spi_lvds_buffer_1/intan_spi]
+  connect_bd_intf_net -intf_net intan_spi_lvds_buffer_1_spi_lvds [get_bd_intf_ports spi_lvds_1] [get_bd_intf_pins intan_spi_lvds_buffer_1/spi_lvds]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins smartconnect_0/S00_AXI]
