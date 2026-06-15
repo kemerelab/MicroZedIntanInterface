@@ -191,9 +191,18 @@ second port is disabled, the same discipline used for the aux sequencer.
       routes & meets timing (WNS +0.646, 0 failing endpoints, no congestion; LUTRAM 368→933).
       `blobs/BOOT.bin` rebuilt. **Remaining: run the on-hardware bandwidth measurement**
       (debug mode + `set_channels 0xFF` → ~150-word packets; confirm PS→UDP sustains ~18 MB/s).
-- [ ] **Phase 2 — real second-port capture + independent cable detection.** Add the two
+- [~] **Phase 2 — real second-port capture + independent cable detection.** Add the two
       `IBUFDS` + phase selectors and `phase2`/`phase3`; extend `auto_cable_detect` / `net.py`
       INTAN-pattern sweep to run **per port** (different cable lengths → different optimal phase).
+      **PL/firmware/host DONE 2026-06-15 (`claude/dual-port`):** 2nd LVDS buffer instance +
+      `intan_spi_b` interface + external `spi_lvds_1` port; port-B pins on **bank 35** (CS=F19/F20,
+      SCLK=J20/H20, COPI=H15/G15, cipo2=L14/L15, cipo3=K16/J16 — verified placed in the routed
+      checkpoint). Build routes + meets timing (WNS +0.133, 0 failing). Per-port phase via
+      `set_phase <p0> <p1> [p2 p3]` / `CMD_SET_PHASE_B`; phases shown in the core-1 status snapshot.
+      `blobs/BOOT.bin` rebuilt. **Remaining: (1) on-hardware bring-up** — plug a 2nd analog
+      headstage into port B, sweep `set_phase ... p2 p3` for the INTAN pattern, confirm real
+      neural on port B; **(2) automate per-port `auto_cable_detect`** (host-only, best done with
+      the board). **Verify COPI's bank-35 IO_L19 (H15/G15) against the board before power-on.**
 - [ ] **Phase 3 — plugin multi-input (acq-board model).** One `DataStream`, channels grouped by
       port with prefixes (`A_CH1…` / `B_CH1…`, per-port AUX), per-port chip detection in the
       editor. Mirrors `acquisition-board` `DeviceThread`/`Headstage` (single stream, prefixed
