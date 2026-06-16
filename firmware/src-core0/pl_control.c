@@ -232,17 +232,19 @@ void pl_dump_bram_data(uint32_t start_addr, uint32_t word_count) {
     // is the multi-burst read path, not read-during-write, so DMA/double-buffer
     // would NOT help. No DIFFs (but streaming is still corrupt) -> it IS
     // read-during-write and double-buffering is the fix.
-    extern uint32_t udp_packet_buffer[];
+    // Same characteristics as the streaming udp_packet_buffer (cacheable DDR,
+    // 64-byte aligned) so the AXI burst shape matches the real read path.
+    static uint32_t dump_burst_buf[MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
     uint32_t cap = word_count;
-    if (cap > MAX_WORDS_PER_PACKET) cap = MAX_WORDS_PER_PACKET;  // memcpy into the packet buffer
-    memcpy(udp_packet_buffer, (void*)(BRAM_BASE_ADDR + start_addr * 4), cap * 4);
+    if (cap > MAX_WORDS_PER_PACKET) cap = MAX_WORDS_PER_PACKET;  // memcpy into the local buffer
+    memcpy(dump_burst_buf, (void*)(BRAM_BASE_ADDR + start_addr * 4), cap * 4);
     send_message("BRAM dump from %u (idx: burst | single | flag):\r\n", start_addr);
     uint32_t diffs = 0;
     for (uint32_t i = 0; i < word_count; i++) {
         uint32_t addr = (start_addr + i) % BRAM_SIZE_WORDS;
         uint32_t single = Xil_In32(BRAM_BASE_ADDR + addr * 4);
         if (i < cap) {
-            uint32_t burst = udp_packet_buffer[i];
+            uint32_t burst = dump_burst_buf[i];
             if (burst != single) diffs++;
             send_message("%u: 0x%08X | 0x%08X %s\r\n", i, burst, single,
                          (burst != single) ? "<-- DIFF" : "");
