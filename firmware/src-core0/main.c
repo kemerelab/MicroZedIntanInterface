@@ -431,6 +431,13 @@ int main() {
   // ========================================================================
   // NOTE: This applies to 1M of memory (see TRM - UG585)
   Xil_SetTlbAttributes(SHARED_MEM_BASE, NORM_NONCACHE_SHARED); // Critical for coherency!
+  // The capture BRAM (0x80000000) is written by the PL behind the data cache.
+  // Reading it cached lets the A9 prefetcher pull lines while the PL is mid-write,
+  // and there is no invalidate in the streaming read path -> stale/garbage words
+  // surface in the UDP stream (seen as out-of-range values near the tail cycles
+  // of each packet, worse at the higher dual-port data rate). Map it
+  // non-cacheable so every read goes to the PL's committed data.
+  Xil_SetTlbAttributes(BRAM_BASE_ADDR, NORM_NONCACHE_SHARED); // PL writes behind the cache
   // Xil_SetTlbAttributes(PL_CTRL_BASE_ADDR, NORM_NONCACHE_SHARED);
   // Prepare for second core by initializing shared structures
   init_print_buffer();
