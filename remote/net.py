@@ -705,6 +705,11 @@ class DataValidator:
             if best_total is None or tot < best_total:
                 best_total, best_ddi0 = tot, ddi0
 
+        # Single-segment reference value (for alias checks below).
+        def seg_val(ddi, cyc, bit):
+            return _debug_seg_values((ddi + (cyc - 2 if cyc >= 2 else 0)) & 0x1FF, lut)[bit]
+        lut_lo, lut_hi = min(lut), max(lut)
+
         # Verify every captured packet at its predicted index.
         _, meta = expected_debug_segments(ce, 0, lut)   # (cycle,bit) layout is index-independent
         seg_bad = {b: 0 for b in enabled_bits}
@@ -712,6 +717,7 @@ class DataValidator:
         total_seg = 0
         total_bad = 0
         exact_pkts = 0
+        mism_list = []        # (ddi, cyc, bit, exp, got)
         for ts, dw in cap:
             ddi = (best_ddi0 + (ts - ts0)) & 0x1FF
             got = unpack_data_segments(dw, n_seg)
@@ -724,6 +730,8 @@ class DataValidator:
                     cyc, bit = meta[i]
                     seg_bad[bit] += 1
                     cycle_bad[cyc] += 1
+                    if len(mism_list) < 20000:
+                        mism_list.append((ddi, cyc, bit, exp[i], got[i]))
             total_bad += bad
             if bad == 0:
                 exact_pkts += 1
@@ -745,17 +753,61 @@ class DataValidator:
         if total_bad == 0:
             print(f"  VALUE CHECK : PASS - all {total_seg} samples bit-exact vs RTL reference")
         else:
+            # Classify each mismatch by magnitude and by "alias" (does the wrong
+            # value equal a neighbouring cycle/packet's correct value -> stale data).
+            d1 = d_small = d_big = oor = 0          # |delta|==1, 2..16, >16, out-of-LUT-range
+            a_prevpkt = a_nextpkt = a_prevcyc = a_nextcyc = a_otherbit = 0
+            for (ddi, cyc, bit, e, g) in mism_list:
+                ad = abs(g - e)
+                if not (lut_lo <= g <= lut_hi):
+                    oor += 1
+                if ad == 1:
+                    d1 += 1
+                elif ad <= 16:
+                    d_small += 1
+                else:
+                    d_big += 1
+                if ad > 1:   # only chase aliases for non-rounding errors
+                    if g == seg_val((ddi - 1) & 0x1FF, cyc, bit):       a_prevpkt += 1
+                    elif g == seg_val((ddi + 1) & 0x1FF, cyc, bit):     a_nextpkt += 1
+                    elif cyc > 0  and g == seg_val(ddi, cyc - 1, bit):  a_prevcyc += 1
+                    elif cyc < 34 and g == seg_val(ddi, cyc + 1, bit):  a_nextcyc += 1
+                    elif any(g == seg_val(ddi, cyc, ob) for ob in enabled_bits if ob != bit):
+                        a_otherbit += 1
+            sampled = len(mism_list)
+            real = d_small + d_big   # |delta| > 1 == not LSB rounding
+
             print(f"  VALUE CHECK : FAIL - {total_bad}/{total_seg} samples wrong "
                   f"({100.0*total_bad/total_seg:.3f}%), {exact_pkts}/{received} packets perfect")
-            print("  mismatches by synthetic channel:")
-            for b in enabled_bits:
-                if seg_bad[b]:
-                    print(f"      bit{b} {SEG_NAMES[b]:<12}: {seg_bad[b]} wrong")
-            worst = sorted(((cycle_bad[c], c) for c in range(35) if cycle_bad[c]),
-                           reverse=True)[:8]
-            if worst:
-                print("  worst cycles: " +
+            print(f"  magnitude   : |d|=1: {d1}   |d|=2..16: {d_small}   "
+                  f"|d|>16: {d_big}   outside-LUT: {oor}   (of {sampled} sampled)")
+            print(f"  real errors (|d|>1): {real}  -> "
+                  f"{'NONE - all diffs are 1 LSB' if real == 0 else 'see breakdown'}")
+            # Breakdown of the REAL (non-rounding) errors only.
+            if real > 0:
+                rc = [0] * 35
+                rb = {b: 0 for b in enabled_bits}
+                for (ddi, cyc, bit, e, g) in mism_list:
+                    if abs(g - e) > 1:
+                        rc[cyc] += 1
+                        rb[bit] += 1
+                print("  real by channel: " +
+                      "  ".join(f"{SEG_NAMES[b]}={rb[b]}" for b in enabled_bits if rb[b]))
+                worst = sorted(((rc[c], c) for c in range(35) if rc[c]), reverse=True)[:8]
+                print("  real worst cyc : " +
                       ", ".join(f"cyc{c}({n})" for n, c in worst))
+                if max(a_prevpkt, a_nextpkt, a_prevcyc, a_nextcyc, a_otherbit) > 0:
+                    print(f"  alias of real  : prev-pkt={a_prevpkt} next-pkt={a_nextpkt} "
+                          f"prev-cyc={a_prevcyc} next-cyc={a_nextcyc} other-chan={a_otherbit}")
+                print("  examples (ddi, cyc, chan, expected -> got, delta):")
+                shown = 0
+                for (ddi, cyc, bit, e, g) in mism_list:
+                    if abs(g - e) > 1:
+                        print(f"      ddi={ddi:3d} cyc{cyc:2d} {SEG_NAMES[bit]:<12} "
+                              f"0x{e:04X} -> 0x{g:04X}  ({g - e:+d})")
+                        shown += 1
+                        if shown >= 12:
+                            break
         print("-" * 64)
         # Packet loss
         verb = "PASS" if dropped == 0 else "LOSS"
@@ -763,16 +815,24 @@ class DataValidator:
               f"expected over the capture ({dropped} dropped, {loss_pct:.2f}%)")
         print("-" * 64)
         # Interpretation
+        real_errs = locals().get('real', 0)
         if total_bad == 0 and dropped == 0:
             print("  => Clean: the board generates and transmits debug data correctly.")
         elif total_bad == 0 and dropped > 0:
             print("  => Values are CORRECT but packets are being DROPPED. The data path")
             print("     is fine; this is transport loss (host socket buffer / rate).")
             print("     Try a bigger SO_RCVBUF, or compare board udp_packets_sent vs here.")
+        elif total_bad > 0 and real_errs == 0:
+            print("  => All differences are exactly 1 LSB. This is the synthesis-vs-")
+            print("     simulation rounding of the sine ROM ($rtoi/$sin), NOT corruption.")
+            print("     The transmitted sinewave is correct to within one count.")
+            if dropped > 0:
+                print(f"     (But {dropped} packets were also dropped - see PACKET LOSS.)")
         else:
-            print("  => Received values DIFFER from the reference: genuine corruption")
-            print("     in the data path (not mere loss). Capture the BRAM (dump_bram)")
-            print("     to localize PL-write vs PS-read.")
+            print("  => Genuine corruption: values differ by more than 1 LSB. See the")
+            print("     real-error breakdown/aliases above. If they alias to a neighbour")
+            print("     cycle/packet it is stale data (timing/FIFO); if random/out-of-LUT")
+            print("     it is a bit error. Capture the BRAM (dump_bram) to localize.")
         print("=" * 64 + "\n")
 
     def validate_packet(self, data):
