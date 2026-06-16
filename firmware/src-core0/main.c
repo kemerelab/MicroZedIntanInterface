@@ -158,24 +158,25 @@ static int process_packet_from_bram(void) {
 
   // UDP transmission (always enabled) - zero-copy with pre-allocated buffer
   // Copy variable sized packet data to pre-allocated buffer.
-  // TODO: Consider replacing with memcpy
-  
-  /*
-  // Unoptimized copy
-  for (int i = 0; i < current_packet_size; i++) {
+  //
+  // DIAGNOSTIC: single-beat Xil_In32 reads instead of memcpy. dump_bram (which
+  // uses Xil_In32) reads the BRAM cleanly while the memcpy (AXI burst) stream
+  // shows out-of-range garbage at a fixed packet word offset (~116-128) that is
+  // NOT present in the BRAM -- a burst read-during-write hazard through
+  // axi_bram_ctrl/simple_dual_port_bram while the PL is writing port A. Reading
+  // word-by-word like dump_bram should avoid it. (Slower than memcpy; watch for
+  // back-pressure / packet loss at the 0xFF 18 MB/s rate.)
+#if 1  // single-beat read (diagnostic)
+  for (uint32_t i = 0; i < current_packet_size; i++) {
     uint32_t word_offset = (ps_read_address + i) % BRAM_SIZE_WORDS;
-    uint32_t safe_addr = BRAM_BASE_ADDR + (word_offset * 4);
-    udp_packet_buffer[i] = Xil_In32(safe_addr);
+    udp_packet_buffer[i] = Xil_In32(BRAM_BASE_ADDR + (word_offset * 4));
   }
-  */
-    // Copy packet data using optimized memcpy
+#else  // burst read via memcpy (fast, but corrupts during concurrent PL writes)
     if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
-        // No wrap - single memcpy
         memcpy(udp_packet_buffer,
                (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
                current_packet_size * 4);
     } else {
-        // Handle wrap with two memcpys
         uint32_t first_part = BRAM_SIZE_WORDS - ps_read_address;
         memcpy(udp_packet_buffer,
                (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
@@ -183,8 +184,9 @@ static int process_packet_from_bram(void) {
         memcpy(&udp_packet_buffer[first_part],
                (void*)BRAM_BASE_ADDR,
                (current_packet_size - first_part) * 4);
-    }  
-  
+    }
+#endif
+
   // Create pbuf that references our buffer directly (zero-copy!)
   uint32_t packet_bytes = current_packet_size * BYTES_PER_WORD;
   struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, packet_bytes, PBUF_REF);
