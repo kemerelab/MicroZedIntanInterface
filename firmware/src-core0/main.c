@@ -246,21 +246,39 @@ void handle_enable_streaming(void) {
   pl_reset_timestamp();
   usleep(1000);
 
-  // Fast-forward ps_read_address to current PL write position
-  // This discards any unread packets from the previous streaming session
-  // which may have a different packet size
-  // We set ps_read = pl_write to wait for the NEXT fresh packet
-  uint32_t pl_write_addr = pl_get_bram_write_address();
-  if (ps_read_address != pl_write_addr) {
-    send_message("Discarding unread packets: ps_read=%u -> %u\r\n",
-                 ps_read_address, pl_write_addr);
-    ps_read_address = pl_write_addr;
-  }
-  
   // Enable streaming
   stream_enabled = 1;
   pl_set_transmission(1);
-  
+
+  // Re-sync ps_read to a REAL packet boundary by scanning for the magic.
+  // A stop can interrupt the datapath mid-packet; since write_address, the
+  // packet boundary, and the (intentionally unreset) FIFO are only cleared by
+  // the hardware reset -- not by stop/restart -- the fresh magic on restart can
+  // land a few words off packet_boundary_address. Setting ps_read to the
+  // pointer then mis-aligns and the magic check loops forever. So: let the PL
+  // write several packets, then walk back from the write pointer to the nearest
+  // 0xDEADBEEF/0xCAFEBABE and align to it (single Xil_In32 reads are clean).
+  usleep(3000);  // ~90 packets @30ksps -- guarantees fresh complete packets
+  uint32_t wp = pl_get_bram_write_address();
+  int synced = 0;
+  for (uint32_t back = 0; back < 2 * current_packet_size + 16; back++) {
+    uint32_t a = (wp + BRAM_SIZE_WORDS - back) % BRAM_SIZE_WORDS;
+    uint32_t b = (a + 1) % BRAM_SIZE_WORDS;
+    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == 0xDEADBEEF &&     // magic low
+        Xil_In32(BRAM_BASE_ADDR + b * 4) == 0xCAFEBABE) {     // magic high
+      ps_read_address = a;
+      synced = 1;
+      break;
+    }
+  }
+  if (!synced) {
+    ps_read_address = wp;   // fallback; the magic-fail recovery will retry
+    send_message("Restart: no magic found near wp=%u, using write ptr\r\n", wp);
+  } else {
+    send_message("Restart: ps_read re-synced to magic at %u (wp=%u)\r\n",
+                 ps_read_address, wp);
+  }
+
   send_message("BRAM streaming STARTED (packet size: %u words)\r\n", current_packet_size);
 }
 
