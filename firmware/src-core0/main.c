@@ -166,12 +166,13 @@ static int process_packet_from_bram(void) {
   // axi_bram_ctrl/simple_dual_port_bram while the PL is writing port A. Reading
   // word-by-word like dump_bram should avoid it. (Slower than memcpy; watch for
   // back-pressure / packet loss at the 0xFF 18 MB/s rate.)
-#if 1  // single-beat read (diagnostic)
+#if 0  // single-beat read (diagnostic): clean but too slow to sustain 0xFF
   for (uint32_t i = 0; i < current_packet_size; i++) {
     uint32_t word_offset = (ps_read_address + i) % BRAM_SIZE_WORDS;
     udp_packet_buffer[i] = Xil_In32(BRAM_BASE_ADDR + (word_offset * 4));
   }
-#else  // burst read via memcpy (fast, but corrupts during concurrent PL writes)
+#else  // burst read via memcpy (fast) -- relies on the blk_mem_gen BRAM swap to
+       // make burst read-during-write clean (the custom inferred BRAM corrupted)
     if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
         memcpy(udp_packet_buffer,
                (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
