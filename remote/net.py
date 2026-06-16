@@ -829,7 +829,9 @@ class DataValidator:
                     if write_ptr is not None:
                         abs_word = (write_ptr - words_back) % 16384   # BRAM = 16384 words
                         addr = 0x80000000 + abs_word * 4
-                        loc = f"BRAM word {abs_word} = 0x{addr:08X}  (dump_bram {abs_word} 8)"
+                        win = (abs_word - 24) % 16384   # widen: sub-packet capture/stop gap
+                        loc = (f"~BRAM word {abs_word} = 0x{addr:08X}  "
+                               f"(dump_bram {win} 48  -- search this window)")
                     else:
                         loc = f"~{words_back} words before write ptr (wrptr-{words_back})"
                     print(f"      pkt-{pkts_from_end:>2} word {wip:>3} {SEG_NAMES[bit]:<12} "
