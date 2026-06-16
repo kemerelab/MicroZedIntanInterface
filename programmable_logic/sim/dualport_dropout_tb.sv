@@ -79,8 +79,8 @@ initial begin
     ctrl[2*32 +: 32] = 32'h0000_FF00;
     ctrl[0*32 +: 32] = 32'h0000_0009;
 
-    // run long enough for several full packets (each ~2800 clocks)
-    repeat (4*2900) @(negedge clk);
+    // run long enough for many full packets (each ~2800 clocks)
+    repeat (12*2900) @(negedge clk);
     ctrl[0*32 +: 32] = 32'h0;
     repeat (200) @(negedge clk);
 
@@ -157,6 +157,50 @@ initial begin
                     end else
                         $display("RTL data matches the reference EXACTLY for all 35 cycles -> packing is correct");
                 end
+            end
+
+            // ---- TEMPORAL check: value-validate EVERY captured packet and
+            //      verify the debug index advances by exactly 1 per packet.
+            //      An every-other-packet (or any per-packet) RTL anomaly shows
+            //      up here as a mismatch or a broken ddi sequence. ----
+            begin
+                int prev_ddi = -1;
+                int n_full = 0;
+                $display("--- per-packet value check (%0d packets) ---", starts.size());
+                for (int pi = 0; pi < starts.size(); pi++) begin
+                    int s0 = starts[pi];
+                    if (s0 + PKT <= wseq.size()) begin
+                        int best_ddi = -1, best_mism = 99999;
+                        n_full++;
+                        for (int ddi = 0; ddi < 512; ddi++) begin
+                            int mism = 0;
+                            for (int c = 0; c < 35; c++) begin
+                                logic [31:0] ew [0:3];
+                                ref_cycle_words(c, ddi, ew);
+                                for (int j = 0; j < 4; j++)
+                                    if (wseq[s0 + 10 + 4*c + j] !== ew[j]) mism++;
+                            end
+                            if (mism < best_mism) begin best_mism = mism; best_ddi = ddi; end
+                        end
+                        n_checks++;
+                        if (best_mism != 0)
+                            err($sformatf("packet %0d: %0d/140 words mismatch reference (ddi=%0d)",
+                                          pi, best_mism, best_ddi));
+                        // ddi must advance by exactly 1 (mod 512) every packet
+                        if (prev_ddi >= 0) begin
+                            int exp_ddi = (prev_ddi + 1) & 9'h1FF;
+                            n_checks++;
+                            if (best_ddi != exp_ddi)
+                                err($sformatf("packet %0d: ddi=%0d, expected %0d (sequence break!)",
+                                              pi, best_ddi, exp_ddi));
+                        end
+                        $display("  packet %0d @ word %0d: ddi=%0d, %0d/140 mismatched",
+                                 pi, s0, best_ddi, best_mism);
+                        prev_ddi = best_ddi;
+                    end
+                end
+                $display("value-checked %0d full packets, all correct & ddi sequential = %0d",
+                         n_full, (n_errors == 0));
             end
         end
     end
