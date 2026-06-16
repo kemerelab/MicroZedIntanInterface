@@ -4,6 +4,7 @@ import struct
 import time
 import random
 import queue
+import math
 import ipaddress
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
@@ -499,6 +500,70 @@ def calculate_packet_size(channel_enable):
     """Total packet size in words (header + data). Up to 10 + 140 = 150."""
     return 10 + calculate_data_words(channel_enable)
 
+# ---------------------------------------------------------------------------
+# Debug-mode sine reference model.
+#
+# In debug mode the PL fills every CIPO line with a synthetic sine, so we can
+# verify the data path end-to-end with NO chip attached. This mirrors
+# data_generator_core.sv exactly (proven bit-identical by
+# programmable_logic/sim/dualport_dropout_tb.sv):
+#
+#   sine_lut[i] = rtoi(32767.0/16 * sin(2*pi*i/512) + 32767.0)     i in 0..511
+#   per acquisition cycle c (0..34):  coff = max(c-2, 0)
+#       base_phase   bp  = (dummy_data_index + coff) & 0x1FF
+#       base_phase_p1 b1 = (bp + 128) & 0x1FF
+#   8 segments, in channel_enable bit order:
+#       bit0 A_CIPO0_REG=lut[bp]      bit1 A_CIPO0_DDR=lut[bp<<1]
+#       bit2 A_CIPO1_REG=lut[bp<<2]   bit3 A_CIPO1_DDR=lut[bp<<3]
+#       bit4 B_CIPO0_REG=lut[b1]      bit5 B_CIPO0_DDR=lut[b1<<1]
+#       bit6 B_CIPO1_REG=lut[b1<<2]   bit7 B_CIPO1_DDR=lut[b1<<3]
+# dummy_data_index increments by 1 per packet, in lockstep with the timestamp,
+# so after locking it on one packet we predict it for any other from the
+# timestamp delta -- which lets us tell genuine corruption (wrong values) apart
+# from packet loss (correct values, missing timestamps).
+# ---------------------------------------------------------------------------
+
+# Human-readable name for each enable bit (== segment-within-cycle order).
+SEG_NAMES = ["A_CIPO0_REG", "A_CIPO0_DDR", "A_CIPO1_REG", "A_CIPO1_DDR",
+             "B_CIPO0_REG", "B_CIPO0_DDR", "B_CIPO1_REG", "B_CIPO1_DDR"]
+
+def build_sine_lut():
+    """512-entry unsigned-16-bit sine LUT, identical to the RTL initial block.
+    SV $rtoi truncates toward zero; the argument is always positive here, so
+    Python int() matches it exactly."""
+    return [int(32767.0 / 16.0 * math.sin(2.0 * math.pi * i / 512.0) + 32767.0) & 0xFFFF
+            for i in range(512)]
+
+def _debug_seg_values(bp, lut):
+    """The 8 segment values (bit0..bit7) for a given base phase bp."""
+    b1 = (bp + 128) & 0x1FF
+    return [lut[bp],                  lut[(bp << 1) & 0x1FF],
+            lut[(bp << 2) & 0x1FF],   lut[(bp << 3) & 0x1FF],
+            lut[b1],                  lut[(b1 << 1) & 0x1FF],
+            lut[(b1 << 2) & 0x1FF],   lut[(b1 << 3) & 0x1FF]]
+
+def expected_debug_segments(channel_enable, ddi, lut):
+    """Flat list of expected 16-bit segments for one debug packet at index ddi,
+    plus matching (cycle, bit) metadata. Order == the PL's tight packing."""
+    enabled_bits = [b for b in range(8) if channel_enable & (1 << b)]
+    segs, meta = [], []
+    for cycle in range(35):
+        coff = (cycle - 2) if cycle >= 2 else 0
+        vals = _debug_seg_values((ddi + coff) & 0x1FF, lut)
+        for b in enabled_bits:
+            segs.append(vals[b])
+            meta.append((cycle, b))
+    return segs, meta
+
+def unpack_data_segments(data_words, n_seg):
+    """Unpack n_seg tightly-packed 16-bit segments (low half first) from the
+    32-bit data words of a packet."""
+    segs = []
+    for w in data_words:
+        segs.append(w & 0xFFFF)
+        segs.append((w >> 16) & 0xFFFF)
+    return segs[:n_seg]
+
 def channel_enable_to_string(channel_enable):
     """Convert channel enable bits to human readable string (both ports)"""
     names = ["A_CIPO0_REG", "A_CIPO0_DDR", "A_CIPO1_REG", "A_CIPO1_DDR",
@@ -536,9 +601,15 @@ class DataValidator:
         self.expected_packet_size_words = calculate_packet_size(0x0F)
         self._manual_queue = queue.Queue()
         self._manual_lock = threading.Lock()
-        
+
         # Cable detection integration
         self.cable_detector = None
+
+        # Debug-sine verification capture
+        self.sine_capture_active = False
+        self.sine_capture_target = 0
+        self.sine_capture_ce = 0xFF
+        self.sine_capture = []   # list of (timestamp, tuple-of-data-words)
 
     def set_cable_detector(self, detector):
         """Set cable detector for packet capture integration"""
@@ -588,9 +659,125 @@ class DataValidator:
         manual_cable_test_mode = False
         return packets
         
+    def start_sine_capture(self, channel_enable, n_packets):
+        """Begin stashing data words for debug-sine verification."""
+        self.sine_capture_ce = channel_enable
+        self.sine_capture_target = n_packets
+        self.sine_capture = []
+        self.sine_capture_active = True
+
+    def analyze_sine_capture(self):
+        """Verify the captured debug packets against the RTL sine reference.
+        Reports value correctness (per CIPO line / REG-DDR) and packet loss
+        (from timestamp gaps), and tells the two apart."""
+        cap = self.sine_capture
+        ce = self.sine_capture_ce
+        if len(cap) < 2:
+            print("[SINE] Not enough packets captured to verify "
+                  f"({len(cap)}). Is the board streaming in debug mode?")
+            return
+
+        lut = build_sine_lut()
+        ndw = calculate_data_words(ce)
+        n_seg = 35 * bin(ce & 0xFF).count('1')
+        enabled_bits = [b for b in range(8) if ce & (1 << b)]
+
+        ts0 = cap[0][0]
+        # Lock the debug index jointly over the first packets (robust to a
+        # corrupted lead packet): pick ddi0 minimizing total mismatch when each
+        # packet's index is predicted from its timestamp delta.
+        lock_n = min(len(cap), 20)
+        exp_cache = {}
+        def exp_segs(ddi):
+            if ddi not in exp_cache:
+                exp_cache[ddi] = expected_debug_segments(ce, ddi, lut)[0]
+            return exp_cache[ddi]
+        best_ddi0, best_total = 0, None
+        for ddi0 in range(512):
+            tot = 0
+            for ts, dw in cap[:lock_n]:
+                ddi = (ddi0 + (ts - ts0)) & 0x1FF
+                got = unpack_data_segments(dw, n_seg)
+                exp = exp_segs(ddi)
+                tot += sum(1 for a, b in zip(got, exp) if a != b)
+                if best_total is not None and tot >= best_total:
+                    break
+            if best_total is None or tot < best_total:
+                best_total, best_ddi0 = tot, ddi0
+
+        # Verify every captured packet at its predicted index.
+        _, meta = expected_debug_segments(ce, 0, lut)   # (cycle,bit) layout is index-independent
+        seg_bad = {b: 0 for b in enabled_bits}
+        cycle_bad = [0] * 35
+        total_seg = 0
+        total_bad = 0
+        exact_pkts = 0
+        for ts, dw in cap:
+            ddi = (best_ddi0 + (ts - ts0)) & 0x1FF
+            got = unpack_data_segments(dw, n_seg)
+            exp = exp_segs(ddi)
+            bad = 0
+            for i in range(n_seg):
+                total_seg += 1
+                if got[i] != exp[i]:
+                    bad += 1
+                    cyc, bit = meta[i]
+                    seg_bad[bit] += 1
+                    cycle_bad[cyc] += 1
+            total_bad += bad
+            if bad == 0:
+                exact_pkts += 1
+
+        # Packet loss from timestamp span vs packets received.
+        ts_span = cap[-1][0] - ts0 + 1
+        received = len(cap)
+        dropped = max(0, ts_span - received)
+        loss_pct = 100.0 * dropped / ts_span if ts_span > 0 else 0.0
+
+        print("\n" + "=" * 64)
+        print("  DEBUG SINE VERIFICATION")
+        print("=" * 64)
+        print(f"  channel_enable : 0x{ce:02X}  ({channel_enable_to_string(ce)})")
+        print(f"  packets verified: {received}   data words/packet: {ndw}")
+        print(f"  debug index lock: ddi0={best_ddi0}  (advances 1/packet w/ timestamp)")
+        print("-" * 64)
+        # Value correctness
+        if total_bad == 0:
+            print(f"  VALUE CHECK : PASS - all {total_seg} samples bit-exact vs RTL reference")
+        else:
+            print(f"  VALUE CHECK : FAIL - {total_bad}/{total_seg} samples wrong "
+                  f"({100.0*total_bad/total_seg:.3f}%), {exact_pkts}/{received} packets perfect")
+            print("  mismatches by synthetic channel:")
+            for b in enabled_bits:
+                if seg_bad[b]:
+                    print(f"      bit{b} {SEG_NAMES[b]:<12}: {seg_bad[b]} wrong")
+            worst = sorted(((cycle_bad[c], c) for c in range(35) if cycle_bad[c]),
+                           reverse=True)[:8]
+            if worst:
+                print("  worst cycles: " +
+                      ", ".join(f"cyc{c}({n})" for n, c in worst))
+        print("-" * 64)
+        # Packet loss
+        verb = "PASS" if dropped == 0 else "LOSS"
+        print(f"  PACKET LOSS : {verb} - received {received} of {ts_span} "
+              f"expected over the capture ({dropped} dropped, {loss_pct:.2f}%)")
+        print("-" * 64)
+        # Interpretation
+        if total_bad == 0 and dropped == 0:
+            print("  => Clean: the board generates and transmits debug data correctly.")
+        elif total_bad == 0 and dropped > 0:
+            print("  => Values are CORRECT but packets are being DROPPED. The data path")
+            print("     is fine; this is transport loss (host socket buffer / rate).")
+            print("     Try a bigger SO_RCVBUF, or compare board udp_packets_sent vs here.")
+        else:
+            print("  => Received values DIFFER from the reference: genuine corruption")
+            print("     in the data path (not mere loss). Capture the BRAM (dump_bram)")
+            print("     to localize PL-write vs PS-read.")
+        print("=" * 64 + "\n")
+
     def validate_packet(self, data):
         global cable_test_mode, cable_test_packets_captured, manual_cable_test_mode
-        
+
         self.packet_count += 1
         self.last_packet_raw = data
 
@@ -648,6 +835,12 @@ class DataValidator:
                 return None            
             
             timestamp = (words[3] << 32) | words[2]
+
+            # Debug-sine capture: stash data words for offline verification.
+            if self.sine_capture_active and len(self.sine_capture) < self.sine_capture_target:
+                self.sine_capture.append((timestamp, words[10:]))
+                if len(self.sine_capture) >= self.sine_capture_target:
+                    self.sine_capture_active = False
 
             now = time.time()
             if self.packet_count % 30000 == 0 or (now - self.last_stats_time) >= 5.0:
@@ -730,8 +923,52 @@ class DataValidator:
 
 validator = DataValidator()
 
+def verify_debug_sine(sock, channel_enable=0xFF, n_packets=300):
+    """Put the board in debug mode, capture N packets via the running UDP
+    listener, and verify the received synthetic sinewaves against the RTL
+    reference (data_generator_core.sv). Distinguishes genuine corruption from
+    packet loss. Leaves the board stopped."""
+    global validator
+    print(f"[SINE] Debug-sine check: channel_enable=0x{channel_enable:02X}, "
+          f"target {n_packets} packets")
+
+    send_binary_command(sock, CMD_STOP)
+    time.sleep(0.05)
+    if not send_binary_command(sock, CMD_SET_DEBUG_MODE, 1)[0]:
+        print("[SINE] Failed to enable debug mode"); return
+    if not send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, channel_enable)[0]:
+        print("[SINE] Failed to set channel_enable"); return
+    validator.set_channel_enable(channel_enable)
+
+    validator.start_sine_capture(channel_enable, n_packets)
+    if not send_binary_command(sock, CMD_START)[0]:
+        print("[SINE] Failed to start streaming"); return
+
+    # The udp_listener daemon thread fills validator.sine_capture.
+    t_end = time.time() + 10.0
+    while validator.sine_capture_active and time.time() < t_end:
+        time.sleep(0.05)
+    send_binary_command(sock, CMD_STOP)
+
+    if validator.sine_capture_active:
+        validator.sine_capture_active = False
+        print(f"[SINE] Timed out with {len(validator.sine_capture)}/{n_packets} "
+              f"packets. Is UDP reaching this host (run set_udp / check the network)?")
+    validator.analyze_sine_capture()
+
+
 def udp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Big receive buffer: at ~30k pkt/s and up to 600 B/pkt the default buffer
+    # overflows on any brief stall and drops packets (worse at dual-port). Ask
+    # for 16 MB; the OS may clamp to net.core.rmem_max (raise that to use it).
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
+        got = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        print(f"[UDP] SO_RCVBUF = {got // 1024} KB "
+              f"(raise net.core.rmem_max if smaller than requested)")
+    except OSError as e:
+        print(f"[UDP] Could not set SO_RCVBUF: {e}")
     sock.bind(("", UDP_PORT))
     sock.settimeout(1.0)
     print(f"[UDP] Listening on port {UDP_PORT}...")
@@ -1223,6 +1460,7 @@ def tcp_control():
         print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
+        print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
         print(f"       read_reg <r>, write_reg <r> <v>")
@@ -1298,6 +1536,18 @@ def tcp_control():
                             print("Channel enable must be 0x00-0xFF ([3:0]=port A, [7:4]=port B)")
                     except (ValueError, IndexError):
                         print("Usage: set_channels <0x00-0xFF>")
+                elif cmd.startswith("verify_sine"):
+                    try:
+                        parts = cmd.split()
+                        ce = 0xFF
+                        n = 300
+                        if len(parts) >= 2:
+                            ce = int(parts[1], 16)   # always hex, e.g. ff or 0xff
+                        if len(parts) >= 3:
+                            n = int(parts[2])
+                        verify_debug_sine(sock, ce, n)
+                    except ValueError:
+                        print("Usage: verify_sine [channel_enable hex, default FF] [n_packets, default 300]")
                 elif cmd.startswith("set_udp "):
                     try:
                         parts = cmd.split()
