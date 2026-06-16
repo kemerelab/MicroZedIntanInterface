@@ -51,6 +51,12 @@ uint16_t udp_dest_port = DEFAULT_UDP_DEST_PORT;
 // Use __attribute__((aligned(64))) to align to cache line boundary for optimal performance
 static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
 
+// BRAM read chunk size (words). A single large memcpy issues AXI bursts over
+// M_AXI_GP that corrupt a short run of words; dump_bram showed <=10-word reads
+// always clean, so read the packet in chunks of this size (8 = safe margin,
+// still a fast short burst). Tune up for speed / down if any DIFFs remain.
+#define BRAM_READ_CHUNK_WORDS  8
+
 // ============================================================================
 // PACKET SIZE CALCULATION FUNCTIONS
 // ============================================================================
@@ -156,37 +162,29 @@ static int process_packet_from_bram(void) {
   // TODO: If we are in an error state, we could track how long we stay there
   //    by measuring the timestamp gap when we recover.
 
-  // UDP transmission (always enabled) - zero-copy with pre-allocated buffer
-  // Copy variable sized packet data to pre-allocated buffer.
+  // UDP transmission (always enabled) - zero-copy with pre-allocated buffer.
   //
-  // DIAGNOSTIC: single-beat Xil_In32 reads instead of memcpy. dump_bram (which
-  // uses Xil_In32) reads the BRAM cleanly while the memcpy (AXI burst) stream
-  // shows out-of-range garbage at a fixed packet word offset (~116-128) that is
-  // NOT present in the BRAM -- a burst read-during-write hazard through
-  // axi_bram_ctrl/simple_dual_port_bram while the PL is writing port A. Reading
-  // word-by-word like dump_bram should avoid it. (Slower than memcpy; watch for
-  // back-pressure / packet loss at the 0xFF 18 MB/s rate.)
-#if 0  // single-beat read (diagnostic): clean but too slow to sustain 0xFF
-  for (uint32_t i = 0; i < current_packet_size; i++) {
-    uint32_t word_offset = (ps_read_address + i) % BRAM_SIZE_WORDS;
-    udp_packet_buffer[i] = Xil_In32(BRAM_BASE_ADDR + (word_offset * 4));
-  }
-#else  // burst read via memcpy (fast) -- relies on the blk_mem_gen BRAM swap to
-       // make burst read-during-write clean (the custom inferred BRAM corrupted)
-    if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
-        memcpy(udp_packet_buffer,
-               (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
-               current_packet_size * 4);
-    } else {
-        uint32_t first_part = BRAM_SIZE_WORDS - ps_read_address;
-        memcpy(udp_packet_buffer,
-               (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
-               first_part * 4);
-        memcpy(&udp_packet_buffer[first_part],
-               (void*)BRAM_BASE_ADDR,
-               (current_packet_size - first_part) * 4);
+  // CHUNKED BRAM READ. A single large memcpy issues long AXI bursts over the
+  // M_AXI_GP port that intermittently corrupt one short run of words (seen as
+  // out-of-range garbage at a fixed offset). It is reproducible on a STATIC BRAM
+  // (board stopped) via dump_bram's burst-vs-single comparison, so it is the
+  // burst transaction itself -- not the BRAM and not read-during-write -- and
+  // the BRAM read path is well-timed (+2.3 ns). Single-beat reads are clean but
+  // too slow for 18 MB/s. dump_bram showed <=10-word reads always clean and >=
+  // ~12-word reads corrupting, so read the packet in short chunks: each chunk is
+  // a fast burst that stays below the length that triggers the corruption.
+  for (uint32_t off = 0; off < current_packet_size; off += BRAM_READ_CHUNK_WORDS) {
+    uint32_t n = current_packet_size - off;
+    if (n > BRAM_READ_CHUNK_WORDS) n = BRAM_READ_CHUNK_WORDS;
+    uint32_t src = (ps_read_address + off) % BRAM_SIZE_WORDS;
+    if (src + n <= BRAM_SIZE_WORDS) {
+      memcpy(&udp_packet_buffer[off], (void*)(BRAM_BASE_ADDR + src * 4), n * 4);
+    } else {  // chunk straddles the BRAM wrap
+      uint32_t first = BRAM_SIZE_WORDS - src;
+      memcpy(&udp_packet_buffer[off], (void*)(BRAM_BASE_ADDR + src * 4), first * 4);
+      memcpy(&udp_packet_buffer[off + first], (void*)BRAM_BASE_ADDR, (n - first) * 4);
     }
-#endif
+  }
 
   // Create pbuf that references our buffer directly (zero-copy!)
   uint32_t packet_bytes = current_packet_size * BYTES_PER_WORD;
