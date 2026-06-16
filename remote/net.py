@@ -666,10 +666,12 @@ class DataValidator:
         self.sine_capture = []
         self.sine_capture_active = True
 
-    def analyze_sine_capture(self):
+    def analyze_sine_capture(self, write_ptr=None):
         """Verify the captured debug packets against the RTL sine reference.
         Reports value correctness (per CIPO line / REG-DDR) and packet loss
-        (from timestamp gaps), and tells the two apart."""
+        (from timestamp gaps), and tells the two apart. write_ptr (optional) is
+        the BRAM word write pointer read at stop, used to print absolute BRAM
+        addresses for the most-recent corrupted samples."""
         cap = self.sine_capture
         ce = self.sine_capture_ce
         if len(cap) < 2:
@@ -717,8 +719,8 @@ class DataValidator:
         total_seg = 0
         total_bad = 0
         exact_pkts = 0
-        mism_list = []        # (ddi, cyc, bit, exp, got)
-        for ts, dw in cap:
+        mism_list = []        # (pkt_idx, word_in_pkt, ddi, cyc, bit, exp, got)
+        for pkt_idx, (ts, dw) in enumerate(cap):
             ddi = (best_ddi0 + (ts - ts0)) & 0x1FF
             got = unpack_data_segments(dw, n_seg)
             exp = exp_segs(ddi)
@@ -730,8 +732,9 @@ class DataValidator:
                     cyc, bit = meta[i]
                     seg_bad[bit] += 1
                     cycle_bad[cyc] += 1
+                    word_in_pkt = 10 + (i // 2)   # 10 header words, then 2 segs/word
                     if len(mism_list) < 20000:
-                        mism_list.append((ddi, cyc, bit, exp[i], got[i]))
+                        mism_list.append((pkt_idx, word_in_pkt, ddi, cyc, bit, exp[i], got[i]))
             total_bad += bad
             if bad == 0:
                 exact_pkts += 1
@@ -757,7 +760,7 @@ class DataValidator:
             # value equal a neighbouring cycle/packet's correct value -> stale data).
             d1 = d_small = d_big = oor = 0          # |delta|==1, 2..16, >16, out-of-LUT-range
             a_prevpkt = a_nextpkt = a_prevcyc = a_nextcyc = a_otherbit = 0
-            for (ddi, cyc, bit, e, g) in mism_list:
+            for (pkt_idx, wip, ddi, cyc, bit, e, g) in mism_list:
                 ad = abs(g - e)
                 if not (lut_lo <= g <= lut_hi):
                     oor += 1
@@ -787,23 +790,55 @@ class DataValidator:
             if real > 0:
                 rc = [0] * 35
                 rb = {b: 0 for b in enabled_bits}
-                for (ddi, cyc, bit, e, g) in mism_list:
+                word_hist = {}
+                for (pkt_idx, wip, ddi, cyc, bit, e, g) in mism_list:
                     if abs(g - e) > 1:
                         rc[cyc] += 1
                         rb[bit] += 1
+                        word_hist[wip] = word_hist.get(wip, 0) + 1
                 print("  real by channel: " +
                       "  ".join(f"{SEG_NAMES[b]}={rb[b]}" for b in enabled_bits if rb[b]))
                 worst = sorted(((rc[c], c) for c in range(35) if rc[c]), reverse=True)[:8]
                 print("  real worst cyc : " +
                       ", ".join(f"cyc{c}({n})" for n, c in worst))
+                # Packet-WORD-offset histogram: corruption that is fixed at a
+                # buffer/transaction offset (not a cycle) shows up here as a tight
+                # cluster of word indices, independent of channel_enable.
+                wtop = sorted(word_hist.items(), key=lambda kv: -kv[1])[:10]
+                print("  real worst word: " +
+                      ", ".join(f"w{w}({n})" for w, n in sorted(wtop)))
                 if max(a_prevpkt, a_nextpkt, a_prevcyc, a_nextcyc, a_otherbit) > 0:
                     print(f"  alias of real  : prev-pkt={a_prevpkt} next-pkt={a_nextpkt} "
                           f"prev-cyc={a_prevcyc} next-cyc={a_nextcyc} other-chan={a_otherbit}")
-                print("  examples (ddi, cyc, chan, expected -> got, delta):")
+                # ---- BRAM navigation: where does the MOST RECENT corruption sit
+                #      relative to the end of the capture (= the PL write pointer
+                #      when streaming stopped)? words_back = how many BRAM words to
+                #      step backward from the final write pointer to reach it. ----
+                last_idx = received - 1
+                recent = [m for m in mism_list if abs(m[6] - m[5]) > 1]
+                recent_pkt = max(m[0] for m in recent)
+                rmism = sorted([m for m in recent if m[0] == recent_pkt], key=lambda m: m[1])
+                pkts_from_end = last_idx - recent_pkt
+                print(f"  --- most-recent corruption: {pkts_from_end} packet(s) before the "
+                      f"end of capture ---")
+                print(f"      (final captured packet = index {last_idx}; PL write pointer at "
+                      f"stop is just past it)")
+                psize = self.expected_packet_size_words
+                for (pkt_idx, wip, ddi, cyc, bit, e, g) in rmism[:8]:
+                    words_back = pkts_from_end * psize + (psize - wip)
+                    if write_ptr is not None:
+                        abs_word = (write_ptr - words_back) % 16384   # BRAM = 16384 words
+                        addr = 0x80000000 + abs_word * 4
+                        loc = f"BRAM word {abs_word} = 0x{addr:08X}  (dump_bram {abs_word} 8)"
+                    else:
+                        loc = f"~{words_back} words before write ptr (wrptr-{words_back})"
+                    print(f"      pkt-{pkts_from_end:>2} word {wip:>3} {SEG_NAMES[bit]:<12} "
+                          f"0x{e:04X}->0x{g:04X}   {loc}")
+                print("  examples (pkt#-from-end, word, chan, expected -> got, delta):")
                 shown = 0
-                for (ddi, cyc, bit, e, g) in mism_list:
+                for (pkt_idx, wip, ddi, cyc, bit, e, g) in mism_list:
                     if abs(g - e) > 1:
-                        print(f"      ddi={ddi:3d} cyc{cyc:2d} {SEG_NAMES[bit]:<12} "
+                        print(f"      pkt-{last_idx - pkt_idx:>3} word{wip:>3} {SEG_NAMES[bit]:<12} "
                               f"0x{e:04X} -> 0x{g:04X}  ({g - e:+d})")
                         shown += 1
                         if shown >= 12:
@@ -1014,7 +1049,18 @@ def verify_debug_sine(sock, channel_enable=0xFF, n_packets=300):
         validator.sine_capture_active = False
         print(f"[SINE] Timed out with {len(validator.sine_capture)}/{n_packets} "
               f"packets. Is UDP reaching this host (run set_udp / check the network)?")
-    validator.analyze_sine_capture()
+
+    # Read the BRAM write pointer after stop so the analysis can give absolute
+    # BRAM addresses for corrupted samples (for dump_bram correlation). NOTE: the
+    # PL usually writes a few packets between the last UDP packet this host got
+    # and the stop, so treat the absolute address as the centre of a small window.
+    wrptr = None
+    st = get_status(sock)
+    if st is not None:
+        wrptr = st.get('bram_write_addr')
+        print(f"[SINE] BRAM write pointer at stop: {wrptr} (word) = "
+              f"0x{0x80000000 + (wrptr or 0)*4:08X}")
+    validator.analyze_sine_capture(write_ptr=wrptr)
 
 
 def udp_listener():
