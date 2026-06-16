@@ -141,7 +141,6 @@ xilinx.com:ip:proc_sys_reset:5.0\
 xilinx.com:ip:clk_wiz:6.0\
 xilinx.com:ip:smartconnect:1.0\
 xilinx.com:ip:axi_bram_ctrl:4.1\
-xilinx.com:ip:blk_mem_gen:8.4\
 "
 
    set list_ips_missing ""
@@ -166,7 +165,8 @@ xilinx.com:ip:blk_mem_gen:8.4\
 ##################################################################
 set bCheckModules 1
 if { $bCheckModules == 1 } {
-   set list_check_mods "\
+   set list_check_mods "\ 
+simple_dual_port_bram_wrapper\
 led_status_controller\
 axi_lite_registers\
 data_generator\
@@ -600,7 +600,7 @@ proc create_root_design { parentCell } {
     CONFIG.CLKOUT2_DRIVES {BUFG} \
     CONFIG.CLKOUT2_JITTER {113.523} \
     CONFIG.CLKOUT2_PHASE_ERROR {94.994} \
-    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {131.25} \
+    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {175} \
     CONFIG.CLKOUT2_USED {true} \
     CONFIG.CLKOUT3_DRIVES {BUFG} \
     CONFIG.CLKOUT4_DRIVES {BUFG} \
@@ -613,7 +613,7 @@ proc create_root_design { parentCell } {
     CONFIG.MMCM_CLKIN1_PERIOD {10.000} \
     CONFIG.MMCM_CLKIN2_PERIOD {10.000} \
     CONFIG.MMCM_CLKOUT0_DIVIDE_F {12.500} \
-    CONFIG.MMCM_CLKOUT1_DIVIDE {8} \
+    CONFIG.MMCM_CLKOUT1_DIVIDE {6} \
     CONFIG.MMCM_COMPENSATION {ZHOLD} \
     CONFIG.MMCM_DIVCLK_DIVIDE {1} \
     CONFIG.NUM_OUT_CLKS {2} \
@@ -634,35 +634,17 @@ proc create_root_design { parentCell } {
   set_property CONFIG.NUM_SI {1} $smartconnect_1
 
 
-  # Create instance: simple_dual_port_bram (Xilinx Block Memory Generator).
-  # Replaces the hand-written simple_dual_port_bram_wrapper, whose synthesis-
-  # inferred 512Kbit dual-clock cascade corrupted AXI burst reads while the PL
-  # wrote port A (single reads were clean). The vendor IP builds a characterized
-  # cascade with explicit async-clock (independent-clock) read-during-write
-  # handling. True dual port, 32-bit x 16384, byte-write, latency 1 (no extra
-  # output register) to match the axi_bram_ctrl read timing the design uses.
-  set simple_dual_port_bram [ create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 simple_dual_port_bram ]
-  set_property -dict [list \
-    CONFIG.Memory_Type {True_Dual_Port_RAM} \
-    CONFIG.Assume_Synchronous_Clk {0} \
-    CONFIG.Enable_A {Use_ENA_Pin} \
-    CONFIG.Enable_B {Use_ENB_Pin} \
-    CONFIG.Use_RSTA_Pin {true} \
-    CONFIG.Use_RSTB_Pin {true} \
-    CONFIG.Use_Byte_Write_Enable {true} \
-    CONFIG.Byte_Size {8} \
-    CONFIG.Write_Width_A {32} \
-    CONFIG.Write_Depth_A {16384} \
-    CONFIG.Read_Width_A {32} \
-    CONFIG.Write_Width_B {32} \
-    CONFIG.Read_Width_B {32} \
-    CONFIG.Register_PortA_Output_of_Memory_Primitives {false} \
-    CONFIG.Register_PortB_Output_of_Memory_Primitives {false} \
-    CONFIG.Port_A_Write_Rate {50} \
-    CONFIG.Port_B_Clock {100} \
-    CONFIG.Port_B_Enable_Rate {100} \
-  ] $simple_dual_port_bram
-
+  # Create instance: simple_dual_port_bram, and set properties
+  set block_name simple_dual_port_bram_wrapper
+  set block_cell_name simple_dual_port_bram
+  if { [catch {set simple_dual_port_bram [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $simple_dual_port_bram eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+  
   # Create instance: axi_bram_ctrl_0, and set properties
   set axi_bram_ctrl_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0 ]
   set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_0
