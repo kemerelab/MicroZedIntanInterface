@@ -9,6 +9,7 @@
 #include "lwip/timeouts.h"
 //#include "xuartps.h"
 #include "shared_print.h"
+#include "pl_dma.h"
 
 // Forward declare eth_link_detect from xemacpsif adapter
 // This function is provided by the LWIP library's Xilinx EMAC adapter
@@ -39,6 +40,7 @@ uint32_t current_channel_enable = 0x0F;    // Current channel enable setting (de
 
 // Packet validation tracking
 uint32_t error_count = 0;
+uint32_t dma_errors = 0;   // CDMA read failures (READ_VIA_DMA path)
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;
@@ -62,6 +64,11 @@ static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(6
 // also minimizes the number of high-latency GP address phases. (BRAM is mapped
 // NORM_NONCACHE_SHARED, so ldmia to it issues a real burst.)
 #define BRAM_BURST_WORDS  10
+
+// Capture-BRAM bulk-read path on this branch:
+//   1 = AXI CDMA (pl_dma: BRAM -> non-cacheable DDR buffer; CPU off the read path)
+//   0 = inline-ldmia CPU read above (the in-spec dual-port path, for A/B compare)
+#define READ_VIA_DMA  1
 
 // Copy exactly 10 words src->dst as one 10-beat ldmia burst (no call/setup).
 static inline void bram_burst10(uint32_t *d, const uint32_t *s) {
@@ -191,29 +198,43 @@ static int process_packet_from_bram(void) {
 
   // UDP transmission (always enabled) - zero-copy with pre-allocated buffer.
   //
-  // Read the packet out of the capture BRAM in BRAM_BURST_WORDS-word ldmia
-  // bursts (see bram_copy_run / bram_burst10 above) -- short enough to stay
-  // below the GP-port burst length that corrupts, but issued without memcpy's
-  // per-chunk call/alignment overhead. Split at the BRAM wrap so each
-  // bram_copy_run sees a contiguous, word-aligned run.
+  // Read the packet out of the capture BRAM into pkt_buf. The bulk read goes
+  // either through the AXI CDMA (READ_VIA_DMA: BRAM -> non-cacheable DDR buffer,
+  // PS GP master off the path) or the inline-ldmia CPU read. Split at the BRAM
+  // wrap so each transfer is a contiguous, word-aligned run.
+  uint32_t *pkt_buf;
+#if READ_VIA_DMA
+  pkt_buf = (uint32_t *)DMA_BUF_ADDR;
+  int derr;
   if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
-    bram_copy_run(udp_packet_buffer,
+    derr = pl_dma_read_bram(pkt_buf, ps_read_address, current_packet_size);
+  } else {
+    uint32_t first = BRAM_SIZE_WORDS - ps_read_address;
+    derr  = pl_dma_read_bram(pkt_buf, ps_read_address, first);
+    derr |= pl_dma_read_bram(pkt_buf + first, 0, current_packet_size - first);
+  }
+  if (derr) dma_errors++;
+#else
+  pkt_buf = udp_packet_buffer;
+  if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
+    bram_copy_run(pkt_buf,
                   (const uint32_t *)(BRAM_BASE_ADDR + ps_read_address * 4),
                   current_packet_size);
   } else {
     uint32_t first = BRAM_SIZE_WORDS - ps_read_address;
-    bram_copy_run(udp_packet_buffer,
+    bram_copy_run(pkt_buf,
                   (const uint32_t *)(BRAM_BASE_ADDR + ps_read_address * 4), first);
-    bram_copy_run(&udp_packet_buffer[first],
+    bram_copy_run(&pkt_buf[first],
                   (const uint32_t *)BRAM_BASE_ADDR, current_packet_size - first);
   }
+#endif
 
   // Create pbuf that references our buffer directly (zero-copy!)
   uint32_t packet_bytes = current_packet_size * BYTES_PER_WORD;
   struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, packet_bytes, PBUF_REF);
   if (p != NULL) {
     // Point pbuf payload directly to our buffer (zero-copy!)
-    p->payload = (void*)udp_packet_buffer;
+    p->payload = (void*)pkt_buf;
 
     // Send using udp_sendto (no connect required)
     ip_addr_t dest_ip;
@@ -499,6 +520,9 @@ int main() {
   init_print_buffer();
   memset((void *)command_flags, 0, sizeof(command_flags_t));
   psmon_init();   // zero the status snapshot before core 1 reads it
+#if READ_VIA_DMA
+  pl_dma_init();  // AXI CDMA + non-cacheable DDR staging buffer for the read path
+#endif
   // ========================================================================
 
   // ========================================================================
