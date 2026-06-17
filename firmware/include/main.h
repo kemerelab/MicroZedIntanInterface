@@ -189,7 +189,7 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         0
+#define FIRMWARE_VERSION_MINOR         1   // 1.1: AXI-CDMA read path + get_status perf instrumentation
 #define FIRMWARE_VERSION_PATCH         0
 #define FIRMWARE_VERSION_BUILD         0
 #define FIRMWARE_VERSION_WORD          ((FIRMWARE_VERSION_MAJOR << 24) | \
@@ -249,12 +249,14 @@ typedef struct __attribute__((packed)) {
     uint8_t  aux_idx[3];        // per-slot sequence index
     uint8_t  reserved5[3];
 
-    // DMA / performance instrumentation (20 bytes; appended -- keep net.py in sync)
+    // DMA / performance instrumentation (24 bytes; appended -- keep net.py in sync)
+    // Raw global-timer ticks; host converts to us with timer_hz.
     uint32_t dma_errors;        // CDMA read failures since boot
-    uint32_t dma_us_last;       // last CDMA transfer time (microseconds)
-    uint32_t dma_us_max;        // worst CDMA transfer time
-    uint32_t loop_us_last;      // last receive->transmit time per packet
-    uint32_t loop_us_max;       // worst receive->transmit time (vs 33us budget)
+    uint32_t dma_ticks_last;    // last CDMA transfer (ticks)
+    uint32_t dma_ticks_max;     // worst CDMA transfer (ticks)
+    uint32_t loop_ticks_last;   // last receive->transmit (ticks)
+    uint32_t loop_ticks_max;    // worst receive->transmit (ticks; vs 33us budget)
+    uint32_t timer_hz;          // tick frequency, for host ticks->us conversion
 
 } status_response_t;
 
@@ -290,10 +292,12 @@ extern uint64_t expected_timestamp;
 extern uint32_t error_count;
 extern uint32_t timestamp_gaps;
 
-// DMA + performance instrumentation (microseconds; surfaced via get_status)
+// DMA + performance instrumentation (raw global-timer ticks; surfaced via
+// get_status, converted to us host-side using perf_timer_hz)
 extern uint32_t dma_errors;
-extern uint32_t dma_us_last, dma_us_max;
-extern uint32_t loop_us_last, loop_us_max;
+extern uint32_t dma_ticks_last, dma_ticks_max;
+extern uint32_t loop_ticks_last, loop_ticks_max;
+extern uint32_t perf_timer_hz;
 
 // UDP transmission
 extern uint32_t udp_packets_sent;

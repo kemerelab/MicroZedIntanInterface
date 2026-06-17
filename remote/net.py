@@ -1245,8 +1245,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 118:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 118)")
+    if len(data) != 122:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 122)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1275,9 +1275,9 @@ def get_status(sock):
     aux_read_result, aux_bank_active, aux_flags, aux_i0, aux_i1, aux_i2 = \
         struct.unpack('<IBBBBB3x', data[86:98])
 
-    # DMA / performance instrumentation (20 bytes)
-    dma_errors, dma_us_last, dma_us_max, loop_us_last, loop_us_max = \
-        struct.unpack('<IIIII', data[98:118])
+    # DMA / performance instrumentation (24 bytes: raw ticks + tick frequency)
+    dma_errors, dma_ticks_last, dma_ticks_max, loop_ticks_last, loop_ticks_max, timer_hz = \
+        struct.unpack('<IIIIII', data[98:122])
 
     status = {
         'version': version,
@@ -1315,10 +1315,11 @@ def get_status(sock):
         'aux_indices': (aux_i0, aux_i1, aux_i2),
         'aux_read_result': aux_read_result,
         'dma_errors': dma_errors,
-        'dma_us_last': dma_us_last,
-        'dma_us_max': dma_us_max,
-        'loop_us_last': loop_us_last,
-        'loop_us_max': loop_us_max,
+        'dma_ticks_last': dma_ticks_last,
+        'dma_ticks_max': dma_ticks_max,
+        'loop_ticks_last': loop_ticks_last,
+        'loop_ticks_max': loop_ticks_max,
+        'timer_hz': timer_hz,
     }
 
     return status
@@ -1376,12 +1377,13 @@ def print_status(status):
     print(f"Last Inject Result: 0x{status['aux_read_result']:08X}")
 
     print("\n--- Performance (budget 33.3 us/packet @ 30 kHz) ---")
-    print(f"CDMA transfer:  last {status['dma_us_last']} us, max {status['dma_us_max']} us")
-    print(f"Recv->transmit: last {status['loop_us_last']} us, max {status['loop_us_max']} us")
-    lm = status['loop_us_max']
-    head = 33.3 - lm
-    print(f"Headroom (max): {head:.1f} us  ({100.0*lm/33.3:.0f}% of budget used)")
-    print(f"DMA errors: {status['dma_errors']}")
+    hz = status['timer_hz'] or 1   # raw ticks -> us converted here, not in firmware
+    to_us = lambda t: t * 1e6 / hz
+    print(f"CDMA transfer:  last {to_us(status['dma_ticks_last']):.2f} us, max {to_us(status['dma_ticks_max']):.2f} us")
+    print(f"Recv->transmit: last {to_us(status['loop_ticks_last']):.2f} us, max {to_us(status['loop_ticks_max']):.2f} us")
+    lm = to_us(status['loop_ticks_max'])
+    print(f"Headroom (max): {33.3 - lm:.2f} us  ({100.0*lm/33.3:.0f}% of budget used)")
+    print(f"DMA errors: {status['dma_errors']}   (timer {hz/1e6:.1f} MHz)")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):
