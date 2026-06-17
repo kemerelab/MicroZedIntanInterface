@@ -40,7 +40,7 @@ uint32_t current_channel_enable = 0x0F;    // Current channel enable setting (de
 
 // Packet validation tracking
 uint32_t error_count = 0;
-uint32_t dma_errors = 0;   // CDMA read failures (READ_VIA_DMA path)
+uint32_t dma_errors = 0;   // CDMA read failures (BRAM_READ_DMA path)
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;
@@ -51,45 +51,30 @@ uint16_t udp_dest_port = DEFAULT_UDP_DEST_PORT;
 
 // Pre-allocated packet buffer for UDP (sized for maximum packet)
 // Use __attribute__((aligned(64))) to align to cache line boundary for optimal performance
-static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
+// Used as the packet buffer only on the BRAM_READ_SINGLE path; unused under DMA.
+static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64), unused));
 
-// ---- Capture-BRAM burst read -----------------------------------------------
-// A single long memcpy over M_AXI_GP corrupts a run of words; dump_bram showed
-// <=10-word reads always clean and >=~12 corrupting. So read the packet in
-// bursts of BRAM_BURST_WORDS, each below the corruption length. We issue each
-// burst as ONE inline `ldmia` (a single AXI INCR burst) instead of calling
-// memcpy() per chunk: at -O3 memcpy is `b memcpy` (a call + alignment branches)
-// paid ~19x/packet, and chunk-8 memcpy could not sustain 0xFF. ldmia drops the
-// per-chunk software setup AND lets us use the largest safe burst (10), which
-// also minimizes the number of high-latency GP address phases. (BRAM is mapped
-// NORM_NONCACHE_SHARED, so ldmia to it issues a real burst.)
-#define BRAM_BURST_WORDS  10
-
-// Capture-BRAM bulk-read path on this branch:
-//   1 = AXI CDMA (pl_dma: BRAM -> non-cacheable DDR buffer; CPU off the read path)
-//   0 = inline-ldmia CPU read above (the in-spec dual-port path, for A/B compare)
-#define READ_VIA_DMA  1
-
-// Copy exactly 10 words src->dst as one 10-beat ldmia burst (no call/setup).
-static inline void bram_burst10(uint32_t *d, const uint32_t *s) {
-    uint32_t a, b, c, e, f, g, h, i, j, k;
-    __asm__ volatile(
-        "ldmia %10, {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9}"
-        : "=r"(a), "=r"(b), "=r"(c), "=r"(e), "=r"(f),
-          "=r"(g), "=r"(h), "=r"(i), "=r"(j), "=r"(k)
-        : "r"(s) : "memory");
-    d[0]=a; d[1]=b; d[2]=c; d[3]=e; d[4]=f;
-    d[5]=g; d[6]=h; d[7]=i; d[8]=j; d[9]=k;
-}
-
-// Copy a CONTIGUOUS run of n words from BRAM (word-aligned src) into dst using
-// 10-word ldmia bursts, with single-beat loads for the <10-word tail (volatile
-// forces each tail word to a separate 1-beat read, never merged into a burst).
-static inline void bram_copy_run(uint32_t *d, const uint32_t *s, uint32_t n) {
-    while (n >= BRAM_BURST_WORDS) { bram_burst10(d, s); d += BRAM_BURST_WORDS; s += BRAM_BURST_WORDS; n -= BRAM_BURST_WORDS; }
-    volatile const uint32_t *v = (volatile const uint32_t *)s;
-    while (n--) *d++ = *v++;
-}
+// ---- Capture-BRAM read method ----------------------------------------------
+// The PS M_AXI_GP master corrupts long *burst* reads of the capture BRAM (the
+// 0xFF dual-port dropout). What we learned chasing it:
+//   SINGLE - word-by-word Xil_In32. CLEAN by construction: each read is its own
+//            1-beat AXI transaction, so it never issues the burst that the GP
+//            master mishandles. But it is latency-bound and too slow to sustain
+//            0xFF (128 ch, 150-word packets) at the 131.25 MHz AXI clock.
+//            Raising the AXI clock to 210 MHz DID make single-beat fast enough --
+//            but 210 MHz is over the -1 part's M_AXI_GP ~150 MHz spec
+//            (clk_out2 also clocks the GP master), so it is bench-only, not
+//            shippable. Kept here as the conceptual reference / fallback.
+//   DMA    - an AXI CDMA (a PL master) copies each packet BRAM -> DDR over
+//            S_AXI_HP0 (see pl_dma.c), taking the PS GP master off the bulk-read
+//            path entirely. Clean at full bandwidth, in-spec at 131.25 MHz, and
+//            it frees core 0. This is the fix. DEFAULT.
+// (A removed third option, inline-`ldmia` chunked CPU bursts, was a burst over
+//  the same broken GP master AND its asm scrambled word order -> wrong magic;
+//  see git history. Don't reintroduce CPU bursts of the BRAM.)
+#define BRAM_READ_DMA     0
+#define BRAM_READ_SINGLE  1
+#define BRAM_READ_METHOD  BRAM_READ_DMA
 
 // ============================================================================
 // PACKET SIZE CALCULATION FUNCTIONS
@@ -198,12 +183,12 @@ static int process_packet_from_bram(void) {
 
   // UDP transmission (always enabled) - zero-copy with pre-allocated buffer.
   //
-  // Read the packet out of the capture BRAM into pkt_buf. The bulk read goes
-  // either through the AXI CDMA (READ_VIA_DMA: BRAM -> non-cacheable DDR buffer,
-  // PS GP master off the path) or the inline-ldmia CPU read. Split at the BRAM
-  // wrap so each transfer is a contiguous, word-aligned run.
+  // Read the packet out of the capture BRAM into pkt_buf (see "read method"
+  // above). DMA: the CDMA copies BRAM -> a non-cacheable DDR buffer, split at
+  // the BRAM wrap into two contiguous transfers. SINGLE: clean but slow
+  // word-by-word Xil_In32 (the conceptual reference / 210 MHz fallback).
   uint32_t *pkt_buf;
-#if READ_VIA_DMA
+#if BRAM_READ_METHOD == BRAM_READ_DMA
   pkt_buf = (uint32_t *)DMA_BUF_ADDR;
   int derr;
   if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
@@ -214,18 +199,11 @@ static int process_packet_from_bram(void) {
     derr |= pl_dma_read_bram(pkt_buf + first, 0, current_packet_size - first);
   }
   if (derr) dma_errors++;
-#else
+#else  // BRAM_READ_SINGLE -- clean 1-beat reads, but too slow for 0xFF at 131 MHz
   pkt_buf = udp_packet_buffer;
-  if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
-    bram_copy_run(pkt_buf,
-                  (const uint32_t *)(BRAM_BASE_ADDR + ps_read_address * 4),
-                  current_packet_size);
-  } else {
-    uint32_t first = BRAM_SIZE_WORDS - ps_read_address;
-    bram_copy_run(pkt_buf,
-                  (const uint32_t *)(BRAM_BASE_ADDR + ps_read_address * 4), first);
-    bram_copy_run(&pkt_buf[first],
-                  (const uint32_t *)BRAM_BASE_ADDR, current_packet_size - first);
+  for (uint32_t i = 0; i < current_packet_size; i++) {
+    uint32_t src = (ps_read_address + i) % BRAM_SIZE_WORDS;
+    pkt_buf[i] = Xil_In32(BRAM_BASE_ADDR + src * 4);
   }
 #endif
 
@@ -520,7 +498,7 @@ int main() {
   init_print_buffer();
   memset((void *)command_flags, 0, sizeof(command_flags_t));
   psmon_init();   // zero the status snapshot before core 1 reads it
-#if READ_VIA_DMA
+#if BRAM_READ_METHOD == BRAM_READ_DMA
   pl_dma_init();  // AXI CDMA + non-cacheable DDR staging buffer for the read path
 #endif
   // ========================================================================
