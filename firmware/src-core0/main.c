@@ -51,11 +51,38 @@ uint16_t udp_dest_port = DEFAULT_UDP_DEST_PORT;
 // Use __attribute__((aligned(64))) to align to cache line boundary for optimal performance
 static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
 
-// BRAM read chunk size (words). A single large memcpy issues AXI bursts over
-// M_AXI_GP that corrupt a short run of words; dump_bram showed <=10-word reads
-// always clean, so read the packet in chunks of this size (8 = safe margin,
-// still a fast short burst). Tune up for speed / down if any DIFFs remain.
-#define BRAM_READ_CHUNK_WORDS  8
+// ---- Capture-BRAM burst read -----------------------------------------------
+// A single long memcpy over M_AXI_GP corrupts a run of words; dump_bram showed
+// <=10-word reads always clean and >=~12 corrupting. So read the packet in
+// bursts of BRAM_BURST_WORDS, each below the corruption length. We issue each
+// burst as ONE inline `ldmia` (a single AXI INCR burst) instead of calling
+// memcpy() per chunk: at -O3 memcpy is `b memcpy` (a call + alignment branches)
+// paid ~19x/packet, and chunk-8 memcpy could not sustain 0xFF. ldmia drops the
+// per-chunk software setup AND lets us use the largest safe burst (10), which
+// also minimizes the number of high-latency GP address phases. (BRAM is mapped
+// NORM_NONCACHE_SHARED, so ldmia to it issues a real burst.)
+#define BRAM_BURST_WORDS  10
+
+// Copy exactly 10 words src->dst as one 10-beat ldmia burst (no call/setup).
+static inline void bram_burst10(uint32_t *d, const uint32_t *s) {
+    uint32_t a, b, c, e, f, g, h, i, j, k;
+    __asm__ volatile(
+        "ldmia %10, {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9}"
+        : "=r"(a), "=r"(b), "=r"(c), "=r"(e), "=r"(f),
+          "=r"(g), "=r"(h), "=r"(i), "=r"(j), "=r"(k)
+        : "r"(s) : "memory");
+    d[0]=a; d[1]=b; d[2]=c; d[3]=e; d[4]=f;
+    d[5]=g; d[6]=h; d[7]=i; d[8]=j; d[9]=k;
+}
+
+// Copy a CONTIGUOUS run of n words from BRAM (word-aligned src) into dst using
+// 10-word ldmia bursts, with single-beat loads for the <10-word tail (volatile
+// forces each tail word to a separate 1-beat read, never merged into a burst).
+static inline void bram_copy_run(uint32_t *d, const uint32_t *s, uint32_t n) {
+    while (n >= BRAM_BURST_WORDS) { bram_burst10(d, s); d += BRAM_BURST_WORDS; s += BRAM_BURST_WORDS; n -= BRAM_BURST_WORDS; }
+    volatile const uint32_t *v = (volatile const uint32_t *)s;
+    while (n--) *d++ = *v++;
+}
 
 // ============================================================================
 // PACKET SIZE CALCULATION FUNCTIONS
@@ -164,26 +191,21 @@ static int process_packet_from_bram(void) {
 
   // UDP transmission (always enabled) - zero-copy with pre-allocated buffer.
   //
-  // CHUNKED BRAM READ. A single large memcpy issues long AXI bursts over the
-  // M_AXI_GP port that intermittently corrupt one short run of words (seen as
-  // out-of-range garbage at a fixed offset). It is reproducible on a STATIC BRAM
-  // (board stopped) via dump_bram's burst-vs-single comparison, so it is the
-  // burst transaction itself -- not the BRAM and not read-during-write -- and
-  // the BRAM read path is well-timed (+2.3 ns). Single-beat reads are clean but
-  // too slow for 18 MB/s. dump_bram showed <=10-word reads always clean and >=
-  // ~12-word reads corrupting, so read the packet in short chunks: each chunk is
-  // a fast burst that stays below the length that triggers the corruption.
-  for (uint32_t off = 0; off < current_packet_size; off += BRAM_READ_CHUNK_WORDS) {
-    uint32_t n = current_packet_size - off;
-    if (n > BRAM_READ_CHUNK_WORDS) n = BRAM_READ_CHUNK_WORDS;
-    uint32_t src = (ps_read_address + off) % BRAM_SIZE_WORDS;
-    if (src + n <= BRAM_SIZE_WORDS) {
-      memcpy(&udp_packet_buffer[off], (void*)(BRAM_BASE_ADDR + src * 4), n * 4);
-    } else {  // chunk straddles the BRAM wrap
-      uint32_t first = BRAM_SIZE_WORDS - src;
-      memcpy(&udp_packet_buffer[off], (void*)(BRAM_BASE_ADDR + src * 4), first * 4);
-      memcpy(&udp_packet_buffer[off + first], (void*)BRAM_BASE_ADDR, (n - first) * 4);
-    }
+  // Read the packet out of the capture BRAM in BRAM_BURST_WORDS-word ldmia
+  // bursts (see bram_copy_run / bram_burst10 above) -- short enough to stay
+  // below the GP-port burst length that corrupts, but issued without memcpy's
+  // per-chunk call/alignment overhead. Split at the BRAM wrap so each
+  // bram_copy_run sees a contiguous, word-aligned run.
+  if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
+    bram_copy_run(udp_packet_buffer,
+                  (const uint32_t *)(BRAM_BASE_ADDR + ps_read_address * 4),
+                  current_packet_size);
+  } else {
+    uint32_t first = BRAM_SIZE_WORDS - ps_read_address;
+    bram_copy_run(udp_packet_buffer,
+                  (const uint32_t *)(BRAM_BASE_ADDR + ps_read_address * 4), first);
+    bram_copy_run(&udp_packet_buffer[first],
+                  (const uint32_t *)BRAM_BASE_ADDR, current_packet_size - first);
   }
 
   // Create pbuf that references our buffer directly (zero-copy!)
