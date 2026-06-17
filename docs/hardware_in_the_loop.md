@@ -1,5 +1,10 @@
 # Hardware-in-the-loop (HITL) setup
 
+> **Superseded (2026-06-16):** laptop-driven HITL via JTAG/QSPI was attempted and
+> **abandoned** — see `docs/hitl_laptop_findings.md` for what worked, what didn't, and
+> why. Use the SD-card + remote-build workflow; keep the laptop for `net.py`
+> verification. The brainstormed plan below is kept for reference only.
+
 Goal: let a Claude Code instance build, flash, and test firmware/PL changes
 against the real MicroZed board autonomously — so chunk-size tuning and the DMA
 work can iterate in minutes instead of round-tripping through a human.
