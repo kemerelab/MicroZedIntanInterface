@@ -10,6 +10,7 @@
 //#include "xuartps.h"
 #include "shared_print.h"
 #include "pl_dma.h"
+#include "xiltimer.h"  // XTime_GetTime / COUNTS_PER_SECOND for perf instrumentation
 
 // Forward declare eth_link_detect from xemacpsif adapter
 // This function is provided by the LWIP library's Xilinx EMAC adapter
@@ -41,6 +42,18 @@ uint32_t current_channel_enable = 0x0F;    // Current channel enable setting (de
 // Packet validation tracking
 uint32_t error_count = 0;
 uint32_t dma_errors = 0;   // CDMA read failures (BRAM_READ_DMA path)
+
+// Performance instrumentation (microseconds), observable via get_status. The
+// 30 kHz sample rate gives a 33.3 us budget per packet; loop_us is the actual
+// receive->transmit time and dma_us is the CDMA transfer time within it.
+uint32_t dma_us_last = 0, dma_us_max = 0;     // CDMA transfer time
+uint32_t loop_us_last = 0, loop_us_max = 0;   // per-packet receive->transmit
+static inline uint32_t ticks_to_us(XTime d) {
+  return (uint32_t)((d * 1000000ULL) / COUNTS_PER_SECOND);
+}
+// If this fails, the wire layout changed -- update net.py get_status (the length
+// check and the struct.unpack offsets) to match.
+_Static_assert(sizeof(status_response_t) == 118, "status_response_t size must match net.py get_status");
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;
@@ -155,6 +168,7 @@ static int packets_available(void) {
 
 // Read and validate one packet directly from BRAM with UDP transmission
 static int process_packet_from_bram(void) {
+  XTime t_loop0; XTime_GetTime(&t_loop0);   // perf: receive->transmit timer
   // Calculate BRAM address (no copying - read directly)
   uint32_t magic_low_offset = ps_read_address; // should always be smaller than BRAM_SIZE_WORDS!!!
   uint32_t magic_high_offset = (ps_read_address + 1) % BRAM_SIZE_WORDS;
@@ -191,6 +205,7 @@ static int process_packet_from_bram(void) {
 #if BRAM_READ_METHOD == BRAM_READ_DMA
   pkt_buf = (uint32_t *)DMA_BUF_ADDR;
   int derr;
+  XTime t_dma0; XTime_GetTime(&t_dma0);     // perf: CDMA transfer timer
   if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
     derr = pl_dma_read_bram(pkt_buf, ps_read_address, current_packet_size);
   } else {
@@ -198,6 +213,9 @@ static int process_packet_from_bram(void) {
     derr  = pl_dma_read_bram(pkt_buf, ps_read_address, first);
     derr |= pl_dma_read_bram(pkt_buf + first, 0, current_packet_size - first);
   }
+  XTime t_dma1; XTime_GetTime(&t_dma1);
+  dma_us_last = ticks_to_us(t_dma1 - t_dma0);
+  if (dma_us_last > dma_us_max) dma_us_max = dma_us_last;
   if (derr) dma_errors++;
 #else  // BRAM_READ_SINGLE -- clean 1-beat reads, but too slow for 0xFF at 131 MHz
   pkt_buf = udp_packet_buffer;
@@ -236,7 +254,12 @@ static int process_packet_from_bram(void) {
   // Update read pointer with variable packet size
   ps_read_address = (ps_read_address + current_packet_size) % BRAM_SIZE_WORDS;
   packets_received_count++;
-  
+
+  // perf: full receive->transmit time for this packet (the 33us-budget metric)
+  XTime t_loop1; XTime_GetTime(&t_loop1);
+  loop_us_last = ticks_to_us(t_loop1 - t_loop0);
+  if (loop_us_last > loop_us_max) loop_us_max = loop_us_last;
+
   return 1;  // Success
 }
 

@@ -249,6 +249,13 @@ typedef struct __attribute__((packed)) {
     uint8_t  aux_idx[3];        // per-slot sequence index
     uint8_t  reserved5[3];
 
+    // DMA / performance instrumentation (20 bytes; appended -- keep net.py in sync)
+    uint32_t dma_errors;        // CDMA read failures since boot
+    uint32_t dma_us_last;       // last CDMA transfer time (microseconds)
+    uint32_t dma_us_max;        // worst CDMA transfer time
+    uint32_t loop_us_last;      // last receive->transmit time per packet
+    uint32_t loop_us_max;       // worst receive->transmit time (vs 33us budget)
+
 } status_response_t;
 
 // Flag definitions
@@ -282,6 +289,11 @@ extern uint32_t current_channel_enable;       // Current channel enable setting
 extern uint64_t expected_timestamp;
 extern uint32_t error_count;
 extern uint32_t timestamp_gaps;
+
+// DMA + performance instrumentation (microseconds; surfaced via get_status)
+extern uint32_t dma_errors;
+extern uint32_t dma_us_last, dma_us_max;
+extern uint32_t loop_us_last, loop_us_max;
 
 // UDP transmission
 extern uint32_t udp_packets_sent;

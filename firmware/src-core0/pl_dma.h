@@ -10,12 +10,17 @@
 // and writes each packet to a DDR staging buffer over S_AXI_HP0, so the CPU GP
 // port leaves the bulk-read path entirely.
 //
-// DMA_BUF_ADDR: a 1 MB-aligned DDR staging buffer the CDMA writes into. It sits
-// far above the core-0 image (0x100000), core-1 (0x20000000) and the shared
-// region (0x3F000000). pl_dma_init() marks its 1 MB section NORM_NONCACHE, so no
-// cache flush/invalidate is needed and the EMAC TX (which flushes the pbuf
-// payload) reads the freshly DMA'd bytes rather than a stale cache line.
-#define DMA_BUF_ADDR   0x10000000U
+// pl_dma_staging: the DDR staging buffer the CDMA writes each packet into. It is
+// a LINKER-RESERVED static array (1 MB, 1 MB-aligned), NOT a hardcoded address --
+// so the linker places it inside core-0's own DDR region. That means it can never
+// collide with core-0 code/data/heap/stack, and it is portable across boards with
+// different DDR sizes (no assumption about where DDR ends -- important for, e.g.,
+// 7010 parts). pl_dma_init() marks its 1 MB section NORM_NONCACHE (the cache
+// attribute granularity is 1 MB, hence the 1 MB size + alignment so the buffer
+// owns its whole section); the DMA path then needs no per-packet cache ops and
+// the EMAC TX transmits the freshly DMA'd bytes directly.
+extern uint8_t pl_dma_staging[];
+#define DMA_BUF_ADDR   ((uintptr_t)pl_dma_staging)
 
 // Initialize the AXI CDMA (polled mode) and mark the staging buffer
 // non-cacheable. Returns 0 on success, negative on failure.

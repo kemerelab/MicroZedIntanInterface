@@ -8,6 +8,7 @@
 #include "pl_dma.h"
 #include "xaxicdma.h"
 #include "xil_mmu.h"
+#include "xil_cache.h"
 #include "xil_types.h"
 #include "main.h"          // BRAM_BASE_ADDR
 #include "shared_print.h"
@@ -15,14 +16,20 @@
 // Must match the S_AXI_LITE address assigned in design_1_bd.tcl.
 #define CDMA_BASEADDR  0x44A00000U
 
+// Linker-reserved 1 MB DDR staging buffer (see pl_dma.h). 1 MB-aligned so it
+// owns exactly one 1 MB TLB section, which pl_dma_init() marks non-cacheable.
+uint8_t pl_dma_staging[0x100000] __attribute__((aligned(0x100000)));
+
 static XAxiCdma cdma;
 static int      cdma_ready = 0;
 
 int pl_dma_init(void) {
-    // Make the staging buffer non-cacheable (1 MB section granularity) so the
-    // DMA path needs no flush/invalidate and never hits the partial-cache-line
-    // hazard.
-    Xil_SetTlbAttributes(DMA_BUF_ADDR, NORM_NONCACHE_SHARED);
+    // The staging buffer lives in .bss (zeroed at startup as cached writes).
+    // Clean those dirty lines to DDR, THEN mark its 1 MB section non-cacheable,
+    // so no stale cache line can later evict over DMA'd data. After this the DMA
+    // path needs no per-packet cache ops.
+    Xil_DCacheFlushRange((UINTPTR)pl_dma_staging, sizeof(pl_dma_staging));
+    Xil_SetTlbAttributes((UINTPTR)pl_dma_staging, NORM_NONCACHE_SHARED);
 
     XAxiCdma_Config *cfg = XAxiCdma_LookupConfig(CDMA_BASEADDR);
     if (cfg == NULL) {

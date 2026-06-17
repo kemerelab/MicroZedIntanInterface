@@ -206,6 +206,13 @@ void collect_status_data(status_response_t* status) {
     status->aux_idx[0]      = (s11 >> AUX_STATUS_IDX0_SHIFT) & AUX_STATUS_IDX_MASK;
     status->aux_idx[1]      = (s11 >> AUX_STATUS_IDX1_SHIFT) & AUX_STATUS_IDX_MASK;
     status->aux_idx[2]      = (s11 >> AUX_STATUS_IDX2_SHIFT) & AUX_STATUS_IDX_MASK;
+
+    // DMA / performance instrumentation
+    status->dma_errors   = dma_errors;
+    status->dma_us_last  = dma_us_last;
+    status->dma_us_max   = dma_us_max;
+    status->loop_us_last = loop_us_last;
+    status->loop_us_max  = loop_us_max;
 }
 
 // ============================================================================
