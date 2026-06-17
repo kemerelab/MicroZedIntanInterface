@@ -39,6 +39,17 @@ int pl_dma_init(void) {
     cdma_ready = 1;
     send_message("CDMA: ready (ctrl 0x%08lX, staging 0x%08lX)\r\n",
                  (unsigned long)CDMA_BASEADDR, (unsigned long)DMA_BUF_ADDR);
+
+    // Smoke test: one CDMA transfer BRAM[0]->staging exercises the control path
+    // (GP0 -> CDMA regs) and the data path (CDMA -> BRAM read, CDMA -> HP0/DDR
+    // write). We only check it completes without error -- it confirms at boot
+    // whether the CDMA datapath is wired/addressable before the stream relies on
+    // it (the BRAM contents at boot are don't-care).
+    {
+        int rc = pl_dma_read_bram((uint32_t *)DMA_BUF_ADDR, 0, 8);
+        if (rc == 0) send_message("CDMA: self-test OK\r\n");
+        else         send_message("CDMA: self-test FAILED (rc=%d)\r\n", rc);
+    }
     return 0;
 }
 
