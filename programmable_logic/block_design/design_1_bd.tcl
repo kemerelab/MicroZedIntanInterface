@@ -577,7 +577,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
     CONFIG.PCW_USE_M_AXI_GP0 {1} \
     CONFIG.PCW_USE_M_AXI_GP1 {1} \
-    CONFIG.PCW_USE_S_AXI_HP0 {0} \
+    CONFIG.PCW_USE_S_AXI_HP0 {1} \
   ] $processing_system7_0
 
 
@@ -625,13 +625,16 @@ proc create_root_design { parentCell } {
 
 
   # Create instance: smartconnect_0, and set properties
+  # GP0 (1 SI) -> { axi_lite_registers, axi_cdma_0/S_AXI_LITE } (2 MI)
   set smartconnect_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_0 ]
-  set_property CONFIG.NUM_SI {1} $smartconnect_0
+  set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] $smartconnect_0
 
 
   # Create instance: smartconnect_1, and set properties
+  # { GP1 (PS Xil_In32 BRAM peeks), axi_cdma_0/M_AXI } (2 SI) ->
+  # { axi_bram_ctrl_0/S_AXI (BRAM read), processing_system7/S_AXI_HP0 (DDR write) } (2 MI)
   set smartconnect_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_1 ]
-  set_property CONFIG.NUM_SI {1} $smartconnect_1
+  set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {2}] $smartconnect_1
 
 
   # Create instance: simple_dual_port_bram, and set properties
@@ -648,6 +651,17 @@ proc create_root_design { parentCell } {
   # Create instance: axi_bram_ctrl_0, and set properties
   set axi_bram_ctrl_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0 ]
   set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_0
+
+  # Create instance: axi_cdma_0 -- memory-to-memory DMA that copies a packet from
+  # the capture BRAM (0x80000000) to a DDR buffer (via S_AXI_HP0), taking the PS
+  # M_AXI_GP master off the bulk-read path (the long-GP-burst corruption source).
+  # Simple mode (no scatter-gather); 32-bit master to match the BRAM controller.
+  set axi_cdma_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_cdma:4.1 axi_cdma_0 ]
+  set_property -dict [list \
+    CONFIG.C_INCLUDE_SG {0} \
+    CONFIG.C_M_AXI_DATA_WIDTH {32} \
+    CONFIG.C_M_AXI_MAX_BURST_LEN {16} \
+  ] $axi_cdma_0
 
 
   # Create instance: proc_sys_reset_175MHz, and set properties
@@ -721,6 +735,12 @@ proc create_root_design { parentCell } {
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP1 [get_bd_intf_pins smartconnect_1/S00_AXI] [get_bd_intf_pins processing_system7_0/M_AXI_GP1]
   connect_bd_intf_net -intf_net smartconnect_0_M00_AXI [get_bd_intf_pins axi_lite_registers/s_axi] [get_bd_intf_pins smartconnect_0/M00_AXI]
   connect_bd_intf_net -intf_net smartconnect_1_M00_AXI [get_bd_intf_pins axi_bram_ctrl_0/S_AXI] [get_bd_intf_pins smartconnect_1/M00_AXI]
+  # CDMA control regs from GP0 (smartconnect_0 second master)
+  connect_bd_intf_net -intf_net smartconnect_0_M01_AXI [get_bd_intf_pins smartconnect_0/M01_AXI] [get_bd_intf_pins axi_cdma_0/S_AXI_LITE]
+  # CDMA data-mover master into smartconnect_1 (reaches BRAM + HP0/DDR)
+  connect_bd_intf_net -intf_net axi_cdma_0_M_AXI [get_bd_intf_pins axi_cdma_0/M_AXI] [get_bd_intf_pins smartconnect_1/S01_AXI]
+  # smartconnect_1 second master -> PS HP0 slave (DDR write path)
+  connect_bd_intf_net -intf_net smartconnect_1_M01_AXI [get_bd_intf_pins smartconnect_1/M01_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
 
   # Create port connections
   connect_bd_net -net UART1_RX_0_1  [get_bd_ports UART1_RX_0] \
@@ -737,6 +757,9 @@ proc create_root_design { parentCell } {
   [get_bd_pins smartconnect_1/aclk] \
   [get_bd_pins processing_system7_0/M_AXI_GP1_ACLK] \
   [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
+  [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK] \
+  [get_bd_pins axi_cdma_0/s_axi_lite_aclk] \
+  [get_bd_pins axi_cdma_0/m_axi_aclk] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aclk] \
   [get_bd_pins proc_sys_reset_175MHz/slowest_sync_clk] \
   [get_bd_pins axi_lite_registers/s_axi_aclk]
@@ -759,6 +782,7 @@ proc create_root_design { parentCell } {
   connect_bd_net -net proc_sys_reset_175MHz_interconnect_aresetn  [get_bd_pins proc_sys_reset_175MHz/interconnect_aresetn] \
   [get_bd_pins smartconnect_0/aresetn] \
   [get_bd_pins smartconnect_1/aresetn] \
+  [get_bd_pins axi_cdma_0/s_axi_lite_aresetn] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn] \
   [get_bd_pins axi_lite_registers/s_axi_aresetn]
   connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
@@ -776,6 +800,14 @@ proc create_root_design { parentCell } {
   # Create address segments
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
   assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers/s_axi/reg0] -force
+  # CDMA control registers in the PS GP address space
+  assign_bd_address -offset 0x44A00000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_cdma_0/S_AXI_LITE/Reg] -force
+  # CDMA master view: it must reach the capture BRAM (read src) and DDR via HP0 (write dst)
+  assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x00000000 -range 0x40000000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+  # The PS GP masters can reach HP0 through the smartconnect_1 crossbar but never
+  # address DDR that way -- exclude it so processing_system7_0/Data is clean.
+  exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM]
 
 
   # Restore current instance
