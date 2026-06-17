@@ -9,6 +9,8 @@
 #include "lwip/timeouts.h"
 //#include "xuartps.h"
 #include "shared_print.h"
+#include "pl_dma.h"
+#include "xiltimer.h"  // XTime_GetTime / COUNTS_PER_SECOND for perf instrumentation
 
 // Forward declare eth_link_detect from xemacpsif adapter
 // This function is provided by the LWIP library's Xilinx EMAC adapter
@@ -39,6 +41,19 @@ uint32_t current_channel_enable = 0x0F;    // Current channel enable setting (de
 
 // Packet validation tracking
 uint32_t error_count = 0;
+uint32_t dma_errors = 0;   // CDMA read failures (BRAM_READ_DMA path)
+
+// Performance instrumentation, observable via get_status. We store raw global-
+// timer TICKS at full resolution and let the host convert to microseconds using
+// perf_timer_hz (sent in the status) -- store the measurement, derive the
+// display. The 30 kHz sample rate gives a 33.3 us budget per packet; loop_ticks
+// is the receive->transmit time and dma_ticks is the CDMA transfer within it.
+uint32_t dma_ticks_last = 0, dma_ticks_max = 0;     // CDMA transfer (ticks)
+uint32_t loop_ticks_last = 0, loop_ticks_max = 0;   // receive->transmit (ticks)
+uint32_t perf_timer_hz = 0;                         // tick freq (set in main())
+// If this fails, the wire layout changed -- update net.py get_status (the length
+// check and the struct.unpack offsets) to match.
+_Static_assert(sizeof(status_response_t) == 122, "status_response_t size must match net.py get_status");
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;
@@ -49,7 +64,30 @@ uint16_t udp_dest_port = DEFAULT_UDP_DEST_PORT;
 
 // Pre-allocated packet buffer for UDP (sized for maximum packet)
 // Use __attribute__((aligned(64))) to align to cache line boundary for optimal performance
-static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
+// Used as the packet buffer only on the BRAM_READ_SINGLE path; unused under DMA.
+static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64), unused));
+
+// ---- Capture-BRAM read method ----------------------------------------------
+// The PS M_AXI_GP master corrupts long *burst* reads of the capture BRAM (the
+// 0xFF dual-port dropout). What we learned chasing it:
+//   SINGLE - word-by-word Xil_In32. CLEAN by construction: each read is its own
+//            1-beat AXI transaction, so it never issues the burst that the GP
+//            master mishandles. But it is latency-bound and too slow to sustain
+//            0xFF (128 ch, 150-word packets) at the 131.25 MHz AXI clock.
+//            Raising the AXI clock to 210 MHz DID make single-beat fast enough --
+//            but 210 MHz is over the -1 part's M_AXI_GP ~150 MHz spec
+//            (clk_out2 also clocks the GP master), so it is bench-only, not
+//            shippable. Kept here as the conceptual reference / fallback.
+//   DMA    - an AXI CDMA (a PL master) copies each packet BRAM -> DDR over
+//            S_AXI_HP0 (see pl_dma.c), taking the PS GP master off the bulk-read
+//            path entirely. Clean at full bandwidth, in-spec at 131.25 MHz, and
+//            it frees core 0. This is the fix. DEFAULT.
+// (A removed third option, inline-`ldmia` chunked CPU bursts, was a burst over
+//  the same broken GP master AND its asm scrambled word order -> wrong magic;
+//  see git history. Don't reintroduce CPU bursts of the BRAM.)
+#define BRAM_READ_DMA     0
+#define BRAM_READ_SINGLE  1
+#define BRAM_READ_METHOD  BRAM_READ_DMA
 
 // ============================================================================
 // PACKET SIZE CALCULATION FUNCTIONS
@@ -102,7 +140,7 @@ int n_words_available;
 // Check how many complete packets are available to read
 static int packets_available(void) {
   uint32_t pl_write_addr = pl_get_bram_write_address();
-  
+
   if (pl_write_addr >= ps_read_address) {
     n_words_available = pl_write_addr - ps_read_address;
   } else {
@@ -110,11 +148,27 @@ static int packets_available(void) {
     n_words_available = (BRAM_SIZE_WORDS - ps_read_address) + pl_write_addr;
   }
 
+  // GUARD BAND: keep the read pointer one full packet behind the PL write
+  // frontier. The capture BRAM is a dual-CLOCK simple-dual-port RAM (PL writes
+  // port A @84MHz, PS reads port B via AXI @131MHz). If the PS reads a word the
+  // PL is committing in the SAME packet, the cross-clock same-address
+  // read-during-write returns stale data -- observed on hardware as the BRAM's
+  // i*4 power-on init pattern (0x0404=mem[257], 0x0624=mem[393], ...) leaking
+  // into the packet tail (cyc ~26-29). The boundary pointer itself is correct;
+  // the problem is margin, so hold a whole packet back -- the read region is
+  // then never the region the PL is actively writing. Costs one packet (~33us)
+  // of latency and one packet of the 109-packet BRAM buffer.
+  if (n_words_available >= (int)current_packet_size)
+    n_words_available -= current_packet_size;
+  else
+    n_words_available = 0;
+
   return n_words_available / current_packet_size;  // Use variable packet size
 }
 
 // Read and validate one packet directly from BRAM with UDP transmission
 static int process_packet_from_bram(void) {
+  XTime t_loop0; XTime_GetTime(&t_loop0);   // perf: receive->transmit timer
   // Calculate BRAM address (no copying - read directly)
   uint32_t magic_low_offset = ps_read_address; // should always be smaller than BRAM_SIZE_WORDS!!!
   uint32_t magic_high_offset = (ps_read_address + 1) % BRAM_SIZE_WORDS;
@@ -141,41 +195,42 @@ static int process_packet_from_bram(void) {
   // TODO: If we are in an error state, we could track how long we stay there
   //    by measuring the timestamp gap when we recover.
 
-  // UDP transmission (always enabled) - zero-copy with pre-allocated buffer
-  // Copy variable sized packet data to pre-allocated buffer.
-  // TODO: Consider replacing with memcpy
-  
-  /*
-  // Unoptimized copy
-  for (int i = 0; i < current_packet_size; i++) {
-    uint32_t word_offset = (ps_read_address + i) % BRAM_SIZE_WORDS;
-    uint32_t safe_addr = BRAM_BASE_ADDR + (word_offset * 4);
-    udp_packet_buffer[i] = Xil_In32(safe_addr);
+  // UDP transmission (always enabled) - zero-copy with pre-allocated buffer.
+  //
+  // Read the packet out of the capture BRAM into pkt_buf (see "read method"
+  // above). DMA: the CDMA copies BRAM -> a non-cacheable DDR buffer, split at
+  // the BRAM wrap into two contiguous transfers. SINGLE: clean but slow
+  // word-by-word Xil_In32 (the conceptual reference / 210 MHz fallback).
+  uint32_t *pkt_buf;
+#if BRAM_READ_METHOD == BRAM_READ_DMA
+  pkt_buf = (uint32_t *)DMA_BUF_ADDR;
+  int derr;
+  XTime t_dma0; XTime_GetTime(&t_dma0);     // perf: CDMA transfer timer
+  if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
+    derr = pl_dma_read_bram(pkt_buf, ps_read_address, current_packet_size);
+  } else {
+    uint32_t first = BRAM_SIZE_WORDS - ps_read_address;
+    derr  = pl_dma_read_bram(pkt_buf, ps_read_address, first);
+    derr |= pl_dma_read_bram(pkt_buf + first, 0, current_packet_size - first);
   }
-  */
-    // Copy packet data using optimized memcpy
-    if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
-        // No wrap - single memcpy
-        memcpy(udp_packet_buffer,
-               (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
-               current_packet_size * 4);
-    } else {
-        // Handle wrap with two memcpys
-        uint32_t first_part = BRAM_SIZE_WORDS - ps_read_address;
-        memcpy(udp_packet_buffer,
-               (void*)(BRAM_BASE_ADDR + ps_read_address * 4),
-               first_part * 4);
-        memcpy(&udp_packet_buffer[first_part],
-               (void*)BRAM_BASE_ADDR,
-               (current_packet_size - first_part) * 4);
-    }  
-  
+  XTime t_dma1; XTime_GetTime(&t_dma1);
+  dma_ticks_last = (uint32_t)(t_dma1 - t_dma0);
+  if (dma_ticks_last > dma_ticks_max) dma_ticks_max = dma_ticks_last;
+  if (derr) dma_errors++;
+#else  // BRAM_READ_SINGLE -- clean 1-beat reads, but too slow for 0xFF at 131 MHz
+  pkt_buf = udp_packet_buffer;
+  for (uint32_t i = 0; i < current_packet_size; i++) {
+    uint32_t src = (ps_read_address + i) % BRAM_SIZE_WORDS;
+    pkt_buf[i] = Xil_In32(BRAM_BASE_ADDR + src * 4);
+  }
+#endif
+
   // Create pbuf that references our buffer directly (zero-copy!)
   uint32_t packet_bytes = current_packet_size * BYTES_PER_WORD;
   struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, packet_bytes, PBUF_REF);
   if (p != NULL) {
     // Point pbuf payload directly to our buffer (zero-copy!)
-    p->payload = (void*)udp_packet_buffer;
+    p->payload = (void*)pkt_buf;
 
     // Send using udp_sendto (no connect required)
     ip_addr_t dest_ip;
@@ -199,7 +254,12 @@ static int process_packet_from_bram(void) {
   // Update read pointer with variable packet size
   ps_read_address = (ps_read_address + current_packet_size) % BRAM_SIZE_WORDS;
   packets_received_count++;
-  
+
+  // perf: full receive->transmit time for this packet (the 33us-budget metric)
+  XTime t_loop1; XTime_GetTime(&t_loop1);
+  loop_ticks_last = (uint32_t)(t_loop1 - t_loop0);
+  if (loop_ticks_last > loop_ticks_max) loop_ticks_max = loop_ticks_last;
+
   return 1;  // Success
 }
 
@@ -228,21 +288,39 @@ void handle_enable_streaming(void) {
   pl_reset_timestamp();
   usleep(1000);
 
-  // Fast-forward ps_read_address to current PL write position
-  // This discards any unread packets from the previous streaming session
-  // which may have a different packet size
-  // We set ps_read = pl_write to wait for the NEXT fresh packet
-  uint32_t pl_write_addr = pl_get_bram_write_address();
-  if (ps_read_address != pl_write_addr) {
-    send_message("Discarding unread packets: ps_read=%u -> %u\r\n",
-                 ps_read_address, pl_write_addr);
-    ps_read_address = pl_write_addr;
-  }
-  
   // Enable streaming
   stream_enabled = 1;
   pl_set_transmission(1);
-  
+
+  // Re-sync ps_read to a REAL packet boundary by scanning for the magic.
+  // A stop can interrupt the datapath mid-packet; since write_address, the
+  // packet boundary, and the (intentionally unreset) FIFO are only cleared by
+  // the hardware reset -- not by stop/restart -- the fresh magic on restart can
+  // land a few words off packet_boundary_address. Setting ps_read to the
+  // pointer then mis-aligns and the magic check loops forever. So: let the PL
+  // write several packets, then walk back from the write pointer to the nearest
+  // 0xDEADBEEF/0xCAFEBABE and align to it (single Xil_In32 reads are clean).
+  usleep(3000);  // ~90 packets @30ksps -- guarantees fresh complete packets
+  uint32_t wp = pl_get_bram_write_address();
+  int synced = 0;
+  for (uint32_t back = 0; back < 2 * current_packet_size + 16; back++) {
+    uint32_t a = (wp + BRAM_SIZE_WORDS - back) % BRAM_SIZE_WORDS;
+    uint32_t b = (a + 1) % BRAM_SIZE_WORDS;
+    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == 0xDEADBEEF &&     // magic low
+        Xil_In32(BRAM_BASE_ADDR + b * 4) == 0xCAFEBABE) {     // magic high
+      ps_read_address = a;
+      synced = 1;
+      break;
+    }
+  }
+  if (!synced) {
+    ps_read_address = wp;   // fallback; the magic-fail recovery will retry
+    send_message("Restart: no magic found near wp=%u, using write ptr\r\n", wp);
+  } else {
+    send_message("Restart: ps_read re-synced to magic at %u (wp=%u)\r\n",
+                 ps_read_address, wp);
+  }
+
   send_message("BRAM streaming STARTED (packet size: %u words)\r\n", current_packet_size);
 }
 
@@ -336,7 +414,10 @@ static void publish_status_snapshot(void) {
   psmon->channel_enable = pl_get_current_channel_enable();
   int p0, p1;
   pl_get_current_phase_select(&p0, &p1);
-  psmon->phase          = (p0 & 0xF) | ((p1 & 0xF) << 4);  // phase2/3 added in Phase 2
+  // port-B phase2/phase3 read from the CTRL_REG_2 mirror (status reg 8)
+  uint32_t cr2 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_8_OFFSET);
+  psmon->phase          = (p0 & 0xF) | ((p1 & 0xF) << 4)
+                        | (((cr2 >> 16) & 0xF) << 8) | (((cr2 >> 20) & 0xF) << 12);
   psmon->flags_pl       = (pl_is_transmission_active() ? PSMON_FLAG_TX_ACTIVE : 0)
                         | (pl_is_loop_limit_reached()  ? PSMON_FLAG_LOOP_LIMIT : 0)
                         | (pl_get_current_debug_mode() ? PSMON_FLAG_DEBUG_MODE : 0);
@@ -424,15 +505,26 @@ int main() {
 
   init_platform();
   XilTickTimer_Init(&timer);
+  perf_timer_hz = COUNTS_PER_SECOND;   // global-timer freq; host converts ticks->us
 
   // ========================================================================
   // NOTE: This applies to 1M of memory (see TRM - UG585)
   Xil_SetTlbAttributes(SHARED_MEM_BASE, NORM_NONCACHE_SHARED); // Critical for coherency!
+  // The capture BRAM (0x80000000) is written by the PL behind the data cache.
+  // Reading it cached lets the A9 prefetcher pull lines while the PL is mid-write,
+  // and there is no invalidate in the streaming read path -> stale/garbage words
+  // surface in the UDP stream (seen as out-of-range values near the tail cycles
+  // of each packet, worse at the higher dual-port data rate). Map it
+  // non-cacheable so every read goes to the PL's committed data.
+  Xil_SetTlbAttributes(BRAM_BASE_ADDR, NORM_NONCACHE_SHARED); // PL writes behind the cache
   // Xil_SetTlbAttributes(PL_CTRL_BASE_ADDR, NORM_NONCACHE_SHARED);
   // Prepare for second core by initializing shared structures
   init_print_buffer();
   memset((void *)command_flags, 0, sizeof(command_flags_t));
   psmon_init();   // zero the status snapshot before core 1 reads it
+#if BRAM_READ_METHOD == BRAM_READ_DMA
+  pl_dma_init();  // AXI CDMA + non-cacheable DDR staging buffer for the read path
+#endif
   // ========================================================================
 
   // ========================================================================

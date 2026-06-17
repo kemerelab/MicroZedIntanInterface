@@ -44,6 +44,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_SET_PHASE       0x11
 #define CMD_SET_DEBUG_MODE  0x12
 #define CMD_SET_CHANNEL_ENABLE 0x13
+#define CMD_SET_PHASE_B     0x14   // port B (second cable) CIPO phase
 #define CMD_LOAD_CONVERT    0x20
 #define CMD_LOAD_INIT       0x21
 #define CMD_LOAD_CABLE_TEST 0x22
@@ -205,6 +206,14 @@ void collect_status_data(status_response_t* status) {
     status->aux_idx[0]      = (s11 >> AUX_STATUS_IDX0_SHIFT) & AUX_STATUS_IDX_MASK;
     status->aux_idx[1]      = (s11 >> AUX_STATUS_IDX1_SHIFT) & AUX_STATUS_IDX_MASK;
     status->aux_idx[2]      = (s11 >> AUX_STATUS_IDX2_SHIFT) & AUX_STATUS_IDX_MASK;
+
+    // DMA / performance instrumentation (raw ticks + tick frequency)
+    status->dma_errors      = dma_errors;
+    status->dma_ticks_last  = dma_ticks_last;
+    status->dma_ticks_max   = dma_ticks_max;
+    status->loop_ticks_last = loop_ticks_last;
+    status->loop_ticks_max  = loop_ticks_max;
+    status->timer_hz        = perf_timer_hz;
 }
 
 // ============================================================================
@@ -268,7 +277,13 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             
         case CMD_SET_PHASE:
             pl_set_phase_select(cmd->param1 & 0xFF, cmd->param2 & 0xFF);
-            send_message("Binary Command: SET_PHASE %u %u\r\n", 
+            send_message("Binary Command: SET_PHASE %u %u\r\n",
+                        cmd->param1 & 0xFF, cmd->param2 & 0xFF);
+            break;
+
+        case CMD_SET_PHASE_B:   // port B (second cable) CIPO phase
+            pl_set_phase_select_b(cmd->param1 & 0xFF, cmd->param2 & 0xFF);
+            send_message("Binary Command: SET_PHASE_B %u %u\r\n",
                         cmd->param1 & 0xFF, cmd->param2 & 0xFF);
             break;
 

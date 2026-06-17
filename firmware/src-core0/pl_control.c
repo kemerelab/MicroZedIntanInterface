@@ -1,6 +1,7 @@
 #include "main.h"
 #include "sleep.h"
 #include <stdio.h>
+#include <string.h>
 #include "xil_io.h"
 #include "shared_print.h"
 
@@ -43,13 +44,26 @@ void pl_set_loop_count(uint32_t loop_count) {
 
 void pl_set_phase_select(int phase0, int phase1) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
-    
+
     ctrl_reg_2 &= ~(CTRL_PHASE0_MASK | CTRL_PHASE1_MASK); // Clear existing phase bits
-    
+
     ctrl_reg_2 |= ((phase0 & 0xF) << 0); // Set phase0 bits [3:0]
     ctrl_reg_2 |= ((phase1 & 0xF) << 4); // Set phase1 bits [7:4]
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
-    send_message("PL phase select set to phase0=%d, phase1=%d\r\n", phase0, phase1);
+    send_message("PL phase select (port A) phase0=%d, phase1=%d\r\n", phase0, phase1);
+}
+
+// Port B (second cable) CIPO phase / cable-length compensation. Independent of
+// port A because the two cables may be different lengths. Bits [23:16] of
+// CTRL_REG_2: phase2 [19:16] (port-B cipo0), phase3 [23:20] (port-B cipo1).
+void pl_set_phase_select_b(int phase2, int phase3) {
+    uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
+
+    ctrl_reg_2 &= ~(CTRL_PHASE2_MASK | CTRL_PHASE3_MASK);
+    ctrl_reg_2 |= ((phase2 & 0xF) << 16);
+    ctrl_reg_2 |= ((phase3 & 0xF) << 20);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
+    send_message("PL phase select (port B) phase2=%d, phase3=%d\r\n", phase2, phase3);
 }
 
 void pl_set_debug_mode(int enable) {
@@ -112,8 +126,25 @@ uint32_t pl_get_cycle_counter(void) {
 }
 
 uint32_t pl_get_bram_write_address(void) {
-    uint32_t status10 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET);
-    return status10 & 0x3FFF;  // Extract 14-bit BRAM address (0 to 16383)
+    // STATUS_REG_10 packs the PL-domain BRAM packet-boundary pointer (14 bits)
+    // together with fifo_count, and the whole word crosses the PL->AXI clock
+    // domain through a 2-stage synchronizer (axi_lite_registers.v). That is a
+    // multi-bit BINARY CDC: when the pointer advances by one packet several bits
+    // change at once, so a read landing in the ~1-2 cycle transition window can
+    // return a mixed value that LEADS the data actually committed to BRAM. The
+    // fast PS read then runs into the packet tail the PL is still writing, and
+    // the cross-port read-during-write returns garbage (seen as out-of-range
+    // words at cyc ~27-29, worse/shifting with read speed). Filter the transient
+    // by sampling until two reads agree -- the glitch clears within a couple of
+    // cycles, so consecutive AXI reads almost always already match.
+    uint32_t a = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET) & 0x3FFF;
+    for (int i = 0; i < 8; i++) {
+        uint32_t b = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_10_OFFSET) & 0x3FFF;
+        if (b == a)
+            return a;            // stable: synchronizer settled, value trustworthy
+        a = b;
+    }
+    return a;                    // pathological churn (won't happen): use latest
 }
 
 static uint32_t pl_get_fifo_count(void) {
@@ -193,12 +224,35 @@ void pl_print_status(void) {
 
 // Simple BRAM dump for debugging
 void pl_dump_bram_data(uint32_t start_addr, uint32_t word_count) {
-    send_message("BRAM dump starting at address %u:\r\n", start_addr);
+    // DIAGNOSTIC: read the SAME region two ways and compare --
+    //   burst  = memcpy (AXI burst, exactly what the streaming path does)
+    //   single = Xil_In32 (single-beat, what dump always used; known clean)
+    // Run this while STOPPED. Any "<-- DIFF" line means the burst read itself
+    // corrupted that word on a STATIC BRAM (no concurrent PL write) -> the bug
+    // is the multi-burst read path, not read-during-write, so DMA/double-buffer
+    // would NOT help. No DIFFs (but streaming is still corrupt) -> it IS
+    // read-during-write and double-buffering is the fix.
+    // Same characteristics as the streaming udp_packet_buffer (cacheable DDR,
+    // 64-byte aligned) so the AXI burst shape matches the real read path.
+    static uint32_t dump_burst_buf[MAX_WORDS_PER_PACKET] __attribute__((aligned(64)));
+    uint32_t cap = word_count;
+    if (cap > MAX_WORDS_PER_PACKET) cap = MAX_WORDS_PER_PACKET;  // memcpy into the local buffer
+    memcpy(dump_burst_buf, (void*)(BRAM_BASE_ADDR + start_addr * 4), cap * 4);
+    send_message("BRAM dump from %u (idx: burst | single | flag):\r\n", start_addr);
+    uint32_t diffs = 0;
     for (uint32_t i = 0; i < word_count; i++) {
         uint32_t addr = (start_addr + i) % BRAM_SIZE_WORDS;
-        uint32_t data = Xil_In32(BRAM_BASE_ADDR + addr * 4);
-        send_message("%u: 0x%08X - 0x%08X\r\n", i, BRAM_BASE_ADDR + addr * 4, data);
+        uint32_t single = Xil_In32(BRAM_BASE_ADDR + addr * 4);
+        if (i < cap) {
+            uint32_t burst = dump_burst_buf[i];
+            if (burst != single) diffs++;
+            send_message("%u: 0x%08X | 0x%08X %s\r\n", i, burst, single,
+                         (burst != single) ? "<-- DIFF" : "");
+        } else {
+            send_message("%u: ---------- | 0x%08X\r\n", i, single);
+        }
     }
+    send_message("burst-vs-single diffs: %u (run STOPPED; DIFF => burst read bug, not RDW)\r\n", diffs);
 }
 
 // ============================================================================

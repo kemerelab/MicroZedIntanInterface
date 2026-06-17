@@ -90,13 +90,22 @@ Remember the three-layer contract: every register/packet change touches
 
 ## D. PL→PS throughput / DMA
 
-- [ ] **Characterize the current BRAM-polling path** — measure the real ceiling vs the
-      ~9 MB/s figure; find where it saturates (PS read loop? BRAM bandwidth? UDP?).
-- [ ] **Re-attempt DMA, simulation-first** — AXI-DMA / AXI-DataMover from FIFO/stream to
-      DDR. Prove the `tlast`/backpressure/burst-boundary handshake in a testbench before
-      any bitstream (this is what bit the previous attempt).
-- [ ] **Double-buffer + interrupt** scheme to replace polling.
-- [ ] **Benchmark** against the current path; document the win.
+- [x] **Characterized the path** — `get_status` reports per-packet CDMA and
+      receive→transmit time (raw global-timer ticks; host converts to µs). At 0xFF
+      (2 cables): ~3 µs typ / ~10 µs max of the 33.3 µs budget, of which the CDMA is
+      ~1–2 µs. Lots of headroom (analysis says ≤4 cables is comfortable PS-side).
+- [x] **DMA implemented — AXI CDMA, BRAM→DDR over S_AXI_HP0** — a PL master reads the
+      capture BRAM and writes a non-cacheable DDR buffer, taking the corrupting PS
+      M_AXI_GP master off the bulk-read path (this is what fixes the 0xFF dual-port
+      dropout). Read-path logic proven in sim (`programmable_logic/sim/run_axi_read_sim.sh`);
+      decided against a custom `axi_bram_ctrl` (`docs/custom_axi_bram_ctrl_decision.md`).
+      Driver: `firmware/src-core0/pl_dma.c`.
+- [ ] **Double-buffer (pbuf ring) + interrupt** to replace the polled single staging
+      buffer. Not needed for ≤4 cables (the CDMA is ~free in the budget); revisit for
+      higher channel counts or to free core 0.
+- [x] **Benchmarked vs the old CPU read** — the old long-burst GP read corrupted 0xFF;
+      the CDMA is clean at full bandwidth, in-spec at 131.25 MHz. Win observable via
+      `get_status`.
 
 ## E. Firmware robustness / networking
 
@@ -191,9 +200,19 @@ second port is disabled, the same discipline used for the aux sequencer.
       routes & meets timing (WNS +0.646, 0 failing endpoints, no congestion; LUTRAM 368→933).
       `blobs/BOOT.bin` rebuilt. **Remaining: run the on-hardware bandwidth measurement**
       (debug mode + `set_channels 0xFF` → ~150-word packets; confirm PS→UDP sustains ~18 MB/s).
-- [ ] **Phase 2 — real second-port capture + independent cable detection.** Add the two
+- [~] **Phase 2 — real second-port capture + independent cable detection.** Add the two
       `IBUFDS` + phase selectors and `phase2`/`phase3`; extend `auto_cable_detect` / `net.py`
       INTAN-pattern sweep to run **per port** (different cable lengths → different optimal phase).
+      **PL/firmware/host DONE 2026-06-15 (`claude/dual-port`):** 2nd LVDS buffer instance +
+      `intan_spi_b` interface + external `spi_lvds_1` port; port-B pins on **bank 35** (CS=F19/F20,
+      SCLK=J20/H20, COPI=H15/G15, cipo2=L14/L15, cipo3=K16/J16 — verified placed in the routed
+      checkpoint). Build routes + meets timing (WNS +0.133, 0 failing). Per-port phase via
+      `set_phase <p0> <p1> [p2 p3]` / `CMD_SET_PHASE_B`; phases shown in the core-1 status snapshot.
+      `blobs/BOOT.bin` rebuilt. **Remaining: (1) on-hardware bring-up** — plug a 2nd analog
+      headstage into port B, sweep `set_phase ... p2 p3` for the INTAN pattern, confirm real
+      neural on port B; **(2) automate per-port `auto_cable_detect`** (host-only, best done with
+      the board). COPI's bank-35 IO_L19 (H15/G15) **schematic-verified 2026-06-15** — all
+      port-B pins confirmed.
 - [ ] **Phase 3 — plugin multi-input (acq-board model).** One `DataStream`, channels grouped by
       port with prefixes (`A_CH1…` / `B_CH1…`, per-port AUX), per-port chip detection in the
       editor. Mirrors `acquisition-board` `DeviceThread`/`Headstage` (single stream, prefixed

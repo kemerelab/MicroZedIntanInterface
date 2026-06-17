@@ -85,6 +85,64 @@ set_property DRIVE 12 [get_ports spi_lvds_0_csn_p]
 set_property DRIVE 12 [get_ports spi_lvds_0_copi_p]
 
 #==============================================================================
+# SECOND CABLE PORT (port B) -- spi_lvds_1, bank 35, LVDS_25.
+#------------------------------------------------------------------------------
+# Shares the broadcast SCLK/CSN/COPI with port A (common command set), with its
+# own CIPO return lines. Pins are the carrier-schematic bank-35 pairs:
+#   CS   = IO_L15 (F19/F20)   SCLK = IO_L17 (J20/H20)   COPI = IO_L19 (H15/G15)
+#   cipo2 (spi_lvds_1_cipo0) = IO_L22 (L14/L15)
+#   cipo3 (spi_lvds_1_cipo1) = IO_L24 (K16/J16)
+# Resolved schematic IO_L-pair names -> clg400 balls via the device database;
+# bank 35 is the same LVDS_25/VCCO-2.5V bank port A uses. (COPI's IO_L19 has no
+# XADC qualifier and exists in 3 banks; bank 35 chosen because the whole
+# interface lives there -- VERIFY F19/F20/J20/H20/H15/G15/L14/L15/K16/J16
+# against the board before first power-on.)
+#==============================================================================
+
+set CLK [get_clocks clk_out1_design_1_clk_wiz_0_84M_175M_0]
+
+# --- SCLK (output, IO_L17) ---
+set_property IOSTANDARD LVDS_25 [get_ports {spi_lvds_1_sclk_p spi_lvds_1_sclk_n}]
+set_property PACKAGE_PIN J20 [get_ports spi_lvds_1_sclk_p]
+set_property PACKAGE_PIN H20 [get_ports spi_lvds_1_sclk_n]
+set_output_delay -clock $CLK -max  2.0 [get_ports {spi_lvds_1_sclk_p spi_lvds_1_sclk_n}]
+set_output_delay -clock $CLK -min -2.0 [get_ports {spi_lvds_1_sclk_p spi_lvds_1_sclk_n}]
+
+# --- CSN (output, IO_L15) ---
+set_property IOSTANDARD LVDS_25 [get_ports {spi_lvds_1_csn_p spi_lvds_1_csn_n}]
+set_property PACKAGE_PIN F19 [get_ports spi_lvds_1_csn_p]
+set_property PACKAGE_PIN F20 [get_ports spi_lvds_1_csn_n]
+set_output_delay -clock $CLK -max  2.0 [get_ports {spi_lvds_1_csn_p spi_lvds_1_csn_n}]
+set_output_delay -clock $CLK -min -2.0 [get_ports {spi_lvds_1_csn_p spi_lvds_1_csn_n}]
+
+# --- COPI (output, IO_L19) ---
+set_property IOSTANDARD LVDS_25 [get_ports {spi_lvds_1_copi_p spi_lvds_1_copi_n}]
+set_property PACKAGE_PIN H15 [get_ports spi_lvds_1_copi_p]
+set_property PACKAGE_PIN G15 [get_ports spi_lvds_1_copi_n]
+set_output_delay -clock $CLK -max  2.0 [get_ports {spi_lvds_1_copi_p spi_lvds_1_copi_n}]
+set_output_delay -clock $CLK -min -2.0 [get_ports {spi_lvds_1_copi_p spi_lvds_1_copi_n}]
+
+# --- CIPO0 = cipo2 (input, IO_L22) ---
+set_property IOSTANDARD LVDS_25 [get_ports {spi_lvds_1_cipo0_p spi_lvds_1_cipo0_n}]
+set_property PACKAGE_PIN L14 [get_ports spi_lvds_1_cipo0_p]
+set_property PACKAGE_PIN L15 [get_ports spi_lvds_1_cipo0_n]
+set_property DIFF_TERM TRUE  [get_ports spi_lvds_1_cipo0_p]
+set_input_delay -clock $CLK -max 3.0 [get_ports {spi_lvds_1_cipo0_p spi_lvds_1_cipo0_n}]
+set_input_delay -clock $CLK -min 0.5 [get_ports {spi_lvds_1_cipo0_p spi_lvds_1_cipo0_n}]
+
+# --- CIPO1 = cipo3 (input, IO_L24) ---
+set_property IOSTANDARD LVDS_25 [get_ports {spi_lvds_1_cipo1_p spi_lvds_1_cipo1_n}]
+set_property PACKAGE_PIN K16 [get_ports spi_lvds_1_cipo1_p]
+set_property PACKAGE_PIN J16 [get_ports spi_lvds_1_cipo1_n]
+set_property DIFF_TERM TRUE  [get_ports spi_lvds_1_cipo1_p]
+set_input_delay -clock $CLK -max 3.0 [get_ports {spi_lvds_1_cipo1_p spi_lvds_1_cipo1_n}]
+set_input_delay -clock $CLK -min 0.5 [get_ports {spi_lvds_1_cipo1_p spi_lvds_1_cipo1_n}]
+
+# Slew / drive on the port-B outputs
+set_property SLEW FAST [get_ports {spi_lvds_1_sclk_p spi_lvds_1_csn_p spi_lvds_1_copi_p}]
+set_property DRIVE 12  [get_ports {spi_lvds_1_sclk_p spi_lvds_1_csn_p spi_lvds_1_copi_p}]
+
+#==============================================================================
 # Physical placement constraints (optional - for better signal integrity)
 #==============================================================================
 

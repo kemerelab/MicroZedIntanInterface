@@ -66,6 +66,10 @@ architectural changes.
 - `main.c` — init + `network_maintenance_loop`.
 - `network.c` — lwIP TCP server (port 6000), UDP stream (port 5000), status struct.
 - `pl_control.c` — AXI-Lite register read/write helpers, COPI command sequences.
+- `pl_dma.c` — AXI CDMA driver: the bulk capture-BRAM read goes BRAM→DDR via a PL
+  master (CDMA over S_AXI_HP0), **not** the CPU's M_AXI_GP (whose long burst reads
+  corrupt the 0xFF stream). `BRAM_READ_METHOD` in `main.c` selects DMA (default) vs
+  the single-beat `Xil_In32` reference; only the magic/resync *peeks* still use GP.
 
 **Host:**
 - `net.py` — single-file client. Command IDs, packet validation (`DataValidator`),
