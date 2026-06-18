@@ -13,8 +13,8 @@ MicroZed SOMs are ~$300 (e.g. [Newark](https://www.newark.com/avnet/aes-z7mb-7z0
 The [carrier PCB](pcb/KiCad-Project/) is manufactured at JLCPCB.
 
 <p align="center">
-  <img src="resources/PCBOnly.jpeg" width="45%" />
-  <img src="resources/PCBWithMicroZed.jpeg" width="45%" />
+  <img src="resources/PCBOnly.jpg" width="45%" />
+  <img src="resources/PCBWithMicroZed.jpg" width="45%" />
 </p>
 
 ## Documentation

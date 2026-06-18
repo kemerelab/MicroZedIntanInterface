@@ -11,6 +11,10 @@ conventions see [`../CLAUDE.md`](../CLAUDE.md).
 - An Intan RHD2000-style headstage on a 12-pin Omnetics cable.
 - microSD card, Ethernet, and a 5 V supply for the MicroZed.
 
+<p align="center">
+  <img src="../resources/PCBWithMicroZed-Highlighted.jpg" width="70%" />
+</p>
+
 ### Omnetics connector epoxy (do this)
 The Omnetics 12-pin connector **requires epoxy reinforcement** — the pin-to-solder-pad
 joints alone don't survive repeated mating. Apply several layers of UV-curing epoxy (we use
@@ -23,18 +27,12 @@ to anchor it. **Keep epoxy off the pins and the mating face.**
 
 ## 2. MicroZed boot-mode jumpers (boot from SD)
 
-The MicroZed selects its boot source with on-board jumpers. Set them for **SD-card boot**:
+The MicroZed selects its boot source with on-board jumpers. Set them for **SD-card boot**
+as shown below:
 
-> **TODO (please confirm for your board):** the exact MicroZed boot-mode jumper
-> positions for SD boot — i.e. which of `JT1`/`JT2`/`JT3` (the MIO boot-strap jumpers)
-> to shunt. This wasn't recorded in the repo; once you confirm it on hardware I'll fill
-> in the table here.
-
-| Jumper | SD boot | (QSPI boot) |
-|--------|---------|-------------|
-| `JT___` | ___ | ___ |
-| `JT___` | ___ | ___ |
-| `JT___` | ___ | ___ |
+<p align="center">
+  <img src="../resources/MicroZedBootJumperSettings.jpg" width="70%" />
+</p>
 
 ## 3. Put a bootable image on the SD card
 
