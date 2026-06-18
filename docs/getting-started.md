@@ -9,7 +9,9 @@ conventions see [`../CLAUDE.md`](../CLAUDE.md).
 - A **MicroZed** Zynq-7000 SOM (7Z020; the 7Z010 should also work) on the
   [carrier PCB](../pcb/KiCad-Project/) (manufactured at JLCPCB).
 - An Intan RHD2000-style headstage on a 12-pin Omnetics cable.
-- microSD card, Ethernet, and a 5 V supply for the MicroZed.
+- A microSD card, Ethernet, and a **USB-C** cable. On the carrier the USB-C connector
+  supplies **both power and the serial debug console** (UART) — the board draws about
+  **0.65 A at 5 V**, so any standard USB-C port/charger is plenty.
 
 <p align="center">
   <img src="../resources/PCBWithMicroZed-Highlighted.jpg" width="70%" />
@@ -71,7 +73,9 @@ Full build notes and gotchas are in [`../CLAUDE.md`](../CLAUDE.md).
 
 ## 5. First connection
 
-1. Power the board with the SD card inserted; wait for the Ethernet link.
+1. Plug in the USB-C (power) with the SD card inserted and wait for the Ethernet link. The
+   **serial debug console** is on that same USB-C (115200 8N1) — open it in a terminal to
+   watch boot/status messages (e.g. `CDMA: ready`, `CDMA: self-test OK`).
 2. Put your host on the board's subnet (default board IP `192.168.18.10`).
 3. Run the reference client:
    ```bash
