@@ -53,7 +53,7 @@ uint32_t loop_ticks_last = 0, loop_ticks_max = 0;   // receive->transmit (ticks)
 uint32_t perf_timer_hz = 0;                         // tick freq (set in main())
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 126, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 148, "status_response_t size must match net.py get_status");
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;
@@ -517,6 +517,7 @@ int main() {
   init_print_buffer();
   memset((void *)command_flags, 0, sizeof(command_flags_t));
   psmon_init();   // zero the status snapshot before core 1 reads it
+  pl_rhd_shadow_init();   // seed the RHD register mirror from the init defaults
 #if BRAM_READ_METHOD == BRAM_READ_DMA
   pl_dma_init();  // AXI CDMA + non-cacheable DDR staging buffer for the read path
 #endif

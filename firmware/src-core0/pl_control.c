@@ -321,6 +321,7 @@ void pl_set_initialization_sequence(void) {
     if (pl_set_copi_commands_safe(initialization_cmd_sequence, "INITIALIZATION sequence")) {
         send_message("Ready for chip initialization - run this before first data acquisition\r\n");
     }
+    pl_rhd_shadow_init();   // re-seed the register shadow to the init defaults
 }
 
 void pl_set_cable_length_sequence(void) {
@@ -538,6 +539,27 @@ int pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms) {
     return 0;
 }
 
+// ---- RHD register shadow (the chip's commanded register state) --------------
+// Mirror of RHD registers 0..21 as commanded. Seeded from the init sequence
+// (pl_rhd_shadow_init) and updated by pl_write_rhd_register. Regs 0 and 3 are
+// OWNED by the override layer (D5 fast-settle / Reg-3 digout): their shadow keeps
+// the init base, and the live override bits are reported separately via
+// aux_ctrl/aux_flags. Reported in get_status ("report everything configurable").
+uint8_t rhd_reg_shadow[22] = {0};
+
+void pl_rhd_shadow_init(void) {
+    // Record every WRITE in the init sequence. WRITE(reg,val) = 0x8000|reg<<8|val,
+    // i.e. (cmd & 0xC000) == 0x8000 (CONVERT is 0x0xxx, READ is 0xCxxx).
+    for (int i = 0; i < 35; i++) {
+        uint16_t cmd = initialization_cmd_sequence[i];
+        if ((cmd & 0xC000) == 0x8000) {
+            int reg = (cmd >> 8) & 0x3F;
+            if (reg < (int)sizeof(rhd_reg_shadow))
+                rhd_reg_shadow[reg] = (uint8_t)(cmd & 0xFF);
+        }
+    }
+}
+
 int pl_read_rhd_register(int reg, uint32_t *result) {
     return pl_aux_inject(RHD_CMD_READ(reg), result, 10);
 }
@@ -546,7 +568,12 @@ int pl_write_rhd_register(int reg, uint8_t value, uint32_t *result) {
     // Note: WRITE(0)/WRITE(3) pass through the override layer's coherence
     // rules (D5 forced to the live fast-settle state; Reg-3 data replaced by
     // the shadow) -- use pl_aux_set_fast_settle / pl_aux_set_digout for those.
-    return pl_aux_inject(RHD_CMD_WRITE(reg, value), result, 10);
+    int rc = pl_aux_inject(RHD_CMD_WRITE(reg, value), result, 10);
+    // Mirror the commanded value on a successful inject; skip regs 0/3 (those are
+    // override-owned, so their shadow keeps the init base).
+    if (rc && reg > 0 && reg != 3 && reg < (int)sizeof(rhd_reg_shadow))
+        rhd_reg_shadow[reg] = value;
+    return rc;
 }
 
 // ============================================================================

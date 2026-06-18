@@ -90,9 +90,43 @@ in `net.py`/the plugin in lockstep with the firmware.
 `[19:16]` phase2 (B/cipo0), `[23:20]` phase3 (B/cipo1).
 
 ### `get_status` response (`status_response_t`)
-A packed struct (122 bytes) returned by `GET_STATUS` — version/IDs, PL hardware status
-(timestamp, write pointer, fifo count), PS counters (packets, errors), current config
-(phases, channel mask, debug mode), UDP info, aux-sequencer status, and **performance
-instrumentation** (per-packet CDMA + receive→transmit time as raw global-timer ticks, plus
-`timer_hz` so the host converts to µs). See `main.h` for the field layout and `net.py`
-`get_status()` for the unpacking; a firmware `_Static_assert` keeps the two in sync.
+A packed **148-byte** little-endian struct returned by `GET_STATUS`. `main.h` is the
+source of truth for the field layout; `net.py` `get_status()` mirrors the unpacking, and a
+firmware `_Static_assert(sizeof(status_response_t) == 148)` keeps the two in sync. Contents,
+in order:
+
+- **version / IDs** — firmware version, board/build IDs.
+- **PL hardware status** — 64-bit timestamp, BRAM write pointer, FIFO count, PL flags.
+- **PS counters** — packets sent, error counters, PS flags.
+- **current config** — `loop_count`, `phase0`/`phase1`, `channel_enable` mask, `debug_mode`.
+- **UDP info** — destination IP/port, packet format, bytes sent.
+- **aux-sequencer status** — `aux_read_result` (last injected command's `{cipo1, cipo0}`
+  response), `aux_bank_active`, `aux_flags` (bit0 seq_en, bit1 fast-settle active, bit2
+  digout, bit3 dsp, bit4 inject-ack), per-slot `aux_idx[3]`.
+- **performance instrumentation** — per-packet CDMA and receive→transmit times as raw
+  global-timer ticks (`dma_ticks_last/max`, `loop_ticks_last/max`), `dma_errors`, and
+  `timer_hz` so the host converts ticks→µs (kept as ticks on the wire; converted only when
+  printed).
+- **`aux_ctrl` (`uint32`)** — `CTRL_REG_22` read back: the live fast-settle / DSP-reset /
+  digout configuration (each as software-on / gpio-enable / gpio-pin-select fields), plus
+  `seq_en`, active bank, and the static Reg-3 byte. Per the "get_status reports everything
+  configurable" rule (CLAUDE.md).
+- **`rhd_reg[22]` (`uint8` ×22)** — **RHD chip register mirror**: the firmware's view of the
+  commanded state of RHD2000 registers 0..21. Seeded from the initialization sequence at
+  boot (`pl_rhd_shadow_init`) and updated whenever a `WRITE_REGISTER` succeeds
+  (`pl_write_rhd_register`). This is the *commanded* state, not a chip read-back — it lets a
+  host/plugin recover the configured bandwidth, DSP cutoff, amplifier power-up mask, etc.
+  without re-reading the chip. Registers 0 and 3 are owned by the PL override layer (amp
+  fast-settle D5 and digout/temp); their *live* values are reported via `aux_ctrl`/
+  `aux_flags`, so the mirror leaves those two as the static base.
+
+  Useful registers in the mirror (see the RHD2000 datasheet for the full map):
+
+  | reg | meaning |
+  |-----|---------|
+  | 0 | ADC config + amp fast-settle (bit D5 — overridden live) |
+  | 3 | digital-out / temp-sensor (overridden live) |
+  | 4 | DSP high-pass: enable (bit 4) + cutoff code (bits 3:0) |
+  | 8, 10 | RH1/RH2 DACs — upper-bandwidth setting |
+  | 12, 13 | RL DACs — lower-bandwidth setting |
+  | 14–21 | per-channel amplifier power-up (8 bits each → 64 channels) |

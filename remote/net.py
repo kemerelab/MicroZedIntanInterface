@@ -1245,8 +1245,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 126:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 126)")
+    if len(data) != 148:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 148)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1281,6 +1281,9 @@ def get_status(sock):
 
     # Aux control register (CTRL_REG_22): live fast-settle / DSP / digout config (4 bytes)
     (aux_ctrl,) = struct.unpack('<I', data[122:126])
+
+    # RHD chip register mirror: commanded state of regs 0..21 (22 bytes)
+    rhd_reg = struct.unpack('<22B', data[126:148])
 
     status = {
         'version': version,
@@ -1334,6 +1337,8 @@ def get_status(sock):
         'digout_sw': bool(aux_ctrl & (1 << 14)),
         'digout_gpio_en': bool(aux_ctrl & (1 << 15)),
         'digout_pin': (aux_ctrl >> 16) & 0x7,
+        # RHD chip register mirror (commanded state of regs 0..21)
+        'rhd_reg': list(rhd_reg),
     }
 
     return status
@@ -1404,6 +1409,16 @@ def print_status(status):
     lm = to_us(status['loop_ticks_max'])
     print(f"Headroom (max): {33.3 - lm:.2f} us  ({100.0*lm/33.3:.0f}% of budget used)")
     print(f"DMA errors: {status['dma_errors']}   (timer {hz/1e6:.1f} MHz)")
+
+    rr = status['rhd_reg']
+    print("\n--- RHD Chip Registers (mirror, commanded state) ---")
+    print("  reg  0-7 : " + " ".join(f"{b:02X}" for b in rr[0:8]))
+    print("  reg  8-15: " + " ".join(f"{b:02X}" for b in rr[8:16]))
+    print("  reg 16-21: " + " ".join(f"{b:02X}" for b in rr[16:22]))
+    amps = sum(bin(rr[r]).count("1") for r in range(14, 22))
+    print(f"  DSP HPF: {'on' if rr[4] & 0x10 else 'off'} (cutoff code {rr[4] & 0x0F})"
+          f" | BW DACs: RH1={rr[8]} RH2={rr[10]} RL={rr[12]}"
+          f" | amps powered: {amps}/64")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):

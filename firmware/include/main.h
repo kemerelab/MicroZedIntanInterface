@@ -263,6 +263,11 @@ typedef struct __attribute__((packed)) {
     // Per the "get_status reports everything configurable" rule (see CLAUDE.md).
     uint32_t aux_ctrl;
 
+    // RHD chip register mirror (commanded state of regs 0..21). Seeded from the
+    // init sequence, updated on write_reg; regs 0/3 are the override-owned base
+    // (live D5/digout are in aux_ctrl/aux_flags). 22 bytes.
+    uint8_t  rhd_reg[22];
+
 } status_response_t;
 
 // Flag definitions
@@ -372,6 +377,8 @@ int pl_set_copi_commands_safe(const uint16_t copi_array[35], const char* sequenc
 // COPI sequence selection
 void pl_set_convert_sequence(void);
 void pl_set_initialization_sequence(void);
+void pl_rhd_shadow_init(void);          // seed the RHD register shadow from the init sequence
+extern uint8_t rhd_reg_shadow[22];      // mirror of RHD regs 0..21 (commanded state)
 void pl_set_cable_length_sequence(void);
 
 // Aux command sequencer control (bank upload works DURING acquisition:

@@ -217,6 +217,9 @@ void collect_status_data(status_response_t* status) {
 
     // Aux config read-back (fast-settle / DSP / digout settings live in CTRL_REG_22)
     status->aux_ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
+
+    // RHD chip register mirror (commanded state of regs 0..21)
+    memcpy(status->rhd_reg, rhd_reg_shadow, sizeof(status->rhd_reg));
 }
 
 // ============================================================================
