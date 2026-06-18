@@ -148,22 +148,17 @@ static int packets_available(void) {
     n_words_available = (BRAM_SIZE_WORDS - ps_read_address) + pl_write_addr;
   }
 
-  // GUARD BAND: keep the read pointer one full packet behind the PL write
-  // frontier. The capture BRAM is a dual-CLOCK simple-dual-port RAM (PL writes
-  // port A @84MHz, PS reads port B via AXI @131MHz). If the PS reads a word the
-  // PL is committing in the SAME packet, the cross-clock same-address
-  // read-during-write returns stale data -- observed on hardware as the BRAM's
-  // i*4 power-on init pattern (0x0404=mem[257], 0x0624=mem[393], ...) leaking
-  // into the packet tail (cyc ~26-29). The boundary pointer itself is correct;
-  // the problem is margin, so hold a whole packet back -- the read region is
-  // then never the region the PL is actively writing. Costs one packet (~33us)
-  // of latency and one packet of the 109-packet BRAM buffer.
-  if (n_words_available >= (int)current_packet_size)
-    n_words_available -= current_packet_size;
-  else
-    n_words_available = 0;
-
-  return n_words_available / current_packet_size;  // Use variable packet size
+  // No guard band: the exposed write pointer (packet_boundary_address in
+  // fifo_bram_interface.sv) advances ONLY at packet boundaries, so every packet
+  // in [ps_read_address, pl_write_addr) is already fully committed -- the
+  // in-progress packet is excluded by construction, so there is no
+  // read-during-write to guard against. The CDC on that pointer is handled by the
+  // read-twice deglitch in pl_get_bram_write_address(), and the per-packet magic
+  // check is the safety net. (A former one-packet guard band here was a
+  // misattributed band-aid for the M_AXI_GP burst corruption that the DMA fixed;
+  // it also held back the last packet of any finite loop_count, so loop_count=1
+  // streamed nothing.)
+  return n_words_available / current_packet_size;  // complete packets available
 }
 
 // Read and validate one packet directly from BRAM with UDP transmission
