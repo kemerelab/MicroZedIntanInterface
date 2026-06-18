@@ -1245,8 +1245,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 122:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 122)")
+    if len(data) != 126:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 126)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1278,6 +1278,9 @@ def get_status(sock):
     # DMA / performance instrumentation (24 bytes: raw ticks + tick frequency)
     dma_errors, dma_ticks_last, dma_ticks_max, loop_ticks_last, loop_ticks_max, timer_hz = \
         struct.unpack('<IIIIII', data[98:122])
+
+    # Aux control register (CTRL_REG_22): live fast-settle / DSP / digout config (4 bytes)
+    (aux_ctrl,) = struct.unpack('<I', data[122:126])
 
     status = {
         'version': version,
@@ -1320,6 +1323,17 @@ def get_status(sock):
         'loop_ticks_last': loop_ticks_last,
         'loop_ticks_max': loop_ticks_max,
         'timer_hz': timer_hz,
+        # Aux config decoded from CTRL_REG_22 (fast-settle / DSP / digout)
+        'aux_ctrl': aux_ctrl,
+        'fs_sw': bool(aux_ctrl & (1 << 4)),
+        'fs_gpio_en': bool(aux_ctrl & (1 << 5)),
+        'fs_pin': (aux_ctrl >> 6) & 0x7,
+        'dsp_sw': bool(aux_ctrl & (1 << 9)),
+        'dsp_gpio_en': bool(aux_ctrl & (1 << 10)),
+        'dsp_pin': (aux_ctrl >> 11) & 0x7,
+        'digout_sw': bool(aux_ctrl & (1 << 14)),
+        'digout_gpio_en': bool(aux_ctrl & (1 << 15)),
+        'digout_pin': (aux_ctrl >> 16) & 0x7,
     }
 
     return status
@@ -1375,6 +1389,12 @@ def print_status(status):
     print(f"Active Banks: slot0={ba & 1}, slot1={(ba >> 1) & 1}, slot2={(ba >> 2) & 1}")
     print(f"Slot Indices: {status['aux_indices']}")
     print(f"Last Inject Result: 0x{status['aux_read_result']:08X}")
+    def _src(sw, gp, pin):
+        return f"GPIO pin {pin}" if gp else ("software" if sw else "off")
+    print(f"Config (CTRL_REG_22 0x{status['aux_ctrl']:08X}): "
+          f"fast-settle={_src(status['fs_sw'], status['fs_gpio_en'], status['fs_pin'])}, "
+          f"dsp-reset={_src(status['dsp_sw'], status['dsp_gpio_en'], status['dsp_pin'])}, "
+          f"digout={_src(status['digout_sw'], status['digout_gpio_en'], status['digout_pin'])}")
 
     print("\n--- Performance (budget 33.3 us/packet @ 30 kHz) ---")
     hz = status['timer_hz'] or 1   # raw ticks -> us converted here, not in firmware

@@ -258,6 +258,11 @@ typedef struct __attribute__((packed)) {
     uint32_t loop_ticks_max;    // worst receive->transmit (ticks; vs 33us budget)
     uint32_t timer_hz;          // tick frequency, for host ticks->us conversion
 
+    // Aux control register (CTRL_REG_22) read back -- the live fast-settle / DSP /
+    // digout configuration (sw/gpio_en/pin per field), seq_en, bank, reg3_static.
+    // Per the "get_status reports everything configurable" rule (see CLAUDE.md).
+    uint32_t aux_ctrl;
+
 } status_response_t;
 
 // Flag definitions

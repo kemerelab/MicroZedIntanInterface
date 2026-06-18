@@ -89,6 +89,12 @@ changing the others:
 - Status regs: read back starting at offset `(22*4)`; see `STATUS_REG_*_OFFSET`.
 - BRAM: base `0x80000000`, 16384 × 32-bit words (64 KB).
 - Packet: 10 header words + 18..70 data words depending on `channel_enable`.
+- **Rule — `get_status` reports everything configurable.** Any setting the host can
+  change (a CTRL register or a command that alters behavior) must also be surfaced in
+  `status_response_t`, so the host can always read back the full device configuration.
+  When you add a control, add its read-back to `collect_status_data` (`network.c`) and to
+  `net.py`'s `get_status` decode/print. A `_Static_assert` on `sizeof(status_response_t)`
+  (in `main.c`) guards the wire size — bump it and net.py's length/offsets together.
 
 ## Build & run
 

@@ -53,7 +53,7 @@ uint32_t loop_ticks_last = 0, loop_ticks_max = 0;   // receive->transmit (ticks)
 uint32_t perf_timer_hz = 0;                         // tick freq (set in main())
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 122, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 126, "status_response_t size must match net.py get_status");
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;

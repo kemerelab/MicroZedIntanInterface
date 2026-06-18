@@ -214,6 +214,9 @@ void collect_status_data(status_response_t* status) {
     status->loop_ticks_last = loop_ticks_last;
     status->loop_ticks_max  = loop_ticks_max;
     status->timer_hz        = perf_timer_hz;
+
+    // Aux config read-back (fast-settle / DSP / digout settings live in CTRL_REG_22)
+    status->aux_ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
 }
 
 // ============================================================================
