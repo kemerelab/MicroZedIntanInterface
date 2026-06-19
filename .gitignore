@@ -46,3 +46,4 @@ vitis_workspace/
 
 # Overnight build scripts + logs (regenerable)
 build_logs/
+programmable_logic/sim/lfp_*.hex
