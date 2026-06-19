@@ -6,7 +6,7 @@
 module lfp_fir_decimator_tb;
 
     localparam int N_LANES   = 8;
-    localparam int N_SLOTS   = 35;
+    localparam int N_SLOTS   = 32;
     localparam int DATA_W    = 16;
     localparam int COEF_W    = 18;
     localparam int COEF_FRAC = 17;

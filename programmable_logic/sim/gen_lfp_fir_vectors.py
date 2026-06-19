@@ -8,7 +8,7 @@ OUT = os.path.dirname(os.path.abspath(__file__))
 
 # ---- config (keep in lockstep with the TB localparams) ----
 N_LANES   = 8
-N_SLOTS   = 35
+N_SLOTS   = 32                  # amplifier channels per lane (aux slots dropped upstream)
 DATA_W    = 16
 COEF_W    = 18
 COEF_FRAC = 17

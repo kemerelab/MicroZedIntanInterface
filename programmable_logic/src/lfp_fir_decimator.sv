@@ -9,12 +9,15 @@
 //
 // Sample model
 // ------------
-// The acquisition core emits one "data word" per COPI slot (cycle_counter
-// 0..N_SLOTS-1), each word carrying N_LANES 16-bit CIPO samples. Every
-// (lane, slot) pair is therefore one independent channel sampled once per
-// packet (30 kHz). Because all channels advance together (exactly one new
-// sample each per packet) a SINGLE ring write-pointer is shared by all of
-// them -- the delay line is just [lane][slot][ring], addressed
+// The integration layer feeds one sample word per AMPLIFIER channel
+// (sample_slot 0..N_SLOTS-1, N_SLOTS = 32), each word carrying N_LANES 16-bit
+// CIPO samples already converted offset-binary -> two's-complement signed.
+// (Upstream it drops the 3 aux slots and removes the 2-cycle SPI readback
+// offset: data_generator_core cycle_counter 2..33 -> slot 0..31.) Every
+// (lane, slot) pair is one independent channel sampled once per packet
+// (30 kHz). Because all channels advance together (exactly one new sample each
+// per packet) a SINGLE ring write-pointer is shared by all of them -- the
+// delay line is just [lane][slot][ring], addressed
 // slot*RING_DEPTH + ((head - tap) & (RING_DEPTH-1)).
 //
 // Decimation
@@ -40,8 +43,8 @@
 
 module lfp_fir_decimator #(
     parameter  int N_LANES    = 8,     // CIPO streams packed per sample word
-    parameter  int N_SLOTS    = 35,    // COPI slots per packet (cycle_counter range)
-    parameter  int DATA_W     = 16,    // sample width (Intan ADC code)
+    parameter  int N_SLOTS    = 32,    // amplifier channels per lane (aux slots dropped upstream)
+    parameter  int DATA_W     = 16,    // sample width (signed; offset->signed done upstream)
     parameter  int COEF_W     = 18,    // coefficient width (signed, Q1.COEF_FRAC)
     parameter  int COEF_FRAC  = 17,    // fractional bits in the coefficients
     parameter  int ACC_W      = 48,    // MAC accumulator width
@@ -61,8 +64,8 @@ module lfp_fir_decimator #(
 
     // ---- Sample tap from data_generator_core (one data word per slot) ----
     input  logic                        sample_valid,   // pulse: a data word is on sample_data
-    input  logic [N_LANES*DATA_W-1:0]   sample_data,    // N_LANES x DATA_W, lane 0 in the low bits
-    input  logic [SLOT_W-1:0]           sample_slot,    // cycle_counter, 0..N_SLOTS-1
+    input  logic [N_LANES*DATA_W-1:0]   sample_data,    // N_LANES x DATA_W signed, lane 0 in low bits
+    input  logic [SLOT_W-1:0]           sample_slot,    // amplifier channel index, 0..N_SLOTS-1
     input  logic                        packet_tick,    // pulse: the just-written packet is complete
 
     // ---- Configuration (host latches these while streaming is stopped) ----

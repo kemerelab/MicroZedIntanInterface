@@ -68,6 +68,33 @@ The host owns the design: `scipy.signal.firwin`/`remez` → quantize to **Q1.17*
 signed) → upload. Thin firmware pipe, host computes the physical units — same split as
 everywhere else.
 
+## 3a. Sample representation — offset binary (critical)
+
+Intan amplifier samples are **offset binary**: mid-scale `0x8000` = baseline (0 µV),
+`V = 0.195 µV × (code − 32768)`. (This repo's debug `sine_lut` confirms it — centered at
+`+32767`, "unsigned-16-bit".) The FIR engine is a **pure two's-complement signed** DSP
+block, so the offset must be removed at its input and re-applied at its output, otherwise
+a quiet baseline sits at the signed saturation rail and the low-pass output is a flat,
+saturated line.
+
+Conversion is a symmetric **MSB invert** (`^ 0x8000`), done at the integration boundary so
+the engine stays generic and already-proven:
+- **in:** `engine_sample = raw_sample ^ 0x8000`  (offset binary → signed, centered at 0)
+- **out:** `lfp_sample = engine_out ^ 0x8000`     (signed → offset binary)
+
+LFP is therefore shipped in the **same offset-binary format as broadband**, so the host
+de-offsets both identically. The raw broadband stream is untouched (data fidelity).
+
+**Channels filtered = the 32 amplifier converts only** (8 lanes × 32 = 256 ch). The
+integration tap drops the 3 aux slots *and* removes the 2-cycle SPI readback offset:
+`convert_cmd_sequence` issues CONVERT(0..31) at command-slots 0–31, so with the +2 readback
+delay the amplifier samples land at `cycle_counter` 2..33 → fed as engine slot 0..31
+(slots 0/1/34 carry aux/wrap and are not fed). This makes the delay line exactly 8×32×N
+(not 8×35×N), the ~128 KB / ~32 BRAM36 in §2.
+
+Bonus: debug-mode sine (58–469 Hz, all < 600 Hz) passes the LP filter, so it is a clean
+on-bench LFP test signal through this path.
+
 ## 4. Contract additions (the three layers)
 
 ### 4a. Commands (host → PS), new `0x80` block
