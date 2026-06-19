@@ -83,7 +83,7 @@ in `net.py`/the plugin in lockstep with the firmware.
 | Region | Base | Notes |
 |--------|------|-------|
 | AXI-Lite control regs | `0x40000000` | 4 control regs (PS→PL): enable / loop / phase / channel + aux |
-| AXI-Lite status regs | `0x40000000 + 22*4` | 13 status regs (PL→PS): write pointer, fifo count, phases, aux |
+| AXI-Lite status regs | `0x40000000 + 25*4` | status regs (PL→PS): write pointer, fifo count, phases, aux (base = `PL_N_CTRL_REGS*4`) |
 | Capture BRAM | `0x80000000` | 16384 × 32-bit words (64 KB) |
 
 `CTRL_REG_2` packs the four cable phases: `[3:0]` phase0 (A/cipo0), `[7:4]` phase1 (A/cipo1),

@@ -89,7 +89,8 @@ changing the others:
 
 - Control regs: base `0x40000000` (AXI-Lite). CTRL_REG_0..2 = enable/phase/channel;
   MOSI/COPI words start at reg offset 4.
-- Status regs: read back starting at offset `(22*4)`; see `STATUS_REG_*_OFFSET`.
+- Status regs: read back starting at offset `(PL_N_CTRL_REGS*4)` = `(25*4)` (grew from
+  `22*4` when the aux control regs landed at 22–24); see `STATUS_REG_*_OFFSET`.
 - BRAM: base `0x80000000`, 16384 × 32-bit words (64 KB).
 - Packet: 10 header words + 18..140 data words depending on `channel_enable` (8-bit mask).
 - **Rule — `get_status` reports everything configurable.** Any setting the host can
