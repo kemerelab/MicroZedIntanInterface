@@ -2,11 +2,11 @@
 
 An FPGA data-acquisition interface for **Intan RHD2000-style neural recording chips**, built
 on a **MicroZed** (Xilinx Zynq-7020) with a custom carrier PCB. The PL talks to up to two
-RHD2000 chips over a DDR SPI protocol; the PS streams the data over the network.
+cables of RHD2000 chips over a DDR SPI protocol; the PS streams the data over the network.
 
-- Up to **128 channels @ 30 ksps** (two Intan-standard 12-pin Omnetics cables, single + DDR).
+- Up to **256 channels @ 30 ksps** (two cables × 128 ch, Intan-standard 12-pin Omnetics, single + DDR).
 - A user-programmable per-cable phase delay compensates for cable length.
-- **TCP control** (port 6000) + **UDP data stream** (port 5000, ~9 MB/s).
+- **TCP control** (port 6000) + **UDP data stream** (port 5000, ~9 MB/s per cable, ~18 MB/s at full config).
 - Data path: `Intan ──SPI(DDR)──► PL ──BRAM──► (AXI CDMA) ──► PS ──UDP──► host`.
 
 MicroZed SOMs are ~$300 (e.g. [Newark](https://www.newark.com/avnet/aes-z7mb-7z020-som-i-g-rev-h/eval-brd-32bit-fpga-arm-cortex/dp/62AJ7410)).

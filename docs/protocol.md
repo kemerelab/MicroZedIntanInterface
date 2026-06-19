@@ -37,7 +37,7 @@ Most commands reply with a small ack; `GET_STATUS`, `READ_REGISTER`, etc. reply 
 | `0x11` | SET_PHASE | p1 = phase0, p2 = phase1 | **port A** CIPO0/CIPO1 sampling phase (cable length) |
 | `0x14` | SET_PHASE_B | p1 = phase2, p2 = phase3 | **port B** (2nd cable) CIPO0/CIPO1 phase |
 | `0x12` | SET_DEBUG_MODE | p1 = 0/1 | synthetic sine instead of real CIPO (no chip needed) |
-| `0x13` | SET_CHANNEL_ENABLE | p1 = mask | 8-bit stream mask (e.g. `0xFF` = all 8 streams / 128 ch) |
+| `0x13` | SET_CHANNEL_ENABLE | p1 = mask | 8-bit stream mask (e.g. `0xFF` = all 8 streams / 256 ch) |
 | `0x20` | LOAD_CONVERT | — | load the per-sample CONVERT command sequence |
 | `0x21` | LOAD_INIT | — | load the RHD2000 init/config sequence |
 | `0x22` | LOAD_CABLE_TEST | — | load the cable/phase test sequence |
@@ -62,7 +62,7 @@ command names like `start`, `set_channels`, `auto_cable_detect`, `verify_sine`.)
 Each UDP datagram is one 30 kHz sample frame: **10 header words + N data words**, all 32-bit
 little-endian. `N` depends on the channel mask (`35 × num_streams` 16-bit words, packed two
 per 32-bit word), so the packet is **28 words (min) … 150 words / 600 bytes (max, `0xFF`,
-128 ch)**.
+256 ch)**.
 
 **Header (10 words / 40 bytes):**
 

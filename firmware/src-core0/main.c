@@ -73,7 +73,7 @@ static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(6
 //   SINGLE - word-by-word Xil_In32. CLEAN by construction: each read is its own
 //            1-beat AXI transaction, so it never issues the burst that the GP
 //            master mishandles. But it is latency-bound and too slow to sustain
-//            0xFF (128 ch, 150-word packets) at the 131.25 MHz AXI clock.
+//            0xFF (256 ch, 150-word packets) at the 131.25 MHz AXI clock.
 //            Raising the AXI clock to 210 MHz DID make single-beat fast enough --
 //            but 210 MHz is over the -1 part's M_AXI_GP ~150 MHz spec
 //            (clk_out2 also clocks the GP master), so it is bench-only, not

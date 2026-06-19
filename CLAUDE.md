@@ -16,18 +16,21 @@ Intan chips ──SPI(DDR)──► PL (FPGA fabric) ──FIFO/BRAM──► PS
 host (net.py) ──TCP control──────────────────────────────────────┘
 ```
 
-- The **PL** talks to up to two RHD2000 chips over a modified SPI protocol: SCLK, CS,
-  COPI, and two CIPO lines using **double-data-rate** (two 16-bit words interleaved on
-  alternate clock phases). Long cables introduce CIPO phase delay, so the PL latches
-  CIPO with a programmable delay relative to the clock.
+- The **PL** talks to up to **two cables** of RHD2000 chips (ports A/B, a dual-port
+  datapath) over a modified SPI protocol. Each cable is SCLK, CS, COPI, and two CIPO
+  lines using **double-data-rate** (two 16-bit words interleaved on alternate clock
+  phases) — so up to four chips / **256 channels** total. Long cables introduce CIPO
+  phase delay, so the PL latches CIPO with a programmable (per-cable) delay relative
+  to the clock.
 - The acquisition loop is **80 states @ 84 MHz** (4× oversampling of the 24 MHz SPI
   clock), repeated 35× per packet (35 COPI commands → 35×2 readback words per CIPO line).
 - Each packet = 10 header words (magic `0xCAFEBABE_DEADBEEF` + 64-bit timestamp +
-  digital-in + metadata + 8 external ADC values) plus up to 70 data words. Users select
-  which of 4 channels (regular/DDR × CIPO0/CIPO1) to stream.
+  digital-in + metadata + 8 external ADC values) plus up to 140 data words. Users select
+  which of 8 streams (regular/DDR × CIPO0/CIPO1 × two cables) to stream via the 8-bit
+  channel-enable mask.
 - The **PS** runs bare-metal on both ARM cores: **core 0** runs the fast loop (TCP
-  commands, BRAM reads, UDP streaming, ~9 MB/s, up to 128 ch @ 30 ksps); **core 1**
-  runs the serial debug console.
+  commands, BRAM reads, UDP streaming, ~9 MB/s per cable, up to 256 ch @ 30 ksps ≈
+  ~18 MB/s at the full `0xFF` config); **core 1** runs the serial debug console.
 - The **host** (`remote/net.py`) sends TCP control commands and receives/validates the
   UDP data stream.
 
@@ -88,7 +91,7 @@ changing the others:
   MOSI/COPI words start at reg offset 4.
 - Status regs: read back starting at offset `(22*4)`; see `STATUS_REG_*_OFFSET`.
 - BRAM: base `0x80000000`, 16384 × 32-bit words (64 KB).
-- Packet: 10 header words + 18..70 data words depending on `channel_enable`.
+- Packet: 10 header words + 18..140 data words depending on `channel_enable` (8-bit mask).
 - **Rule — `get_status` reports everything configurable.** Any setting the host can
   change (a CTRL register or a command that alters behavior) must also be surfaced in
   `status_response_t`, so the host can always read back the full device configuration.
