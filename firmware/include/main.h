@@ -189,7 +189,9 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         1   // 1.1: AXI-CDMA read path + get_status perf instrumentation
+#define FIRMWARE_VERSION_MINOR         2   // 1.2: AXI-CDMA read path; get_status config tracking
+                                           //      (aux_ctrl + RHD register mirror); fast-settle/DSP/
+                                           //      digout via TTL/GPIO. Status wire = 148 bytes.
 #define FIRMWARE_VERSION_PATCH         0
 #define FIRMWARE_VERSION_BUILD         0
 #define FIRMWARE_VERSION_WORD          ((FIRMWARE_VERSION_MAJOR << 24) | \
