@@ -174,3 +174,19 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
   with `hasattr(socket, ...)`. See `configure_tcp_keepalive()`.
 - Git: remote `origin` uses the `github.com-microzed` SSH host alias. Commit/push only
   when asked.
+
+## Working autonomously / overnight
+
+- When the user hands off for an **overnight / autonomous** session, plan and execute on
+  the order of **~8 hours of work**, not 15 minutes. Be ambitious about scope.
+- **Attempt the risky thing rather than staging it for review.** A full PL build is ~15 min;
+  you can run a half-dozen of them, on different approaches, and `git`-roll-back the ones
+  that don't pan out — that is a good use of hours you're not otherwise using. "Stage the
+  BD change for review" is the wrong default overnight: just make the change, build it, and
+  report what happened (closed timing / failed where). Commit working states as checkpoints;
+  branch/stash to explore alternatives.
+- Verify what you can in sim first (cheap), then **push all the way through the build** —
+  don't stop at "proven in sim, plumbing remains." The plumbing + build closure is exactly
+  the part worth burning overnight cycles on.
+- Leave a clear morning summary: what built, what timing closed at, what failed and why,
+  and any genuine decisions left for the user.
