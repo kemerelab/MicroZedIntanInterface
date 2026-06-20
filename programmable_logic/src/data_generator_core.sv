@@ -43,7 +43,17 @@ module data_generator_core (
     input  logic        cipo3,      // Port 1 (cable B) CIPO1
 
     // External digital input
-    input  logic [7:0]  digital_in
+    input  logic [7:0]  digital_in,
+
+    // DSP tap: the de-interleaved per-slot sample stream, for the on-PL LFP/DSP
+    // engine. Pulses on each data-word write (NOT the header), carrying the same
+    // 8x16-bit lanes as fifo_write_data with the slot index (cycle_counter) and a
+    // once-per-packet tick. Offset-binary->signed conversion + amplifier-slot
+    // gating happen downstream in lfp_dsp_block. See docs/lfp-dsp-engine-design.md.
+    output logic        dsp_sample_valid,
+    output logic [127:0] dsp_sample_data,
+    output logic [5:0]  dsp_sample_slot,
+    output logic        dsp_packet_tick
 );
 
 // Extract control bits
@@ -569,10 +579,16 @@ always_ff @(posedge clk) begin
         fifo_packet_end_flag <= 1'b0;
 
         dummy_data_index <= 9'd0;
+        dsp_sample_valid <= 1'b0;
+        dsp_sample_slot  <= 6'd0;
+        dsp_packet_tick  <= 1'b0;
     end else begin
         // Default: no FIFO write
         fifo_write_en <= 1'b0;
-        
+        // DSP tap defaults (single-cycle pulses)
+        dsp_sample_valid <= 1'b0;
+        dsp_packet_tick  <= 1'b0;
+
         if (transmission_active && !fifo_full) begin
             // Header writes (first cycle only) - always fully valid
             if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3, 7'd4}) begin
@@ -617,6 +633,11 @@ always_ff @(posedge clk) begin
                 fifo_write_en <= 1'b1;
                 fifo_channel_mask <= channel_enable_reg;  // 8-bit channel enable
                 fifo_packet_end_flag <= is_last_cycle;    // Only last cycle's data word ends the packet
+                // DSP tap: this is a data-word write -> pulse the engine with the
+                // slot index. fifo_write_data (set below) carries the 8 lanes and
+                // is exposed combinationally as dsp_sample_data.
+                dsp_sample_valid <= 1'b1;
+                dsp_sample_slot  <= cycle_counter;
 
                 if (!debug_mode_reg) begin
                     // Real CIPO data, both ports.
@@ -660,12 +681,18 @@ always_ff @(posedge clk) begin
                     packets_sent <= packets_sent + 1;
                     // Increment dummy data index for continuous sine wave across packets
                     dummy_data_index <= dummy_data_index + 9'd1;
+                    // DSP tap: the packet is complete -> advance the engine's ring
+                    // (one tick per packet, after all 35 slot samples are ingested).
+                    dsp_packet_tick <= 1'b1;
                 end
             end
 
         end
     end
 end
+
+// DSP tap data: the registered 128-bit data word (valid when dsp_sample_valid).
+assign dsp_sample_data = fifo_write_data;
 
 // Pack status signals
 // Status Register 0: Dynamic status and counters (locally generated)
