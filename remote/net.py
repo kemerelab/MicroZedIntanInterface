@@ -47,6 +47,16 @@ CMD_READ_REGISTER = 0x73    # param1 = reg -> 4-byte {cipo1, cipo0} response
 CMD_WRITE_REGISTER = 0x74   # param1 = reg; param2 = value -> 4-byte echo response
 CMD_SET_FAST_SETTLE = 0x75  # param1 = amp: sw|gpio_en<<1|pin<<4; param2 = dsp: same layout
 CMD_SET_DIGOUT = 0x76       # param1 = sw|gpio_en<<1|pin<<4; param2 = reg3_static byte
+# LFP/DSP engine (Tier-1) -- configure while disabled, then enable
+CMD_LFP_ENABLE = 0x80       # param1 = 0/1
+CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
+CMD_LFP_SET_CHANNELS = 0x82 # param1 = 8-bit lane mask
+CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+
+LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
+LFP_MAGIC_LOW = 0x1F1FBEEF
+LFP_MAGIC_HIGH = 0xCAFEBABE
+LFP_COEF_FRAC = 17          # Q1.17 coefficient fixed-point
 
 AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
 
@@ -1151,6 +1161,86 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
     finally:
         sock.settimeout(None)
 
+# ============================================================================
+# LFP/DSP engine (Tier-1) host control + receive
+# ============================================================================
+def design_lfp_lowpass(num_taps, cutoff_hz=600.0, fs=30000.0):
+    """Windowed-sinc (Hamming) low-pass FIR, unity DC gain, quantized to Q1.17
+    (18-bit signed). The decimation anti-alias filter; cutoff < fs/(2*R)."""
+    import math
+    fc = cutoff_hz / fs                       # normalized cutoff (cycles/sample)
+    M = num_taps - 1
+    h = []
+    for n in range(num_taps):
+        x = n - M / 2.0
+        s = 2 * fc if abs(x) < 1e-9 else math.sin(2 * math.pi * fc * x) / (math.pi * x)
+        w = 0.54 - 0.46 * math.cos(2 * math.pi * n / M)   # Hamming
+        h.append(s * w)
+    g = sum(h) or 1.0
+    scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
+    return [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
+
+def lfp_upload_coeffs(sock, coeffs):
+    """Stream taps through the indirect window (first write clears the pointer)."""
+    for i, c in enumerate(coeffs):
+        send_binary_command(sock, CMD_LFP_WRITE_COEF, 1 if i == 0 else 0, c & 0x3FFFF)
+
+def configure_lfp(sock, lane_mask=0x0F, decim_R=15, num_taps=128, cutoff_hz=600.0):
+    """Disable, set channels/params, design + upload the LP kernel. Call
+    lfp_enable(sock, True) afterwards to start streaming on UDP 5001."""
+    send_binary_command(sock, CMD_LFP_ENABLE, 0)
+    send_binary_command(sock, CMD_LFP_SET_CHANNELS, lane_mask & 0xFF)
+    send_binary_command(sock, CMD_LFP_SET_PARAMS, decim_R & 0xFF, num_taps & 0xFF)
+    coeffs = design_lfp_lowpass(num_taps, cutoff_hz)
+    lfp_upload_coeffs(sock, coeffs)
+    print(f"[LFP] configured: mask=0x{lane_mask:02X} R={decim_R} taps={num_taps} "
+          f"cutoff={cutoff_hz:.0f}Hz -> {fs_out_str(decim_R)}")
+    return coeffs
+
+def fs_out_str(decim_R):
+    return f"{30000.0 / max(decim_R,1):.0f} sps out"
+
+def lfp_enable(sock, on=True):
+    send_binary_command(sock, CMD_LFP_ENABLE, 1 if on else 0)
+    print(f"[LFP] {'ENABLED' if on else 'disabled'}")
+
+def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
+    """Bind the LFP UDP port and parse frames -- a reference receiver for the
+    plugin. Payload samples are offset-binary 16-bit (subtract 0x8000 for signed)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('', bind_port))
+    s.settimeout(3.0)
+    got = bad = 0
+    last_seq = None
+    try:
+        while got < n_packets:
+            data, _ = s.recvfrom(4096)
+            if len(data) < 24:
+                bad += 1; continue
+            mlo, mhi, ts_lo, ts_hi, cfg, seq = struct.unpack('<IIIIII', data[:24])
+            if mlo != LFP_MAGIC_LOW or mhi != LFP_MAGIC_HIGH:
+                bad += 1; continue
+            lane_mask, decim_R, num_taps, overrun = (cfg & 0xFF, (cfg >> 8) & 0xFF,
+                                                     (cfg >> 16) & 0xFF, (cfg >> 24) & 1)
+            pay = data[24:]
+            usamp = struct.unpack(f'<{len(pay)//2}H', pay)
+            samp = [u - 0x8000 for u in usamp]      # offset binary -> signed
+            ts = ts_lo | (ts_hi << 32)
+            if last_seq is not None and seq != (last_seq + 1) & 0xFFFFFFFF:
+                print(f"[LFP] seq gap {last_seq}->{seq}")
+            last_seq = seq
+            got += 1
+            if got <= 5 or got % 50 == 0:
+                print(f"[LFP] seq={seq} ts={ts} mask=0x{lane_mask:02X} R={decim_R} "
+                      f"taps={num_taps} ov={overrun} n={len(samp)} first={samp[:4]}")
+    except socket.timeout:
+        print("[LFP] receive timeout (is the engine enabled + streaming?)")
+    finally:
+        s.close()
+    print(f"[LFP] received {got} frames, {bad} non-LFP/short datagrams")
+    return got
+
 def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
     """Upload a command program (with its length record) into a standby bank.
     Works during acquisition; swap it live with aux_bank_select()."""
@@ -1245,8 +1335,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 148:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 148)")
+    if len(data) != 160:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 160)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1284,6 +1374,10 @@ def get_status(sock):
 
     # RHD chip register mirror: commanded state of regs 0..21 (22 bytes)
     rhd_reg = struct.unpack('<22B', data[126:148])
+    # LFP/DSP engine config + status (12 bytes)
+    (lfp_enable, lfp_lane_mask, lfp_decim_R, lfp_num_taps) = struct.unpack('<4B', data[148:152])
+    (lfp_packets_sent,) = struct.unpack('<I', data[152:156])
+    (lfp_overrun,) = struct.unpack('<B', data[156:157])
 
     status = {
         'version': version,
@@ -1339,6 +1433,12 @@ def get_status(sock):
         'digout_pin': (aux_ctrl >> 16) & 0x7,
         # RHD chip register mirror (commanded state of regs 0..21)
         'rhd_reg': list(rhd_reg),
+        'lfp_enable': lfp_enable,
+        'lfp_lane_mask': lfp_lane_mask,
+        'lfp_decim_R': lfp_decim_R,
+        'lfp_num_taps': lfp_num_taps,
+        'lfp_packets_sent': lfp_packets_sent,
+        'lfp_overrun': lfp_overrun,
     }
 
     return status
@@ -1419,6 +1519,14 @@ def print_status(status):
     print(f"  DSP HPF: {'on' if rr[4] & 0x10 else 'off'} (cutoff code {rr[4] & 0x0F})"
           f" | BW DACs: RH1={rr[8]} RH2={rr[10]} RL={rr[12]}"
           f" | amps powered: {amps}/64")
+
+    R = status['lfp_decim_R'] or 1
+    print(f"\n--- LFP/DSP engine (Tier-1, UDP {LFP_UDP_PORT}) ---")
+    print(f"  {'ENABLED' if status['lfp_enable'] else 'disabled'}  "
+          f"lane_mask=0x{status['lfp_lane_mask']:02X}  decim_R={status['lfp_decim_R']} "
+          f"(-> {30000.0/R:.0f} sps)  num_taps={status['lfp_num_taps']}")
+    print(f"  packets sent: {status['lfp_packets_sent']}   "
+          f"overrun: {'YES' if status['lfp_overrun'] else 'no'}")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):

@@ -56,7 +56,7 @@
 
 // Number of PL control registers (must match axi_lite_registers N_CTRL --
 // the status registers are read back starting right after the control block)
-#define PL_N_CTRL_REGS      25
+#define PL_N_CTRL_REGS      28
 
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
@@ -68,6 +68,17 @@
 #define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // enable, bank select, fast settle/digout/dsp config
 #define CTRL_REG_AUX_WRITE_OFFSET   (23 * 4)  // bank write port payload
 #define CTRL_REG_AUX_STROBE_OFFSET  (24 * 4)  // write/inject toggles + inject command
+
+// LFP/DSP engine control registers (PL regs 25..27; see lfp_dsp_block.sv)
+#define CTRL_REG_LFP_CFG_OFFSET     (25 * 4)  // [0]en [15:8]lane_mask [23:16]decim_R [31:24]num_taps
+#define CTRL_REG_LFP_COEF_OFFSET    (26 * 4)  // [17:0] signed Q1.17 coefficient data
+#define CTRL_REG_LFP_STROBE_OFFSET  (27 * 4)  // [0] coef write toggle, [1] coef pointer clear
+#define LFP_STROBE_COEF_TOGGLE      (1u << 0)
+#define LFP_STROBE_PTR_CLR          (1u << 1)
+// LFP output BRAM (decimated stream, PS read via 2nd axi_bram_ctrl)
+#define LFP_BRAM_BASE_ADDR          0x84000000
+#define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
+#define LFP_UDP_PORT                5001       // separate UDP stream for the LFP band
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
@@ -123,6 +134,7 @@
 #define STATUS_REG_10_OFFSET (STATUS_REG_BASE + 10 * 4)  // BRAM write address + FIFO count (added by wrapper)
 #define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
+#define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
 
 // STATUS_REG_11 bit fields
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
@@ -269,6 +281,16 @@ typedef struct __attribute__((packed)) {
     // init sequence, updated on write_reg; regs 0/3 are the override-owned base
     // (live D5/digout are in aux_ctrl/aux_flags). 22 bytes.
     uint8_t  rhd_reg[22];
+
+    // LFP/DSP engine configuration + status (CTRL_REG_LFP_CFG + STATUS_REG_13).
+    // Per the "get_status reports everything configurable" rule. 12 bytes.
+    uint8_t  lfp_enable;        // engine enabled
+    uint8_t  lfp_lane_mask;     // which of 8 streams are LFP-filtered
+    uint8_t  lfp_decim_R;       // decimation factor (packets per output)
+    uint8_t  lfp_num_taps;      // active FIR length
+    uint32_t lfp_packets_sent;  // LFP UDP packets emitted
+    uint8_t  lfp_overrun;       // sticky compute-overrun flag
+    uint8_t  lfp_reserved[3];
 
 } status_response_t;
 
@@ -431,5 +453,23 @@ void collect_status_data(status_response_t* status);
 void abort_tcp_connections(void);
 void stop_tcp_server(void);
 void stop_udp_stream(void);
+
+// ============================================================================
+// LFP/DSP ENGINE (Tier-1) -- control + streaming
+// ============================================================================
+// Control (pl_control.c): config latches while streaming is stopped.
+void pl_lfp_set_config(uint8_t enable, uint8_t lane_mask, uint8_t decim_R, uint8_t num_taps);
+void pl_lfp_coef_begin(void);                             // clear the coef write pointer
+void pl_lfp_coef_push(int32_t coef);                      // write one 18-bit Q1.17 tap
+void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
+uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
+
+// Streaming (network.c): drain the LFP output BRAM -> UDP on LFP_UDP_PORT.
+void lfp_stream_init(void);
+void lfp_stream_service(void);   // call from the core-0 maintenance loop
+
+// Tracked config / counters (mirrored into status_response_t).
+extern uint8_t  lfp_cfg_enable, lfp_cfg_lane_mask, lfp_cfg_decim_R, lfp_cfg_num_taps;
+extern uint32_t lfp_udp_packets_sent;
 
 #endif // MAIN_H

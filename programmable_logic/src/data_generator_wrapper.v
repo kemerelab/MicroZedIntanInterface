@@ -22,7 +22,7 @@ module data_generator #(
     // sequencer / override layer; 25..27 configure the LFP/DSP engine. Status
     // 11 = aux status, 12 = read result.
     input  wire [32*28-1:0] ctrl_regs_pl,
-    output wire [32*13-1:0]  status_regs_pl,
+    output wire [32*14-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
     input  wire [7:0]  digital_in,
@@ -248,6 +248,10 @@ module data_generator #(
     // Aux command sequencer status (see data_generator_core for bit layout)
     assign status_regs_pl[11*32 +: 32] = aux_status;
     assign status_regs_pl[12*32 +: 32] = aux_read_result;
+
+    // LFP engine status: [15:0] output-BRAM write byte-address (PS read pointer),
+    // [16] sticky compute-overrun flag.
+    assign status_regs_pl[13*32 +: 32] = {15'd0, lfp_overrun, lfp_wr_addr};
 
     // Port-B master outputs are the same broadcast commands as port A.
     assign csn_b  = csn;
