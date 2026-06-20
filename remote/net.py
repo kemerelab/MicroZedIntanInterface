@@ -52,7 +52,9 @@ CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
 CMD_LFP_SET_CHANNELS = 0x82 # param1 = 8-bit lane mask
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
 
+UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
 LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
 LFP_MAGIC_LOW = 0x1F1FBEEF
 LFP_MAGIC_HIGH = 0xCAFEBABE
@@ -1240,6 +1242,60 @@ def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
         s.close()
     print(f"[LFP] received {got} frames, {bad} non-LFP/short datagrams")
     return got
+
+# ============================================================================
+# UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
+# replacing the ~18 MB/s small-packet broadband assumption with a measured
+# large-packet ceiling. (Payloads > ~1472 B fragment unless the path is jumbo-
+# enabled; the sweep shows the effect.)
+# ============================================================================
+def udp_bench(sock, payload_bytes=1400, n_packets=50000, bind_port=UDP_BENCH_PORT):
+    import time
+    us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        us.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+    except OSError:
+        pass
+    us.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    us.bind(('', bind_port))
+    us.settimeout(2.0)
+    ack_id = random.randint(1, 65535)
+    sock.sendall(struct.pack('<IIIII', CMD_MAGIC, CMD_UDP_BENCH, ack_id,
+                             payload_bytes, n_packets))
+    got = nbytes = 0
+    t0 = t1 = None
+    try:
+        while got < n_packets:
+            data, _ = us.recvfrom(payload_bytes + 200)
+            now = time.time()
+            if t0 is None:
+                t0 = now
+            t1 = now
+            got += 1; nbytes += len(data)
+    except socket.timeout:
+        pass
+    us.close()
+    try:                                  # the firmware ACKs after the blast
+        sock.settimeout(1.0); sock.recv(8)
+    except Exception:
+        pass
+    finally:
+        sock.settimeout(None)
+    if t0 and got > 1 and t1 > t0:
+        dt = t1 - t0
+        mbps, pps = nbytes / dt / 1e6, got / dt
+        loss = 100.0 * (1 - got / n_packets)
+        print(f"  {payload_bytes:>6} B x {n_packets}:  {mbps:6.1f} MB/s   "
+              f"{pps/1000:6.1f}k pps   loss {loss:5.1f}%   ({got} rx)")
+        return mbps, pps, loss
+    print(f"  {payload_bytes:>6} B: no/insufficient data received "
+          f"(check ZYNQ_IP / firewall on port {bind_port})")
+    return 0.0, 0.0, 100.0
+
+def udp_bench_sweep(sock, n_packets=50000):
+    print("UDP throughput sweep (small=broadband-like, 1472=MTU, larger=jumbo/fragmented):")
+    for sz in (256, 600, 1024, 1472, 2944, 5888, 8800):
+        udp_bench(sock, sz, n_packets)
 
 def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
     """Upload a command program (with its length record) into a standby bank.

@@ -68,6 +68,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_LFP_SET_PARAMS   0x81  // param1 = decim_R, param2 = num_taps
 #define CMD_LFP_SET_CHANNELS 0x82  // param1 = 8-bit lane mask
 #define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+#define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
@@ -142,6 +143,37 @@ void udp_stream_init() {
     
     send_message("UDP initialized (destination: %s:%d)\r\n",
                  ip4addr_ntoa(&dest_ip), udp_dest_port);
+}
+
+// ============================================================================
+// UDP THROUGHPUT BENCHMARK: blast n_packets of `bytes` to udp_dest_ip:5002 as
+// fast as the EMAC drains (zero-copy PBUF_REF, like the real stream path). The
+// host (net.py udp_bench) counts received bytes/packets over wall-clock for the
+// sustained MB/s + pps + loss. Measures the real large-packet ceiling vs the
+// small-packet (broadband) operating point.
+// ============================================================================
+extern struct netif server_netif;
+static struct udp_pcb *bench_pcb = NULL;
+static uint8_t bench_buf[UDP_BENCH_MAX_BYTES] __attribute__((aligned(8)));
+
+static void udp_bench_blast(uint32_t bytes, uint32_t npk) {
+    if (bytes < 8) bytes = 8;
+    if (bytes > UDP_BENCH_MAX_BYTES) bytes = UDP_BENCH_MAX_BYTES;
+    if (bench_pcb == NULL) bench_pcb = udp_new();
+    if (bench_pcb == NULL) return;
+    ip_addr_t dst; dst.addr = udp_dest_ip;
+    uint32_t sent = 0;
+    for (uint32_t i = 0; i < npk; i++) {
+        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, bytes, PBUF_REF);
+        if (p == NULL) { xemacif_input(&server_netif); continue; }
+        p->payload = bench_buf;
+        err_t e = udp_sendto(bench_pcb, p, &dst, UDP_BENCH_PORT);
+        pbuf_free(p);
+        if (e == ERR_OK) sent++;
+        else xemacif_input(&server_netif);          // TX BDs full -> drain
+        if ((i & 0x3F) == 0) xemacif_input(&server_netif);
+    }
+    send_message("UDP_BENCH: sent %u/%u x %u bytes\r\n", sent, npk, bytes);
 }
 
 // ============================================================================
@@ -487,6 +519,10 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
         case CMD_LFP_WRITE_COEF:
             if (cmd->param1 & 0x1) pl_lfp_coef_begin();
             pl_lfp_coef_push((int32_t)(cmd->param2 << 14) >> 14);  // sign-extend 18-bit
+            break;
+
+        case CMD_UDP_BENCH:
+            udp_bench_blast(cmd->param1, cmd->param2);
             break;
 
         default:

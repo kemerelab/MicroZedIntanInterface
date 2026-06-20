@@ -79,6 +79,8 @@
 #define LFP_BRAM_BASE_ADDR          0x84000000
 #define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
 #define LFP_UDP_PORT                5001       // separate UDP stream for the LFP band
+#define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
+#define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
