@@ -17,10 +17,11 @@ module data_generator #(
     input  wire        rstn,
     
     // Control and status interfaces
-    // Widths must match axi_lite_registers (N_CTRL=25, N_STATUS=13). Control
+    // Widths must match axi_lite_registers (N_CTRL=28, N_STATUS=13). Control
     // regs 0..21 are the legacy map; 22..24 configure the aux command
-    // sequencer / override layer. Status 11 = aux status, 12 = read result.
-    input  wire [32*25-1:0] ctrl_regs_pl,
+    // sequencer / override layer; 25..27 configure the LFP/DSP engine. Status
+    // 11 = aux status, 12 = read result.
+    input  wire [32*28-1:0] ctrl_regs_pl,
     output wire [32*13-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
@@ -41,7 +42,24 @@ module data_generator #(
     output wire            bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
     output wire [3:0]      bram_we,
-    
+
+    // LFP output BRAM Port A (PL writes the decimated stream; PS reads it via a
+    // second axi_bram_ctrl mapped at 0x84000000).
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM CLK" *)
+    output wire            lfp_bram_clk,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM RST" *)
+    output wire            lfp_bram_rst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM ADDR" *)
+    output wire [BRAM_ADDR_WIDTH-1:0] lfp_bram_addr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM DIN" *)
+    output wire [BRAM_DATA_WIDTH-1:0] lfp_bram_din,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM DOUT" *)
+    input  wire [BRAM_DATA_WIDTH-1:0] lfp_bram_dout,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM EN" *)
+    output wire            lfp_bram_en,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM WE" *)
+    output wire [3:0]      lfp_bram_we,
+
     // Serial interface signals
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
     output wire            csn,         // Chip select (active low)
@@ -108,7 +126,15 @@ module data_generator #(
     wire        fifo_full;
     wire [8:0]  fifo_count;
     wire [13:0] current_bram_address;
-    
+
+    // DSP tap from the core to the LFP engine
+    wire         dsp_sample_valid;
+    wire [127:0] dsp_sample_data;
+    wire [5:0]   dsp_sample_slot;
+    wire         dsp_packet_tick;
+    wire [15:0]  lfp_wr_addr;
+    wire         lfp_overrun;
+
     // Data generator status (only 10 registers - wrapper adds 11th..13th)
     wire [32*10-1:0] data_gen_status;
     wire [31:0] aux_status;
@@ -118,7 +144,7 @@ module data_generator #(
     data_generator_core data_gen_inst (
         .clk(clk),
         .rstn(rstn),
-        .ctrl_regs_pl(ctrl_regs_pl),
+        .ctrl_regs_pl(ctrl_regs_pl[32*25-1:0]),   // core uses regs 0..24 only
         .status_regs_pl(data_gen_status),  // Only 10 registers
         .aux_status(aux_status),
         .aux_read_result(aux_read_result),
@@ -142,7 +168,38 @@ module data_generator #(
         .cipo3(cipo3),
 
         // Digital input
-        .digital_in(digital_in)
+        .digital_in(digital_in),
+
+        // DSP tap to the LFP engine
+        .dsp_sample_valid(dsp_sample_valid),
+        .dsp_sample_data(dsp_sample_data),
+        .dsp_sample_slot(dsp_sample_slot),
+        .dsp_packet_tick(dsp_packet_tick)
+    );
+
+    // Instantiate the on-PL LFP/DSP engine (control regs 25..27; writes its own
+    // output BRAM read by the PS via a 2nd axi_bram_ctrl).
+    lfp_dsp_block #(
+        .LFP_BRAM_AW(BRAM_ADDR_WIDTH)
+    ) lfp_dsp_inst (
+        .clk(clk),
+        .rstn(rstn),
+        .dsp_sample_valid(dsp_sample_valid),
+        .dsp_sample_data(dsp_sample_data),
+        .dsp_sample_slot(dsp_sample_slot),
+        .dsp_packet_tick(dsp_packet_tick),
+        .lfp_cfg(ctrl_regs_pl[25*32 +: 32]),
+        .lfp_coef(ctrl_regs_pl[26*32 +: 32]),
+        .lfp_strobe(ctrl_regs_pl[27*32 +: 32]),
+        .bram_clk(lfp_bram_clk),
+        .bram_rst(lfp_bram_rst),
+        .bram_addr(lfp_bram_addr),
+        .bram_din(lfp_bram_din),
+        .bram_dout(lfp_bram_dout),
+        .bram_en(lfp_bram_en),
+        .bram_we(lfp_bram_we),
+        .lfp_wr_addr(lfp_wr_addr),
+        .lfp_overrun(lfp_overrun)
     );
 
     // Instantiate the FIFO-BRAM interface
