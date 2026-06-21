@@ -33,7 +33,7 @@ module stft_engine #(
     input  logic                 lfp_out_valid,    // a decimated sample is present
     input  logic [CH_W-1:0]      lfp_out_channel,  // 0..N_CH-1
     input  logic signed [DATA_W-1:0] lfp_out_data,
-    input  logic                 lfp_frame_tick,   // pulse once per LFP frame (all ch emitted)
+    input  logic                 lfp_frame_start,  // pulse with the FIRST channel of each LFP frame
 
     // ---- configuration (host, latched while disabled) ----
     input  logic                 stft_en,
@@ -70,7 +70,6 @@ module stft_engine #(
 
     // active N from nfft_log2
     wire [NMAX_W:0] Nfft = (16'd1 << nfft_log2);
-    wire [NMAX_W-1:0] NMASK = Nfft - 1'b1;
     wire [BIN_W-1:0] NBINS = Nfft[NMAX_W:1] + 1'b1; // N/2 + 1 (Hermitian half)
 
     // =================================================================
@@ -122,9 +121,14 @@ module stft_engine #(
     end
 
     // ---- ingest: capture selected channels' samples into the ring ----
+    // The frame-start pulse advances the head, and the frame's writes (this
+    // cycle's channel + the rest) all land in the NEW slot -- so the head is
+    // advanced combinationally for the write address on the start cycle.
+    wire [NMAX_W-1:0] cur_head = (lfp_out_valid & lfp_frame_start)
+                                 ? (wr_head + 1'b1) : wr_head;   // wraps mod MAX_N
     always_comb begin
         sbuf_we      = lfp_out_valid & ch_sel[lfp_out_channel];
-        sbuf_wr_addr = ch_lane[lfp_out_channel] * MAX_N + wr_head;
+        sbuf_wr_addr = ch_lane[lfp_out_channel] * MAX_N + cur_head;
         sbuf_wr_data = lfp_out_data;
     end
 
@@ -141,14 +145,16 @@ module stft_engine #(
             wr_head <= '0; hop_cnt <= '0; start_pass <= 1'b0;
         end else begin
             start_pass <= 1'b0;
-            if (lfp_frame_tick) begin
+            // a frame boundary = the start pulse of the NEXT frame; the previous
+            // frame (at wr_head, pre-advance) is now complete and snapshot-able.
+            if (lfp_out_valid & lfp_frame_start) begin
                 if (hop_cnt + 16'd1 >= (hop == 0 ? 16'd1 : hop)) begin
                     hop_cnt <= '0;
                     if (stft_en) begin head_snap <= wr_head; start_pass <= 1'b1; end
                 end else begin
                     hop_cnt <= hop_cnt + 16'd1;
                 end
-                wr_head <= (wr_head + 1'b1) & NMASK;
+                wr_head <= wr_head + 1'b1;       // advance to the new frame's slot (mod MAX_N)
             end
         end
     end
@@ -183,9 +189,13 @@ module stft_engine #(
     assign fft_cfg_tdata  = {20'd0, nfft_log2};     // runtime-N config; forward FFT
     assign fft_cfg_tvalid = (fstate == F_CFG);
     // window-aligned read: sample j (oldest first) = ring[(head_snap - (N-1) + j)]
+    // window-aligned read in the deep ring: sample j (oldest first) =
+    // ring[(head_snap - (N-1) + j) mod MAX_N]. Masking mod MAX_N (not N) keeps
+    // the snapshot window stable while later frames advance the head into fresh
+    // slots, so streaming ingest never overwrites the window mid-pass.
     always_comb begin
         win_rd_addr  = f_n[NMAX_W-1:0];
-        sbuf_rd_addr = f_lane * MAX_N + ((head_snap - (NMASK) + f_n) & NMASK);
+        sbuf_rd_addr = f_lane * MAX_N + ((head_snap - (Nfft - 1'b1) + f_n) & (MAX_N - 1));
     end
     // windowed product registered alongside the 1-cycle buffer/window read
     logic signed [DATA_W+WIN_W-1:0] win_prod;

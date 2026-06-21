@@ -15,7 +15,7 @@ module stft_engine_tb;
     always #5 clk = ~clk;                       // 100 MHz sim clock
 
     // engine I/O
-    logic               lfp_out_valid=0, lfp_frame_tick=0;
+    logic               lfp_out_valid=0, lfp_frame_start=0;
     logic [7:0]         lfp_out_channel=0;
     logic signed [15:0] lfp_out_data=0;
     logic               stft_en=0;
@@ -30,7 +30,7 @@ module stft_engine_tb;
     stft_engine #(.N_CH(N_CH), .K(K), .MAX_N(MAX_N), .RES_AW(14)) dut (
         .clk(clk), .rstn(rstn),
         .lfp_out_valid(lfp_out_valid), .lfp_out_channel(lfp_out_channel),
-        .lfp_out_data(lfp_out_data), .lfp_frame_tick(lfp_frame_tick),
+        .lfp_out_data(lfp_out_data), .lfp_frame_start(lfp_frame_start),
         .stft_en(stft_en), .nfft_log2(nfft_log2), .hop(hop),
         .sel_wr_en(sel_wr_en), .sel_wr_lane(sel_wr_lane), .sel_wr_ch(sel_wr_ch),
         .win_wr_en(win_wr_en), .win_wr_addr(win_wr_addr), .win_wr_data(win_wr_data),
@@ -83,19 +83,22 @@ module stft_engine_tb;
         for (i=0;i<N;i++) begin neg(); win_wr_en=1; win_wr_addr=i[7:0]; win_wr_data=win_mem[i]; end
         neg(); win_wr_en=0;
 
-        // config + enable
-        nfft_log2=6; hop=64; stft_en=1; neg();
+        // config + enable. hop=N+1 so the single trigger lands on the (N+1)-th
+        // frame-start, which completes frame N-1 -> window = frames 0..N-1.
+        nfft_log2=6; hop=N+1; stft_en=1; neg();
 
-        // feed N frames; per frame drive the K selected channels then a frame tick
-        for (f=0; f<N; f++) begin
+        // feed N data frames + 1 trigger frame; the FIRST channel of each frame
+        // carries the frame-start pulse (matches lfp_fir_decimator's out_frame_start).
+        for (f=0; f<=N; f++) begin
             for (l=0;l<K;l++) begin
                 neg();
-                lfp_out_valid=1; lfp_out_channel=CHAN[l][7:0];
-                lfp_out_data=$signed(samp_mem[f][16*l +: 16]);
+                lfp_out_valid   = 1;
+                lfp_frame_start = (l==0);                       // pulse on channel 0
+                lfp_out_channel = CHAN[l][7:0];
+                lfp_out_data    = (f<N) ? $signed(samp_mem[f][16*l +: 16]) : 16'sd0;
             end
-            neg(); lfp_out_valid=0;
-            neg(); lfp_frame_tick=1;
-            neg(); lfp_frame_tick=0;
+            neg(); lfp_out_valid=0; lfp_frame_start=0;
+            neg();                                              // gap between frames
         end
 
         // wait for the full pass (all K lanes captured -> frame_seq increments)
