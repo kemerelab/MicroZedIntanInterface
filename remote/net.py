@@ -1925,6 +1925,9 @@ def tcp_control():
                     cut  = float(parts[4])  if len(parts) > 4 else 600.0
                     configure_lfp(sock, mask, R, taps, cut)
                 elif cmd == "lfp_on":
+                    st = get_status(sock)        # quietly read back the configured mask
+                    if st and st.get('lfp_lane_mask', 0) == 0:
+                        print("[LFP] lane_mask is 0 -- run lfp_config first, or no data will stream.")
                     lfp_enable(sock, True)
                 elif cmd == "lfp_off":
                     lfp_enable(sock, False)
@@ -1998,6 +2001,14 @@ def tcp_control():
                     print("  set_udp <ip> <port>, get_status, ping")
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, quit")
+                    print("Bandwidth (raw UDP throughput, port 5002):")
+                    print("  bench [bytes] [n]   - one size (default 1472 B x 50000)")
+                    print("  bench_sweep         - sweep 256..8800 B")
+                    print("LFP / Tier-1 (UDP 5001):")
+                    print("  lfp_config [mask] [R] [taps] [cutoff] - set mask/decim/taps + upload LP kernel")
+                    print("  lfp_on / lfp_off    - enable / disable the engine")
+                    print("  lfp_recv [n]        - capture + print decoded LFP frames")
+                    print("  (run lfp_config BEFORE lfp_on -- default mask is 0 = no streams)")
                     print("Aux sequencer (bank-programmable aux commands):")
                     print("  aux_demo            - load default slot programs + enable")
                     print("  aux_en <0|1>        - enable/disable the sequencer")
