@@ -56,7 +56,13 @@ module lfp_dsp_block #(
 
     // ---- status ----
     output logic [LFP_BRAM_AW-1:0] lfp_wr_addr,  // current write byte address (PS read ptr)
-    output logic                   lfp_overrun   // engine compute overrun (sticky)
+    output logic                   lfp_overrun,  // engine compute overrun (sticky)
+
+    // ---- decimated output stream tap (signed; for the Tier-2 STFT engine) ----
+    output logic                   lfp_out_valid,
+    output logic [$clog2(N_LANES*N_SLOTS)-1:0] lfp_out_channel,
+    output logic signed [OUT_W-1:0] lfp_out_data,
+    output logic                   lfp_out_frame_start
 );
 
     localparam int RING_AW = $clog2(RING_DEPTH);
@@ -191,5 +197,13 @@ module lfp_dsp_block #(
     assign bram_addr   = {bram_word_r, 2'b00};               // word -> byte address
     assign bram_din    = bram_din_r;
     assign lfp_wr_addr = {wr_word, 2'b00};
+
+    // Decimated output stream tap for the Tier-2 STFT engine. This is the signed
+    // (two's-complement) decimated sample BEFORE the offset-binary repack used
+    // for the LFP BRAM, with out_frame_start pulsing on the first channel.
+    assign lfp_out_valid       = out_valid;
+    assign lfp_out_channel     = out_channel;
+    assign lfp_out_data        = out_data;
+    assign lfp_out_frame_start = out_frame_start;
 
 endmodule

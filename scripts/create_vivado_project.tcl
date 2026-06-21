@@ -30,6 +30,11 @@ add_files -fileset constrs_1 [glob ./programmable_logic/constraints/*.xdc]
 set_property ip_repo_paths ./programmable_logic/ip/intan_spi_interface_lib [current_project]
 update_ip_catalog
 
+# Generate the Tier-2 STFT IP cores (xfft float32 + fixed-to-float). stft_fft.v
+# (in src) instantiates these, so they must exist before synthesis.
+puts "Generating STFT IP cores..."
+source scripts/create_stft_ip.tcl
+
 # Create block design from exported TCL
 puts "Creating block design..."
 source programmable_logic/block_design/design_1_bd.tcl
