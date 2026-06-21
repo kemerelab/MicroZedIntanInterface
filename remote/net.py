@@ -1797,6 +1797,7 @@ def tcp_control():
         print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
+        print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
@@ -1906,6 +1907,14 @@ def tcp_control():
                     validator.print_statistics()
                 elif cmd == "hex":
                     validator.print_last_packet_hex()
+                elif cmd == "bench" or cmd.startswith("bench "):
+                    # measure raw UDP throughput vs packet size (port 5002 blaster)
+                    parts = cmd.split()
+                    sz = int(parts[1]) if len(parts) > 1 else 1472
+                    n  = int(parts[2]) if len(parts) > 2 else 50000
+                    udp_bench(sock, sz, n)
+                elif cmd == "bench_sweep":
+                    udp_bench_sweep(sock)
                 elif cmd == "aux":
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
