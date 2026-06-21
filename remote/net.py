@@ -1194,9 +1194,19 @@ def design_lfp_lowpass(num_taps, cutoff_hz=600.0, fs=30000.0):
     return [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
 
 def lfp_upload_coeffs(sock, coeffs):
-    """Stream taps through the indirect window (first write clears the pointer)."""
+    """Stream taps through the indirect window (first write clears the pointer).
+    This is a 100+ command burst that the board acks one-by-one, so use a generous
+    per-command timeout and stop early (with a clear message) if an ack stalls --
+    that distinguishes a merely-slow board from a wedged one."""
     for i, c in enumerate(coeffs):
-        send_binary_command(sock, CMD_LFP_WRITE_COEF, 1 if i == 0 else 0, c & 0x3FFFF)
+        ok, _ = send_binary_command(sock, CMD_LFP_WRITE_COEF, 1 if i == 0 else 0,
+                                    c & 0x3FFFF, timeout=2.0)
+        if not ok:
+            print(f"[LFP] coefficient upload stalled at tap {i}/{len(coeffs)} -- the board "
+                  f"stopped acking. Reconnect and 'ping': if it answers it's a timing issue, "
+                  f"if it's dead the coef path wedged the firmware.")
+            return False
+    return True
 
 def configure_lfp(sock, lane_mask=0x0F, decim_R=15, num_taps=128, cutoff_hz=600.0):
     """Disable, set channels/params, design + upload the LP kernel. Call
