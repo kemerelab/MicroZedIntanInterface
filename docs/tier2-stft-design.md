@@ -1,9 +1,25 @@
 # Tier-2 — on-PL STFT spectral-estimation engine
 
-Status: **build in progress** (branch `claude/tier2-stft`). This is module 2 of the on-PL
-processing engine: a sliding-window STFT that turns the Tier-1 LFP stream into per-channel
-spectra for band power, spectral shape, coherence/phase-synchronization, and closed-loop
-detection. Tier-1 (LFP decimation) ships on `main`; this is the exploratory Tier-2 layer.
+Status: **implemented on `claude/tier2-stft`** — engine sim-verified (264/264 vs a Python
+float-DFT reference), build path synthesizes clean (xfft float32 + fix2float, ~17-24 DSP),
+integrated into the BD (results BRAM @ 0x88000000, control regs 28-30, status reg 14), and
+the PS + net.py jumbo-streaming prototype is in place. On-hardware validation pending.
+
+This is module 2 of the on-PL processing engine: a sliding-window STFT that turns the Tier-1
+LFP stream into per-channel spectra for band power, spectral shape, coherence/phase-
+synchronization, and closed-loop detection. Tier-1 (LFP decimation) ships on `main`.
+
+### As-built contract (keep the 3 layers in sync)
+
+| layer | what |
+|-------|------|
+| PL | `stft_engine.sv` (selector+ring+window+capture) + `stft_fft.v` (xfft float32 + fix2float) in `stft_dsp_block.sv`; ctrl regs 28 (cfg: `[0]en [7:4]nfft_log2 [31:16]hop`), 29 (data), 30 (strobe: `[0]toggle [1]ptr_clr [2]target 0=win/1=sel`); status reg 14 (`[29:0]frame_seq [30]busy [31]overflow`); results BRAM @ `0x88000000` |
+| PS | `CTRL_REG_STFT_*`, `STFT_BRAM_BASE 0x88000000`, `STFT_UDP_PORT 5003`, `STFT_K=32`, `STFT_MAX_N=64`; `pl_stft_*` upload; `stft_stream_service` (poll frame_seq → one jumbo packet) |
+| host | `CMD_STFT_*` (0x84-0x87), `configure_stft` (Hann Q15 + selector upload), `receive_stft` (jumbo float32 decode), `get_status` (176 B) |
+
+Window N is runtime-selectable up to **64** this build (xfft `transform_length=64`); raise the IP
+param + keep `RES_AW`=16 for up to 256. The engine ring is mod-MAX_N(256) so streaming frames
+never overwrite the window mid-pass.
 
 ## Why STFT (vs. filter banks)
 
@@ -61,16 +77,20 @@ ceiling is far higher — being measured by the `udp_bench` tool on main). 8 KB/
 **jumbo** frame → 2k pps, one packet per spectrum (the chosen approach). On non-jumbo paths
 you'd MTU-split (~6 packets/frame); jumbo keeps it one-packet-clean.
 
-## Spectrum UDP packet (port 5003, proposed)
+## Spectrum UDP packet (port 5003, as built)
 
 | words | field |
 |------:|-------|
-| 0–1 | magic `0xCAFEBABE_5DEC7A00` *(proposal)* |
-| 2–3 | 64-bit timestamp (≈ broadband packet index) |
-| 4 | `[7:0]` N_log2 · `[15:8]` K · `[23:16]` hop · `[31:24]` flags |
-| 5 | frame sequence number |
-| 6 | channel-select map ref / chunk index |
-| 7… | payload: per channel, `N/2+1` complex **float32** bins (Hermitian half) |
+| 0–1 | magic `0xCAFEBABE_5DEC7A00` (low word 0 = `0x5DEC7A00`, high word 1 = `0xCAFEBABE`) |
+| 2–3 | 64-bit timestamp (`frame_seq × hop` ≈ LFP-frame index) |
+| 4 | `[7:0]` N_log2 · `[15:8]` K · `[31:24]` flags (bit0 = overflow) |
+| 5 | frame sequence number (`frame_seq`, 30-bit) |
+| 6 | `[15:0]` nbins (N/2+1) · `[31:16]` hop |
+| 7 | reserved |
+| 8… | payload: per lane (lane-major), `N/2+1` complex **float32** bins `(re,im)` |
+
+One jumbo frame/spectrum (N=64/K=32 → 8 hdr + 2112 payload words = 8480 B). The firmware
+re-reads `frame_seq` after the copy and drops any frame a new pass tore (cheap integrity guard).
 
 ## Phase caveat
 
