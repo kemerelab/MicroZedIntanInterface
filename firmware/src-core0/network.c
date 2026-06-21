@@ -68,6 +68,12 @@ ID   | Command          | Param1              | Param2
 #define CMD_LFP_SET_PARAMS   0x81  // param1 = decim_R, param2 = num_taps
 #define CMD_LFP_SET_CHANNELS 0x82  // param1 = 8-bit lane mask
 #define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+
+// STFT/Tier-2 engine: set params + channels + window while disabled, then enable.
+#define CMD_STFT_ENABLE       0x84  // param1 = 0/1
+#define CMD_STFT_SET_PARAMS   0x85  // param1 = nfft_log2, param2 = hop
+#define CMD_STFT_SET_CHANNELS 0x86  // param1 = [0] clear-ptr-first; param2 = channel index (one lane)
+#define CMD_STFT_WRITE_WINDOW 0x87  // param1 = [0] clear-ptr-first; param2 = Q15 Hann coeff (one tap)
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
 
 #define ACK_SUCCESS         0x06
@@ -267,6 +273,17 @@ void collect_status_data(status_response_t* status) {
     status->lfp_num_taps     = lfp_cfg_num_taps;
     status->lfp_packets_sent = lfp_udp_packets_sent;
     status->lfp_overrun      = (pl_lfp_read_status() >> 16) & 1;
+
+    // STFT/Tier-2 engine config (host-set) + live status
+    uint32_t stft_st         = pl_stft_read_status();
+    status->stft_enable      = stft_cfg_enable;
+    status->stft_nfft_log2   = stft_cfg_nfft_log2;
+    status->stft_K           = STFT_K;
+    status->stft_overflow    = (stft_st >> 31) & 1;
+    status->stft_hop         = stft_cfg_hop;
+    status->stft_reserved    = 0;
+    status->stft_frame_seq   = stft_st & 0x3FFFFFFF;
+    status->stft_packets_sent = stft_udp_packets_sent;
 }
 
 // ============================================================================
@@ -521,6 +538,27 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             pl_lfp_coef_push((int32_t)(cmd->param2 << 14) >> 14);  // sign-extend 18-bit
             break;
 
+        case CMD_STFT_ENABLE:
+            pl_stft_set_config(cmd->param1 ? 1 : 0, stft_cfg_nfft_log2, stft_cfg_hop);
+            send_message("Binary Command: STFT_ENABLE %u\r\n", cmd->param1 ? 1 : 0);
+            break;
+
+        case CMD_STFT_SET_PARAMS:
+            pl_stft_set_config(stft_cfg_enable, cmd->param1 & 0xF, cmd->param2 & 0xFFFF);
+            send_message("Binary Command: STFT_SET_PARAMS nfft_log2=%u hop=%u\r\n",
+                         cmd->param1 & 0xF, cmd->param2 & 0xFFFF);
+            break;
+
+        case CMD_STFT_SET_CHANNELS:
+            if (cmd->param1 & 0x1) pl_stft_sel_begin();
+            pl_stft_sel_push(cmd->param2 & 0xFF);
+            break;
+
+        case CMD_STFT_WRITE_WINDOW:
+            if (cmd->param1 & 0x1) pl_stft_window_begin();
+            pl_stft_window_push((int16_t)(cmd->param2 & 0xFFFF));
+            break;
+
         case CMD_UDP_BENCH:
             udp_bench_blast(cmd->param1, cmd->param2);
             break;
@@ -749,5 +787,65 @@ void lfp_stream_service(void) {
         }
         lfp_read_word = (lfp_read_word + frame_words) & mask;
         lfp_frame_seq++;
+    }
+}
+
+// ============================================================================
+// STFT/Tier-2 STREAM: poll the pass counter (STATUS_REG_14); when it advances,
+// push the whole Hermitian spectrum (K x (N/2+1) complex float32, compact stride
+// at 0x88000000) as ONE jumbo UDP packet on STFT_UDP_PORT. The engine rewrites
+// the BRAM each pass; passes are >> the read time, but we re-check the counter
+// after the copy and drop any frame torn by a new pass (cheap integrity guard).
+// ============================================================================
+static struct udp_pcb *stft_pcb = NULL;
+static uint32_t stft_last_seq = 0xFFFFFFFF;
+uint32_t stft_udp_packets_sent = 0;
+// 8-word header + max payload (K x (MAX_N/2+1) complex float32).
+static uint32_t stft_pktbuf[8 + STFT_K * (STFT_MAX_N/2 + 1) * 2] __attribute__((aligned(8)));
+
+void stft_stream_init(void) {
+    stft_pcb = udp_new();
+    stft_last_seq = 0xFFFFFFFF;
+    stft_udp_packets_sent = 0;
+    if (stft_pcb == NULL) send_message("ERROR: Could not create STFT UDP PCB\r\n");
+}
+
+void stft_stream_service(void) {
+    if (!stft_cfg_enable || stft_pcb == NULL) return;
+    uint32_t st  = pl_stft_read_status();
+    uint32_t seq = st & 0x3FFFFFFF;
+    if (seq == stft_last_seq) return;              // no new spectrum
+
+    uint32_t N      = 1u << stft_cfg_nfft_log2;
+    uint32_t nbins  = N / 2 + 1;
+    uint32_t pwords = (uint32_t)STFT_K * nbins * 2; // complex float32 (re,im)
+    if (pwords > (uint32_t)STFT_K * (STFT_MAX_N/2 + 1) * 2) return;  // config guard
+
+    uint64_t ts = (uint64_t)seq * (stft_cfg_hop ? stft_cfg_hop : 1);
+    stft_pktbuf[0] = 0x5DEC7A00;                    // STFT magic (low)
+    stft_pktbuf[1] = 0xCAFEBABE;                    // magic (high)
+    stft_pktbuf[2] = (uint32_t)ts;
+    stft_pktbuf[3] = (uint32_t)(ts >> 32);
+    stft_pktbuf[4] = (uint32_t)stft_cfg_nfft_log2
+                   | ((uint32_t)STFT_K << 8)
+                   | (((st >> 31) & 1u) << 24);     // [31:24] flags: bit0 = overflow
+    stft_pktbuf[5] = seq;
+    stft_pktbuf[6] = nbins | ((uint32_t)stft_cfg_hop << 16);
+    stft_pktbuf[7] = 0;
+    for (uint32_t i = 0; i < pwords; i++)
+        stft_pktbuf[8 + i] = Xil_In32(STFT_BRAM_BASE_ADDR + (i << 2));
+
+    // integrity: if a new pass started during the copy, the spectrum may be torn.
+    if ((pl_stft_read_status() & 0x3FFFFFFF) != seq) return;
+    stft_last_seq = seq;
+
+    uint32_t total = (8 + pwords) * 4;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_REF);
+    if (p != NULL) {
+        p->payload = (void*)stft_pktbuf;
+        ip_addr_t dst; dst.addr = udp_dest_ip;
+        udp_sendto(stft_pcb, p, &dst, STFT_UDP_PORT);
+        pbuf_free(p);
+        stft_udp_packets_sent++;
     }
 }

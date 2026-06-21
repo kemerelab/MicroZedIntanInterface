@@ -53,7 +53,7 @@ uint32_t loop_ticks_last = 0, loop_ticks_max = 0;   // receive->transmit (ticks)
 uint32_t perf_timer_hz = 0;                         // tick freq (set in main())
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 160, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 176, "status_response_t size must match net.py get_status");
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;
@@ -443,6 +443,10 @@ void network_maintenance_loop(void) {
   // enabled; the 16K-word ring tolerates bursty servicing.
   lfp_stream_service();
 
+  // Push a new STFT spectrum -> UDP (Tier-2) when a pass completes. No-op unless
+  // the engine is enabled; one jumbo packet per pass.
+  stft_stream_service();
+
   // Refresh the shared status snapshot at ~200 Hz (every 5 ms). Cheap and
   // non-blocking; core 1 reads it on demand or for its ~1 Hz monitor.
   uint32_t now_ms = sys_now();
@@ -597,6 +601,7 @@ int main() {
   // Initialize UDP (always enabled)
   udp_stream_init();
   lfp_stream_init();   // separate UDP stream for the LFP band (port 5001)
+  stft_stream_init();  // jumbo spectrum stream for the STFT engine (port 5003)
 
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
   

@@ -52,6 +52,11 @@ CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
 CMD_LFP_SET_CHANNELS = 0x82 # param1 = 8-bit lane mask
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+# STFT/Tier-2 engine
+CMD_STFT_ENABLE = 0x84       # param1 = 0/1
+CMD_STFT_SET_PARAMS = 0x85   # param1 = nfft_log2, param2 = hop
+CMD_STFT_SET_CHANNELS = 0x86 # param1 = [0] clear-ptr-first; param2 = channel index (one lane)
+CMD_STFT_WRITE_WINDOW = 0x87 # param1 = [0] clear-ptr-first; param2 = Q15 Hann coeff (one tap)
 CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
 
 UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
@@ -59,6 +64,10 @@ LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
 LFP_MAGIC_LOW = 0x1F1FBEEF
 LFP_MAGIC_HIGH = 0xCAFEBABE
 LFP_COEF_FRAC = 17          # Q1.17 coefficient fixed-point
+STFT_UDP_PORT = 5003        # jumbo spectrum stream (complex float32 Hermitian half)
+STFT_MAGIC_LOW = 0x5DEC7A00
+STFT_MAGIC_HIGH = 0xCAFEBABE
+STFT_K = 32                 # channels analyzed (build param, matches firmware/PL)
 
 AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
 
@@ -1244,6 +1253,88 @@ def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
     return got
 
 # ============================================================================
+# STFT/Tier-2 engine -- configure + receive jumbo spectrum frames.
+# ============================================================================
+def design_stft_window(n):
+    """Hann window, signed Q15 (matches the PL window RAM)."""
+    import math
+    return [max(-32768, min(32767, int(round(
+        (0.5 - 0.5 * math.cos(2.0 * math.pi * k / (n - 1))) * 32767))))
+        for k in range(n)]
+
+def configure_stft(sock, channels=None, nfft_log2=6, hop=1, window=None):
+    """Disable, set params, upload the channel selector + Hann window. Call
+    stft_enable(sock, True) afterwards to start streaming on UDP 5003.
+    channels: list of up to STFT_K source channel indices (default 0..K-1)."""
+    if channels is None:
+        channels = list(range(STFT_K))
+    n = 1 << nfft_log2
+    if window is None:
+        window = design_stft_window(n)
+    send_binary_command(sock, CMD_STFT_ENABLE, 0)
+    send_binary_command(sock, CMD_STFT_SET_PARAMS, nfft_log2 & 0xF, hop & 0xFFFF)
+    for i, ch in enumerate(channels[:STFT_K]):
+        send_binary_command(sock, CMD_STFT_SET_CHANNELS, 1 if i == 0 else 0, ch & 0xFF)
+    for i, w in enumerate(window[:n]):
+        send_binary_command(sock, CMD_STFT_WRITE_WINDOW, 1 if i == 0 else 0, w & 0xFFFF)
+    print(f"[STFT] configured: N={n} hop={hop} K={len(channels[:STFT_K])} chans={channels[:8]}...")
+    return window
+
+def stft_enable(sock, on=True):
+    send_binary_command(sock, CMD_STFT_ENABLE, 1 if on else 0)
+    print(f"[STFT] {'ENABLED' if on else 'disabled'}")
+
+def receive_stft(n_packets=100, bind_port=STFT_UDP_PORT):
+    """Bind the STFT UDP port and parse jumbo spectrum frames. Payload is, per
+    lane, (N/2+1) complex float32 (re,im) -- the Hermitian half. Reference
+    receiver for the plugin. Needs a jumbo-capable path (frames are ~8-33 KB)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+    except OSError:
+        pass
+    s.bind(('', bind_port))
+    s.settimeout(3.0)
+    got = bad = 0
+    last_seq = None
+    try:
+        while got < n_packets:
+            data, _ = s.recvfrom(65535)
+            if len(data) < 32:
+                bad += 1; continue
+            (mlo, mhi, ts_lo, ts_hi, w4, seq, w6, _w7) = struct.unpack('<IIIIIIII', data[:32])
+            if mlo != STFT_MAGIC_LOW or mhi != STFT_MAGIC_HIGH:
+                bad += 1; continue
+            nfft_log2 = w4 & 0xFF
+            K = (w4 >> 8) & 0xFF
+            overflow = (w4 >> 24) & 1
+            nbins = w6 & 0xFFFF
+            hop = (w6 >> 16) & 0xFFFF
+            ts = ts_lo | (ts_hi << 32)
+            pay = data[32:]
+            nfloats = len(pay) // 4
+            vals = struct.unpack(f'<{nfloats}f', pay)      # K*nbins*2 floats, lane-major (re,im)
+            expect = K * nbins * 2
+            if nfloats != expect and got <= 3:
+                print(f"[STFT] payload {nfloats} floats != K*nbins*2 {expect}")
+            if last_seq is not None and seq != (last_seq + 1) & 0x3FFFFFFF:
+                print(f"[STFT] seq gap {last_seq}->{seq}")
+            last_seq = seq
+            got += 1
+            if got <= 5 or got % 25 == 0:
+                lane0 = vals[:nbins * 2]                    # lane-0 band power, quick sanity
+                p0 = sum(lane0[2*b]**2 + lane0[2*b+1]**2 for b in range(min(nbins, len(lane0)//2)))
+                print(f"[STFT] seq={seq} ts={ts} N={1<<nfft_log2} K={K} hop={hop} "
+                      f"nbins={nbins} ov={overflow} bytes={len(data)} lane0_power={p0:.3g}")
+    except socket.timeout:
+        print("[STFT] receive timeout (engine enabled? jumbo MTU on this host?)")
+    finally:
+        s.close()
+    print(f"[STFT] received {got} spectra, {bad} non-STFT/short datagrams")
+    return got
+
+# ============================================================================
 # UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
 # replacing the ~18 MB/s small-packet broadband assumption with a measured
 # large-packet ceiling. (Payloads > ~1472 B fragment unless the path is jumbo-
@@ -1391,8 +1482,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 160:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 160)")
+    if len(data) != 176:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 176)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1434,6 +1525,10 @@ def get_status(sock):
     (lfp_enable, lfp_lane_mask, lfp_decim_R, lfp_num_taps) = struct.unpack('<4B', data[148:152])
     (lfp_packets_sent,) = struct.unpack('<I', data[152:156])
     (lfp_overrun,) = struct.unpack('<B', data[156:157])
+    # STFT/Tier-2 engine config + status (16 bytes)
+    (stft_enable, stft_nfft_log2, stft_K, stft_overflow) = struct.unpack('<4B', data[160:164])
+    (stft_hop,) = struct.unpack('<H', data[164:166])
+    (stft_frame_seq, stft_packets_sent) = struct.unpack('<II', data[168:176])
 
     status = {
         'version': version,
@@ -1495,6 +1590,14 @@ def get_status(sock):
         'lfp_num_taps': lfp_num_taps,
         'lfp_packets_sent': lfp_packets_sent,
         'lfp_overrun': lfp_overrun,
+        'stft_enable': stft_enable,
+        'stft_nfft_log2': stft_nfft_log2,
+        'stft_N': 1 << stft_nfft_log2,
+        'stft_K': stft_K,
+        'stft_hop': stft_hop,
+        'stft_overflow': stft_overflow,
+        'stft_frame_seq': stft_frame_seq,
+        'stft_packets_sent': stft_packets_sent,
     }
 
     return status
@@ -1583,6 +1686,11 @@ def print_status(status):
           f"(-> {30000.0/R:.0f} sps)  num_taps={status['lfp_num_taps']}")
     print(f"  packets sent: {status['lfp_packets_sent']}   "
           f"overrun: {'YES' if status['lfp_overrun'] else 'no'}")
+    print(f"\n--- STFT engine (Tier-2, UDP {STFT_UDP_PORT}) ---")
+    print(f"  {'ENABLED' if status['stft_enable'] else 'disabled'}  "
+          f"N={status['stft_N']}  hop={status['stft_hop']}  K={status['stft_K']}")
+    print(f"  passes: {status['stft_frame_seq']}   packets sent: {status['stft_packets_sent']}   "
+          f"overflow: {'YES' if status['stft_overflow'] else 'no'}")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):

@@ -676,3 +676,67 @@ void pl_lfp_upload_coeffs(const int32_t *coeffs, int n) {
 uint32_t pl_lfp_read_status(void) {
     return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_13_OFFSET);
 }
+
+// ============================================================================
+// STFT/Tier-2 engine control (CTRL_REG_STFT_*; see stft_dsp_block.sv)
+// ============================================================================
+uint8_t  stft_cfg_enable = 0, stft_cfg_nfft_log2 = 6;
+uint16_t stft_cfg_hop = 1;
+
+void pl_stft_set_config(uint8_t enable, uint8_t nfft_log2, uint16_t hop) {
+    uint32_t cfg = ((uint32_t)enable & 0x1)
+                 | (((uint32_t)nfft_log2 & 0xF) << 4)
+                 | ((uint32_t)hop << 16);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_CFG_OFFSET, cfg);
+    stft_cfg_enable = enable; stft_cfg_nfft_log2 = nfft_log2; stft_cfg_hop = hop;
+}
+
+// Indirect upload window: same strobe-toggle CDC as the LFP coeffs, but bit[2]
+// selects the target (0 = Hann window RAM, 1 = channel-selector table). The
+// running strobe holds the target bit; each push just flips the toggle. Load
+// while the engine is disabled.
+static uint32_t stft_strobe = 0;
+
+void pl_stft_window_begin(void) {
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_STROBE_OFFSET, STFT_STROBE_PTR_CLR);  // target=window
+    usleep(2);
+    stft_strobe = 0;                                                                  // window, toggle 0
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_STROBE_OFFSET, stft_strobe);
+    usleep(2);
+}
+
+void pl_stft_window_push(int16_t coef) {
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_DATA_OFFSET, (uint32_t)((uint16_t)coef));
+    stft_strobe ^= STFT_STROBE_TOGGLE;                                               // target preserved
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_STROBE_OFFSET, stft_strobe);
+    usleep(2);
+}
+
+void pl_stft_upload_window(const int16_t *win, int n) {
+    pl_stft_window_begin();
+    for (int j = 0; j < n; j++) pl_stft_window_push(win[j]);
+}
+
+void pl_stft_sel_begin(void) {
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_STROBE_OFFSET, STFT_STROBE_PTR_CLR | STFT_STROBE_TARGET_SEL);
+    usleep(2);
+    stft_strobe = STFT_STROBE_TARGET_SEL;                                            // selector, toggle 0
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_STROBE_OFFSET, stft_strobe);
+    usleep(2);
+}
+
+void pl_stft_sel_push(uint8_t channel) {
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_DATA_OFFSET, (uint32_t)channel);
+    stft_strobe ^= STFT_STROBE_TOGGLE;                                               // target preserved
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_STFT_STROBE_OFFSET, stft_strobe);
+    usleep(2);
+}
+
+void pl_stft_upload_channels(const uint8_t *chans, int n) {
+    pl_stft_sel_begin();
+    for (int j = 0; j < n; j++) pl_stft_sel_push(chans[j]);
+}
+
+uint32_t pl_stft_read_status(void) {
+    return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_14_OFFSET);
+}

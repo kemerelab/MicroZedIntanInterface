@@ -56,7 +56,7 @@
 
 // Number of PL control registers (must match axi_lite_registers N_CTRL --
 // the status registers are read back starting right after the control block)
-#define PL_N_CTRL_REGS      28
+#define PL_N_CTRL_REGS      31
 
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
@@ -81,6 +81,20 @@
 #define LFP_UDP_PORT                5001       // separate UDP stream for the LFP band
 #define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
+
+// STFT/Tier-2 engine control registers (PL regs 28..30; see stft_dsp_block.sv)
+#define CTRL_REG_STFT_CFG_OFFSET    (28 * 4)  // [0]en [7:4]nfft_log2 [31:16]hop
+#define CTRL_REG_STFT_DATA_OFFSET   (29 * 4)  // window coeff (signed Q15 [15:0]) / sel channel [7:0]
+#define CTRL_REG_STFT_STROBE_OFFSET (30 * 4)  // [0]write toggle, [1]ptr clear, [2]target(0=win,1=sel)
+#define STFT_STROBE_TOGGLE          (1u << 0)
+#define STFT_STROBE_PTR_CLR         (1u << 1)
+#define STFT_STROBE_TARGET_SEL      (1u << 2)  // 0 = window RAM, 1 = channel selector
+// STFT results BRAM (complex float32 spectra, PS read via 3rd axi_bram_ctrl)
+#define STFT_BRAM_BASE_ADDR         0x88000000
+#define STFT_BRAM_SIZE_WORDS        16384      // 64 KB
+#define STFT_UDP_PORT               5003       // jumbo spectrum stream
+#define STFT_K                      32         // channels analyzed (build param, matches PL)
+#define STFT_MAX_N                  64         // max FFT length this build (xfft transform_length)
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
@@ -137,6 +151,7 @@
 #define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 #define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
+#define STATUS_REG_14_OFFSET (STATUS_REG_BASE + 14 * 4)  // STFT: [29:0] frame_seq, [30] busy, [31] overflow
 
 // STATUS_REG_11 bit fields
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
@@ -203,9 +218,10 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         2   // 1.2: AXI-CDMA read path; get_status config tracking
-                                           //      (aux_ctrl + RHD register mirror); fast-settle/DSP/
-                                           //      digout via TTL/GPIO. Status wire = 148 bytes.
+#define FIRMWARE_VERSION_MINOR         3   // 1.3: Tier-2 on-PL STFT engine (float32 spectra, jumbo
+                                           //      UDP stream on 5003). 1.2: AXI-CDMA read path;
+                                           //      get_status config tracking (aux_ctrl + RHD register
+                                           //      mirror); fast-settle/DSP/digout via TTL/GPIO.
 #define FIRMWARE_VERSION_PATCH         0
 #define FIRMWARE_VERSION_BUILD         0
 #define FIRMWARE_VERSION_WORD          ((FIRMWARE_VERSION_MAJOR << 24) | \
@@ -293,6 +309,17 @@ typedef struct __attribute__((packed)) {
     uint32_t lfp_packets_sent;  // LFP UDP packets emitted
     uint8_t  lfp_overrun;       // sticky compute-overrun flag
     uint8_t  lfp_reserved[3];
+
+    // STFT/Tier-2 engine configuration + status (CTRL_REG_STFT_CFG + STATUS_REG_14).
+    // Per the "get_status reports everything configurable" rule. 16 bytes.
+    uint8_t  stft_enable;       // engine enabled
+    uint8_t  stft_nfft_log2;    // log2(N): 6 -> N=64
+    uint8_t  stft_K;            // channels analyzed (build param)
+    uint8_t  stft_overflow;     // sticky pass-overflow flag
+    uint16_t stft_hop;          // frames between passes
+    uint16_t stft_reserved;
+    uint32_t stft_frame_seq;    // completed STFT passes
+    uint32_t stft_packets_sent; // STFT UDP packets emitted
 
 } status_response_t;
 
@@ -473,5 +500,28 @@ void lfp_stream_service(void);   // call from the core-0 maintenance loop
 // Tracked config / counters (mirrored into status_response_t).
 extern uint8_t  lfp_cfg_enable, lfp_cfg_lane_mask, lfp_cfg_decim_R, lfp_cfg_num_taps;
 extern uint32_t lfp_udp_packets_sent;
+
+// ============================================================================
+// STFT/Tier-2 ENGINE -- control + jumbo spectrum streaming
+// ============================================================================
+// Control (pl_control.c): config latches while the engine is disabled.
+void pl_stft_set_config(uint8_t enable, uint8_t nfft_log2, uint16_t hop);
+void pl_stft_window_begin(void);                    // clear ptr, target = window RAM
+void pl_stft_window_push(int16_t coef);             // one Q15 Hann tap
+void pl_stft_upload_window(const int16_t *win, int n);
+void pl_stft_sel_begin(void);                       // clear ptr, target = selector table
+void pl_stft_sel_push(uint8_t channel);             // one lane -> channel
+void pl_stft_upload_channels(const uint8_t *chans, int n);
+uint32_t pl_stft_read_status(void);                 // STATUS_REG_14
+
+// Streaming (network.c): poll frame_seq; on a new pass push the whole Hermitian
+// spectrum (K x (N/2+1) complex float32) as one jumbo UDP packet on STFT_UDP_PORT.
+void stft_stream_init(void);
+void stft_stream_service(void);
+
+// Tracked config / counters (mirrored into status_response_t).
+extern uint8_t  stft_cfg_enable, stft_cfg_nfft_log2;
+extern uint16_t stft_cfg_hop;
+extern uint32_t stft_udp_packets_sent;
 
 #endif // MAIN_H
