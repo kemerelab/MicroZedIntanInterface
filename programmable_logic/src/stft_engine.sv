@@ -178,6 +178,7 @@ module stft_engine #(
     logic [LANE_W-1:0] f_lane;
     logic [NMAX_W:0]   f_n;            // sample index 0..N-1
     logic              feed_pending;   // a sample read is in flight (1-cyc BRAM latency)
+    logic              issue_last;     // stage-1 last flag, parallels feed_pending
 
     assign fft_cfg_tdata  = {20'd0, nfft_log2};     // runtime-N config; forward FFT
     assign fft_cfg_tvalid = (fstate == F_CFG);
@@ -192,7 +193,7 @@ module stft_engine #(
     always_ff @(posedge clk) begin
         win_prod   <= sbuf_rd * win_rd;
         prod_valid <= feed_pending;
-        prod_last  <= feed_pending & (f_n == Nfft);   // last when the issued index hit N-1+1
+        prod_last  <= issue_last;     // aligned to win_prod (same 2-stage pipe as prod_valid)
     end
     assign fft_in_tdata  = win_prod;
     assign fft_in_tvalid = prod_valid;
@@ -204,6 +205,7 @@ module stft_engine #(
             busy <= 1'b0; overflow <= 1'b0;
         end else begin
             feed_pending <= 1'b0;
+            issue_last   <= 1'b0;
             case (fstate)
                 F_IDLE: begin
                     busy <= 1'b0;
@@ -215,9 +217,12 @@ module stft_engine #(
                 end
                 F_FEED: begin
                     busy <= 1'b1;
-                    // issue one windowed-sample read per accepted beat
-                    if (fft_in_tready || !prod_valid) begin
+                    // issue one windowed-sample read per beat the FFT can accept.
+                    // (the behavioral model holds tready high for a whole frame; harden
+                    //  with a 2-deep skid buffer if the real xfft backpressures mid-frame)
+                    if (fft_in_tready) begin
                         feed_pending <= 1'b1;
+                        issue_last   <= (f_n + 1 >= Nfft);
                         if (f_n + 1 >= Nfft) fstate <= F_NEXT;
                         else                 f_n <= f_n + 1'b1;
                     end
@@ -249,7 +254,9 @@ module stft_engine #(
 
     // accept a new bin only in phase 0; phase 1 stalls the FFT to write the im word
     assign fft_out_tready = (cap_phase == 1'b0);
-    wire [RES_WAW-1:0] bin_word = ((c_lane * (MAX_N/2 + 1)) + c_bin) << 1;  // re-word addr
+    // compact per-N layout: lane stride = NBINS complex words (not MAX_N) so K lanes
+    // fit the results BRAM; the PS computes the same stride from N.
+    wire [RES_WAW-1:0] bin_word = ((c_lane * NBINS) + c_bin) << 1;          // re-word addr
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
