@@ -1798,6 +1798,7 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
+        print(f"  LFP (Tier-1): lfp_config [mask] [R] [taps] [cutoff], lfp_on, lfp_off, lfp_recv [n]")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
@@ -1915,6 +1916,23 @@ def tcp_control():
                     udp_bench(sock, sz, n)
                 elif cmd == "bench_sweep":
                     udp_bench_sweep(sock)
+                elif cmd == "lfp_config" or cmd.startswith("lfp_config "):
+                    # lfp_config [mask] [decimR] [taps] [cutoff_hz]  (configure while off)
+                    parts = cmd.split()
+                    mask = int(parts[1], 0) if len(parts) > 1 else 0x0F
+                    R    = int(parts[2])    if len(parts) > 2 else 15
+                    taps = int(parts[3])    if len(parts) > 3 else 128
+                    cut  = float(parts[4])  if len(parts) > 4 else 600.0
+                    configure_lfp(sock, mask, R, taps, cut)
+                elif cmd == "lfp_on":
+                    lfp_enable(sock, True)
+                elif cmd == "lfp_off":
+                    lfp_enable(sock, False)
+                elif cmd == "lfp_recv" or cmd.startswith("lfp_recv "):
+                    # bind UDP 5001 and print decoded LFP frames (blocks until n or timeout)
+                    parts = cmd.split()
+                    n = int(parts[1]) if len(parts) > 1 else 200
+                    receive_lfp(n)
                 elif cmd == "aux":
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
