@@ -1292,13 +1292,25 @@ def configure_stft(sock, channels=None, nfft_log2=6, hop=1, window=None):
     n = 1 << nfft_log2
     if window is None:
         window = design_stft_window(n)
+    # selector (K) + window (N) is a ~100-command burst the board acks one-by-one,
+    # so use a generous per-command timeout + stop early on a stall (same hardening
+    # as the LFP coef upload).
+    def _push(cmd_id, p1, p2, what, idx, total):
+        ok, _ = send_binary_command(sock, cmd_id, p1, p2, timeout=2.0)
+        if not ok:
+            print(f"[STFT] {what} upload stalled at {idx}/{total} -- board stopped acking "
+                  f"(reconnect + 'ping': answers = timing, dead = firmware wedge)")
+        return ok
     send_binary_command(sock, CMD_STFT_ENABLE, 0)
     send_binary_command(sock, CMD_STFT_SET_PARAMS, nfft_log2 & 0xF, hop & 0xFFFF)
-    for i, ch in enumerate(channels[:STFT_K]):
-        send_binary_command(sock, CMD_STFT_SET_CHANNELS, 1 if i == 0 else 0, ch & 0xFF)
+    chans = channels[:STFT_K]
+    for i, ch in enumerate(chans):
+        if not _push(CMD_STFT_SET_CHANNELS, 1 if i == 0 else 0, ch & 0xFF, "selector", i, len(chans)):
+            return None
     for i, w in enumerate(window[:n]):
-        send_binary_command(sock, CMD_STFT_WRITE_WINDOW, 1 if i == 0 else 0, w & 0xFFFF)
-    print(f"[STFT] configured: N={n} hop={hop} K={len(channels[:STFT_K])} chans={channels[:8]}...")
+        if not _push(CMD_STFT_WRITE_WINDOW, 1 if i == 0 else 0, w & 0xFFFF, "window", i, n):
+            return None
+    print(f"[STFT] configured: N={n} hop={hop} K={len(chans)} chans={chans[:8]}...")
     return window
 
 def stft_enable(sock, on=True):
@@ -1917,6 +1929,7 @@ def tcp_control():
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [mask] [R] [taps] [cutoff], lfp_on, lfp_off, lfp_recv [n]")
+        print(f"  STFT (Tier-2): stft_config [nfft_log2] [hop], stft_on, stft_off, stft_recv [n]")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
@@ -2054,6 +2067,21 @@ def tcp_control():
                     parts = cmd.split()
                     n = int(parts[1]) if len(parts) > 1 else 200
                     receive_lfp(n)
+                elif cmd == "stft_config" or cmd.startswith("stft_config "):
+                    # stft_config [nfft_log2] [hop]  (channels default 0..K-1; configure while off)
+                    parts = cmd.split()
+                    nlog = int(parts[1]) if len(parts) > 1 else 6
+                    hop  = int(parts[2]) if len(parts) > 2 else 1
+                    configure_stft(sock, nfft_log2=nlog, hop=hop)
+                elif cmd == "stft_on":
+                    stft_enable(sock, True)
+                elif cmd == "stft_off":
+                    stft_enable(sock, False)
+                elif cmd == "stft_recv" or cmd.startswith("stft_recv "):
+                    # bind UDP 5003 and print decoded jumbo spectrum frames (needs jumbo MTU)
+                    parts = cmd.split()
+                    n = int(parts[1]) if len(parts) > 1 else 100
+                    receive_stft(n)
                 elif cmd == "aux":
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
@@ -2122,6 +2150,11 @@ def tcp_control():
                     print("Bandwidth (raw UDP throughput, port 5002):")
                     print("  bench [bytes] [n]   - one size (default 1472 B x 50000)")
                     print("  bench_sweep         - sweep 256..8800 B")
+                    print("STFT / Tier-2 (UDP 5003, needs jumbo MTU):")
+                    print("  stft_config [nfft_log2] [hop] - set N/hop + upload Hann window & channel selector")
+                    print("  stft_on / stft_off  - enable / disable the engine")
+                    print("  stft_recv [n]       - capture + print jumbo spectrum frames")
+                    print("  (run stft_config BEFORE stft_on; LFP must be running -- STFT taps it)")
                     print("LFP / Tier-1 (UDP 5001):")
                     print("  lfp_config [mask] [R] [taps] [cutoff] - set mask/decim/taps + upload LP kernel")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
