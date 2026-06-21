@@ -13,8 +13,9 @@ net.py prototype**. Done end-to-end and built; on-hardware validation is the rem
 | `stft_fft.v` — xfft float32 + fix2float (int32→float32) | **synth-verified** | OOC `synth_design`: 0 errors, ~17–24 DSP / ~5 BRAM |
 | BD integration — results BRAM @ `0x88000000`, ctrl regs 28–30, status 14 | **built** | wrapper elaborates clean; full PL build below |
 | **Full PL build** | **DONE, timing CLOSED** | **WNS +0.285 ns, WHS +0.041 ns**, bitstream written |
-| Firmware v1.3 (PS prototype) | _see Firmware build below_ | mirrors LFP; `_Static_assert` guards 176-byte wire |
+| Firmware v1.3 (PS prototype) | **builds** | both cores compile+link at -O3; `_Static_assert(176)` passed |
 | net.py (host prototype) | **syntax-checked** | `configure_stft`, `receive_stft`, `get_status` |
+| **Bootable `blobs/BOOT.bin`** | **regenerated** | FSBL + STFT bitstream + both ELFs; bootgen OK (4.46 MB) |
 
 ## The 3-layer contract (all in sync)
 
@@ -38,6 +39,8 @@ LFP (Tier-1) must be enabled/streaming first — the STFT taps the decimated LFP
 
 ## Pending / risks to validate on hardware
 
+0. **Flash `blobs/BOOT.bin`** to the SD `Boot` partition — it's the as-built image (timing-closed
+   STFT bitstream + v1.3 firmware). Everything below is software-only here; nothing ran on a board.
 1. **On-HW correctness** — never run on the board; sim + synth only here.
 2. **xfft config word** — `stft_fft.v` builds the 16-bit config as `{NFFT@[12:8], FWD@[0]}`. If a
    frame mis-sizes, confirm the field layout against PG109 for this exact IP config.
