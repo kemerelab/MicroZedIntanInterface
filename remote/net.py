@@ -1,4 +1,5 @@
 import socket
+import sys
 import threading
 import struct
 import time
@@ -1081,12 +1082,22 @@ def udp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     # Big receive buffer: at ~30k pkt/s and up to 600 B/pkt the default buffer
     # overflows on any brief stall and drops packets (worse at dual-port). Ask
-    # for 16 MB; the OS may clamp to net.core.rmem_max (raise that to use it).
+    # for 16 MB; the OS clamps it to a kernel cap (see the per-platform hint).
+    REQ_RCVBUF = 16 * 1024 * 1024
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, REQ_RCVBUF)
         got = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        print(f"[UDP] SO_RCVBUF = {got // 1024} KB "
-              f"(raise net.core.rmem_max if smaller than requested)")
+        # Linux reports 2x the granted size via getsockopt; macOS reports it as-is.
+        eff = got // 2 if sys.platform.startswith("linux") else got
+        msg = f"[UDP] SO_RCVBUF = {eff // 1024} KB"
+        if eff < REQ_RCVBUF:
+            if sys.platform == "darwin":
+                msg += " (clamped; raise it: sudo sysctl -w kern.ipc.maxsockbuf=33554432)"
+            elif sys.platform.startswith("linux"):
+                msg += " (clamped; raise it: sudo sysctl -w net.core.rmem_max=33554432)"
+            else:
+                msg += " (clamped by the OS socket-buffer cap)"
+        print(msg)
     except OSError as e:
         print(f"[UDP] Could not set SO_RCVBUF: {e}")
     sock.bind(("", UDP_PORT))
