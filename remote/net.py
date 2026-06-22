@@ -69,6 +69,11 @@ STFT_UDP_PORT = 5003        # jumbo spectrum stream (complex float32 Hermitian h
 STFT_MAGIC_LOW = 0x5DEC7A00
 STFT_MAGIC_HIGH = 0xCAFEBABE
 STFT_K = 32                 # channels analyzed (build param, matches firmware/PL)
+# Synthetic-data playback
+CMD_PLAYBACK_LOAD = 0x91    # param1 = byte offset, param2 = byte length; raw bytes follow
+CMD_PLAYBACK_EN = 0x92      # param1 = 0/1, param2 = loop length (samples)
+PLAYBACK_FS = 30000         # broadband sample rate (Hz)
+PLAYBACK_MAX_SAMPLES = 131072  # 256 KB / 2 bytes
 
 AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
 
@@ -1368,6 +1373,95 @@ def receive_stft(n_packets=100, bind_port=STFT_UDP_PORT):
     return got
 
 # ============================================================================
+# Synthetic-data playback -- load a host-designed 30 ksps waveform into the PL
+# and broadcast it on all channels (debug mode) instead of the sinewaves. Lets
+# you push ripples/chirps with known ground truth through the LFP + STFT engines.
+# ============================================================================
+def playback_load(sock, samples):
+    """Bulk-load signed int16 samples into the playback BRAM (converted to the
+    offset-binary the PL expects). Returns the loop length (samples)."""
+    import math
+    samples = list(samples)
+    if len(samples) % 2:
+        samples.append(0)
+    if len(samples) > PLAYBACK_MAX_SAMPLES:
+        samples = samples[:PLAYBACK_MAX_SAMPLES]
+        print(f"[PLAYBACK] truncated to {PLAYBACK_MAX_SAMPLES} samples (BRAM limit)")
+    n = len(samples)
+    ob = [max(0, min(65535, int(round(s)) + 0x8000)) for s in samples]   # signed -> offset-binary
+    payload = struct.pack(f'<{n}H', *ob)
+    ack_id = random.randint(1, 65535)
+    sock.sendall(struct.pack('<IIIII', CMD_MAGIC, CMD_PLAYBACK_LOAD, ack_id, 0, len(payload)))
+    sock.sendall(payload)
+    sock.settimeout(5.0)
+    try:
+        resp = sock.recv(5)
+        ok = len(resp) >= 3 and ((resp[0] << 8) | resp[1]) == ack_id and resp[2] == ACK_SUCCESS
+    except socket.timeout:
+        ok = False
+    finally:
+        sock.settimeout(None)
+    print(f"[PLAYBACK] loaded {n} samples ({len(payload)} bytes, {n/PLAYBACK_FS:.2f} s): "
+          f"{'OK' if ok else 'NO ACK'}")
+    return n
+
+def playback_enable(sock, on=True, length=0):
+    send_binary_command(sock, CMD_PLAYBACK_EN, 1 if on else 0, length)
+    print(f"[PLAYBACK] {'ENABLED' if on else 'disabled'}" + (f" (len={length})" if on else ""))
+
+def play_trace(sock, samples, info=""):
+    """Load a trace, then enable playback looping at its length (debug mode required)."""
+    n = playback_load(sock, samples)
+    playback_enable(sock, True, n)
+    if info:
+        print(f"[PLAYBACK] {info}")
+    return n
+
+# ---- trace generators (signed int16, 30 ksps; offset-binary done at load) ----
+def make_tone_trace(freq=200.0, dur=2.0, amp=8000, fs=PLAYBACK_FS):
+    import math
+    n = int(dur * fs)
+    return [int(amp * math.sin(2 * math.pi * freq * i / fs)) for i in range(n)]
+
+def make_chirp_trace(f0=20.0, f1=1500.0, dur=2.0, amp=8000, fs=PLAYBACK_FS):
+    """Linear sweep f0->f1. Sweep across 600 Hz to see the LFP roll-off in the STFT."""
+    import math
+    n = int(dur * fs)
+    k = (f1 - f0) / dur
+    out = []
+    for i in range(n):
+        t = i / fs
+        phase = 2 * math.pi * (f0 * t + 0.5 * k * t * t)
+        out.append(int(amp * math.sin(phase)))
+    print(f"[PLAYBACK] chirp {f0:.0f}->{f1:.0f} Hz over {dur:.1f}s")
+    return out
+
+def make_ripple_trace(dur=2.0, n_ripples=6, ripple_hz=200.0, burst_ms=60.0,
+                      amp=9000, theta_hz=8.0, theta_amp=1500, hf_hz=1500.0, hf_amp=1200,
+                      fs=PLAYBACK_FS):
+    """Baseline theta + out-of-band HF tone (tests LFP rejection) + N Hann-enveloped
+    ripple bursts at evenly spaced KNOWN times. Returns (samples, ripple_centre_indices)."""
+    import math
+    n = int(dur * fs)
+    out = [0] * n
+    for i in range(n):
+        t = i / fs
+        out[i] = (theta_amp * math.sin(2 * math.pi * theta_hz * t)
+                  + hf_amp * math.sin(2 * math.pi * hf_hz * t))   # baseline + HF (LFP should reject HF)
+    half = int(burst_ms * 1e-3 * fs / 2)
+    centres = [int((j + 0.5) * n / n_ripples) for j in range(n_ripples)]
+    for c in centres:
+        for k in range(-half, half):
+            idx = c + k
+            if 0 <= idx < n:
+                env = 0.5 - 0.5 * math.cos(2 * math.pi * (k + half) / (2 * half))  # Hann
+                out[idx] += int(amp * env * math.sin(2 * math.pi * ripple_hz * k / fs))
+    out = [max(-32768, min(32767, v)) for v in out]
+    print(f"[PLAYBACK] ripple trace: {n_ripples} x {ripple_hz:.0f} Hz bursts ({burst_ms:.0f} ms) "
+          f"at samples {centres}  (+{theta_hz:.0f} Hz theta, +{hf_hz:.0f} Hz HF to test LFP rejection)")
+    return out, centres
+
+# ============================================================================
 # UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
 # replacing the ~18 MB/s small-packet broadband assumption with a measured
 # large-packet ceiling. (Payloads > ~1472 B fragment unless the path is jumbo-
@@ -1515,8 +1609,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 176:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 176)")
+    if len(data) != 184:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 184)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1562,6 +1656,9 @@ def get_status(sock):
     (stft_enable, stft_nfft_log2, stft_K, stft_overflow) = struct.unpack('<4B', data[160:164])
     (stft_hop,) = struct.unpack('<H', data[164:166])
     (stft_frame_seq, stft_packets_sent) = struct.unpack('<II', data[168:176])
+    # Synthetic-data playback (8 bytes)
+    (playback_enable,) = struct.unpack('<B', data[176:177])
+    (playback_length,) = struct.unpack('<I', data[180:184])
 
     status = {
         'version': version,
@@ -1631,6 +1728,8 @@ def get_status(sock):
         'stft_overflow': stft_overflow,
         'stft_frame_seq': stft_frame_seq,
         'stft_packets_sent': stft_packets_sent,
+        'playback_enable': playback_enable,
+        'playback_length': playback_length,
     }
 
     return status
@@ -1724,6 +1823,10 @@ def print_status(status):
           f"N={status['stft_N']}  hop={status['stft_hop']}  K={status['stft_K']}")
     print(f"  passes: {status['stft_frame_seq']}   packets sent: {status['stft_packets_sent']}   "
           f"overflow: {'YES' if status['stft_overflow'] else 'no'}")
+    if status.get('playback_enable'):
+        print(f"\n--- Playback (synthetic data) ---")
+        print(f"  ENABLED  loop={status['playback_length']} samples "
+              f"({status['playback_length']/PLAYBACK_FS:.2f} s @ {PLAYBACK_FS} sps)")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):
@@ -1930,6 +2033,7 @@ def tcp_control():
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [mask] [R] [taps] [cutoff], lfp_on, lfp_off, lfp_recv [n]")
         print(f"  STFT (Tier-2): stft_config [nfft_log2] [hop], stft_on, stft_off, stft_recv [n]")
+        print(f"  Playback: playback ripple | chirp [f0 f1] | tone [freq] | off  (needs set_debug 1 + start)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
@@ -2082,6 +2186,24 @@ def tcp_control():
                     parts = cmd.split()
                     n = int(parts[1]) if len(parts) > 1 else 100
                     receive_stft(n)
+                elif cmd == "playback" or cmd.startswith("playback "):
+                    # playback ripple | chirp [f0 f1] | tone [freq] | off  (needs set_debug 1 + start)
+                    parts = cmd.split()
+                    kind = parts[1] if len(parts) > 1 else "ripple"
+                    if kind == "off":
+                        playback_enable(sock, False)
+                    elif kind == "ripple":
+                        s, centres = make_ripple_trace()
+                        play_trace(sock, s, "lfp_recv should reject the HF; stft_recv should show the ripple bursts")
+                    elif kind == "chirp":
+                        f0 = float(parts[2]) if len(parts) > 2 else 20.0
+                        f1 = float(parts[3]) if len(parts) > 3 else 1500.0
+                        play_trace(sock, make_chirp_trace(f0, f1))
+                    elif kind == "tone":
+                        f = float(parts[2]) if len(parts) > 2 else 200.0
+                        play_trace(sock, make_tone_trace(f))
+                    else:
+                        print("Usage: playback ripple | chirp [f0 f1] | tone [freq] | off  (needs set_debug 1 + start)")
                 elif cmd == "aux":
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
@@ -2150,6 +2272,11 @@ def tcp_control():
                     print("Bandwidth (raw UDP throughput, port 5002):")
                     print("  bench [bytes] [n]   - one size (default 1472 B x 50000)")
                     print("  bench_sweep         - sweep 256..8800 B")
+                    print("Synthetic-data playback (debug mode -- needs set_debug 1 + start):")
+                    print("  playback ripple        - theta + HF + ripple bursts (LFP filter + STFT test)")
+                    print("  playback chirp [f0 f1] - frequency sweep (spectral analysis test)")
+                    print("  playback tone [freq]   - single tone")
+                    print("  playback off           - back to the synthetic sinewaves")
                     print("STFT / Tier-2 (UDP 5003, needs jumbo MTU):")
                     print("  stft_config [nfft_log2] [hop] - set N/hop + upload Hann window & channel selector")
                     print("  stft_on / stft_off  - enable / disable the engine")
