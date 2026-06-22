@@ -5,9 +5,12 @@ The board exposes two network endpoints once its Ethernet link is up:
 | Endpoint | Port | Direction | Purpose |
 |----------|------|-----------|---------|
 | **TCP control** | 6000 | host → board (with acks) | commands (start/stop, config, registers) |
-| **UDP data** | 5000 | board → host | the acquisition stream |
+| **UDP data** | 5000 | board → host | the broadband acquisition stream |
+| UDP LFP | 5001 | board → host | the Tier-1 decimated-band stream (when enabled) |
+| UDP STFT | 5003 | board → host | the Tier-2 spectrum stream, jumbo (when enabled) |
 
-Default board IP is `192.168.18.10` (put your host on the same `/24`).
+Default board IP is `192.168.18.10` (put your host on the same `/24`). The broadband stream
+(5000) is independent of the LFP (5001) / STFT (5003) streams — they can run simultaneously.
 
 `remote/net.py` and `firmware/include/main.h` are the **authoritative** sources for the
 exact IDs, bit layouts, and offsets — this document is the readable summary. The firmware,
@@ -57,10 +60,17 @@ Most commands reply with a small ack; `GET_STATUS`, `READ_REGISTER`, etc. reply 
 | `0x81` | LFP_SET_PARAMS | p1 = decim_R, p2 = num_taps | decimation factor + active FIR length |
 | `0x82` | LFP_SET_CHANNELS | p1 = 8-bit lane mask | which of 8 streams to LFP-filter |
 | `0x83` | LFP_WRITE_COEF | p1 = [0] clear-ptr-first, p2 = 18-bit signed coef | upload one Q1.17 tap |
+| `0x84` | STFT_ENABLE | p1 = 0/1 | enable the Tier-2 STFT engine + its UDP stream |
+| `0x85` | STFT_SET_PARAMS | p1 = nfft_log2, p2 = hop | transform length log2(N) + hop |
+| `0x86` | STFT_SET_CHANNELS | p1 = [0] clear-ptr-first, p2 = channel index | one selector-lane → source channel |
+| `0x87` | STFT_WRITE_WINDOW | p1 = [0] clear-ptr-first, p2 = Q15 coeff | upload one Hann window tap |
+| `0x91` | PLAYBACK_LOAD | p1 = byte offset, p2 = byte length | bulk: the raw waveform bytes follow on the stream |
+| `0x92` | PLAYBACK_EN | p1 = 0/1, p2 = loop length (samples) | enable synthetic-data playback (debug mode) |
 
 Configure LFP while disabled (channels → params → coefficients via repeated `0x83`,
 the first with the clear bit), then `LFP_ENABLE`. (See `remote/net.py` `configure_lfp()`
-+ `design_lfp_lowpass()`.)
++ `design_lfp_lowpass()`.) STFT is configured the same way (`configure_stft()`): params →
+selector channels (`0x86`) → Hann window (`0x87`), then `STFT_ENABLE`.
 
 (See `remote/net.py` for the exact per-command parameter packing and the interactive
 command names like `start`, `set_channels`, `auto_cable_detect`, `verify_sine`.)
@@ -155,23 +165,55 @@ When the LFP/DSP engine is enabled, the board emits a second, independent UDP st
 channels in order. The host knows the frame size from `lane_mask` (no per-packet size
 field beyond the mask). Reference receiver: `net.py` `receive_lfp()`.
 
+## STFT spectrum stream (port 5003) — Tier-2, *complex float32* (exploratory)
+
+When the STFT engine is enabled it taps the LFP output and emits per-channel spectra on
+**port 5003** as **one jumbo datagram per pass** (needs a jumbo-MTU path; ~8.5 KB at the
+N=64/K=32 default). Payload is **IEEE-754 float32**, not fixed point. All header words 32-bit
+little-endian:
+
+| words | field | notes |
+|------:|-------|-------|
+| 0–1 | magic `0xCAFEBABE_5DEC7A00` | word0 = `0x5DEC7A00`, word1 = `0xCAFEBABE` |
+| 2–3 | 64-bit timestamp | `frame_seq × hop` ≈ LFP-frame index |
+| 4 | `[7:0]` nfft_log2 · `[15:8]` K · `[31:24]` flags (bit0 = overflow) | |
+| 5 | 32-bit frame sequence number | |
+| 6 | `[15:0]` nbins (= N/2+1) · `[31:16]` hop | |
+| 7 | reserved | |
+| 8… | payload: per lane (lane-major), `N/2+1` **complex float32** bins `(re, im)` | the Hermitian half |
+
+Reference receiver: `net.py` `receive_stft()`. (Tier-2 is on the `claude/tier2-stft` /
+`claude/playback` branches; not on `main`.)
+
+## Synthetic-data playback (debug mode)
+
+`PLAYBACK_LOAD` (`0x91`) bulk-loads a host-designed 30 ksps waveform into a 128 KB PL BRAM
+(`0x8C000000`, ≤ 64K samples ≈ 2.13 s), then `PLAYBACK_EN` (`0x92`) broadcasts it on **all
+channels** (in debug mode) in place of the synthetic sinewaves — so a known signal (ripples,
+chirps) flows through the real broadband + LFP + STFT path with ground truth. The load is a
+bulk transfer: the `0x91` command is immediately followed by `byte length` raw waveform bytes
+(offset-binary 16-bit, little-endian), ACK'd on completion. Host: `net.py` `playback_load()`
++ `make_ripple_trace()`/`make_chirp_trace()`.
+
 ## Register map (the source of truth is `firmware/include/main.h`)
 
 | Region | Base | Notes |
 |--------|------|-------|
-| AXI-Lite control regs | `0x40000000` | 28 control regs (PS→PL): 0..21 legacy, 22..24 aux, **25..27 LFP** (cfg/coef/strobe) |
-| AXI-Lite status regs | `0x40000000 + 28*4` | status regs (PL→PS): write pointer, fifo count, aux, **13 = LFP wr-ptr/overrun** (base = `PL_N_CTRL_REGS*4`) |
+| AXI-Lite control regs | `0x40000000` | **32** control regs (PS→PL): 0..21 legacy, 22..24 aux, 25..27 LFP, **28..30 STFT**, **31 playback** |
+| AXI-Lite status regs | `0x40000000 + 32*4` | status regs (PL→PS): write pointer, fifo count, aux, 13 = LFP, **14 = STFT** (base = `PL_N_CTRL_REGS*4`) |
 | Capture BRAM | `0x80000000` | 16384 × 32-bit words (64 KB) |
 | **LFP output BRAM** | `0x84000000` | 16384 × 32-bit ring; decimated samples 2×16-bit/word |
+| **STFT results BRAM** | `0x88000000` | complex float32 spectra (PS read) |
+| **Playback BRAM** | `0x8C000000` | 128 KB; PS writes the synthetic waveform, PL reads it |
 
 `CTRL_REG_2` packs the four cable phases: `[3:0]` phase0 (A/cipo0), `[7:4]` phase1 (A/cipo1),
 `[19:16]` phase2 (B/cipo0), `[23:20]` phase3 (B/cipo1).
 
 ### `get_status` response (`status_response_t`)
-A packed **160-byte** little-endian struct returned by `GET_STATUS`. `main.h` is the
-source of truth for the field layout; `net.py` `get_status()` mirrors the unpacking, and a
-firmware `_Static_assert(sizeof(status_response_t) == 160)` keeps the two in sync. Contents,
-in order:
+A packed **184-byte** little-endian struct returned by `GET_STATUS` (on this branch; `main`
+is 160 without STFT/playback). `main.h` is the source of truth for the field layout; `net.py`
+`get_status()` mirrors the unpacking, and a firmware `_Static_assert(sizeof(status_response_t)
+== 184)` keeps the two in sync. Contents, in order:
 
 - **version / IDs** — firmware version, board/build IDs.
 - **PL hardware status** — 64-bit timestamp, BRAM write pointer, FIFO count, PL flags.
@@ -213,3 +255,7 @@ in order:
   `lfp_num_taps` (host-set, mirrored from `CTRL_REG_LFP_CFG`), `lfp_packets_sent` (UDP frames
   emitted), and `lfp_overrun` (sticky compute-overrun from `STATUS_REG_13`). So the host can
   read back the full LFP configuration — per the "report everything configurable" rule.
+- **STFT engine config + status (16 bytes)** — `stft_enable`, `stft_nfft_log2`, `stft_K`,
+  `stft_overflow`, `stft_hop`, `stft_frame_seq` (completed passes), `stft_packets_sent`.
+- **Playback config (8 bytes)** — `playback_enable`, `playback_length` (loaded loop length in
+  samples).
