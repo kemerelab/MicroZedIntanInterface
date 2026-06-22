@@ -65,12 +65,10 @@ the first with the clear bit), then `LFP_ENABLE`. (See `remote/net.py` `configur
 (See `remote/net.py` for the exact per-command parameter packing and the interactive
 command names like `start`, `set_channels`, `auto_cable_detect`, `verify_sine`.)
 
-## UDP data packet
+## UDP data packet (port 5000)
 
-Each UDP datagram is one 30 kHz sample frame: **10 header words + N data words**, all 32-bit
-little-endian. `N` depends on the channel mask (`35 × num_streams` 16-bit words, packed two
-per 32-bit word), so the packet is **28 words (min) … 150 words / 600 bytes (max, `0xFF`,
-256 ch)**.
+Each UDP datagram is **one 30 kHz sample frame**: `10` header words + `N` data words, all
+32-bit little-endian. The 64-bit timestamp (header words 2–3) increments once per datagram.
 
 **Header (10 words / 40 bytes):**
 
@@ -81,10 +79,62 @@ per 32-bit word), so the packet is **28 words (min) … 150 words / 600 bytes (m
 | 4–5 | digital-in (8 bits) + metadata | |
 | 6–9 | 8 × 16-bit external ADC values | |
 
-**Data words:** the de-interleaved CIPO samples for the enabled streams (regular/DDR ×
-CIPO0/CIPO1 × port A/B). The host computes the expected size from the channel mask; a
-size mismatch is the classic dual-port "dropout" symptom — keep `calculate_packet_size`
-in `net.py`/the plugin in lockstep with the firmware.
+### Which channels get sampled — the channel-enable mask
+
+`SET_CHANNEL_ENABLE` (`0x13`, param1) is an **8-bit mask selecting which of 8 streams** are
+sent. Each set bit adds one stream of 32 amplifier channels; `0xFF` = all 8 = **256 channels**.
+The bit order is **also the order the streams appear in every packet**:
+
+| bit | stream | cable/port | CIPO line | phase |
+|----:|--------|-----------|-----------|-------|
+| 0 | `A_CIPO0_REG` | A (cable 1) | CIPO0 | regular |
+| 1 | `A_CIPO0_DDR` | A | CIPO0 | DDR (2nd interleaved chip) |
+| 2 | `A_CIPO1_REG` | A | CIPO1 | regular |
+| 3 | `A_CIPO1_DDR` | A | CIPO1 | DDR |
+| 4 | `B_CIPO0_REG` | B (cable 2) | CIPO0 | regular |
+| 5 | `B_CIPO0_DDR` | B | CIPO0 | DDR |
+| 6 | `B_CIPO1_REG` | B | CIPO1 | regular |
+| 7 | `B_CIPO1_DDR` | B | CIPO1 | DDR |
+
+Each stream = one RHD2000 chip's **32 amplifier channels** (the DDR streams are the second
+chip interleaved on the same CIPO line via double-data-rate). 8 × 32 = 256.
+
+### Data words — layout (this is what a receiver/plugin must de-interleave)
+
+Each enabled stream contributes **35 16-bit samples per frame** (the 35 COPI commands of the
+acquisition loop), packed **two samples per 32-bit word, low half first**:
+
+```
+data_word[i] = (sample[2*i+1] << 16) | sample[2*i]
+```
+
+Total = `35 × popcount(mask)` 16-bit samples = `ceil(that / 2)` 32-bit words. So the packet is
+**28 words (min, 1 stream) … 150 words / 600 bytes (max, `0xFF`, 8 streams)**.
+
+The samples are **cycle-major** — the outer loop is the 35 cycles, the inner loop is the
+enabled streams in **ascending bit order**:
+
+```
+flat_index = 0
+for cycle in 0..34:                      # 35 COPI commands
+    for stream in enabled_streams:       # ascending mask bit
+        sample[cycle][stream] = data_sample[flat_index];  flat_index += 1
+```
+So `sample(cycle, stream)` is at flat index `cycle * num_enabled + (rank of stream among enabled)`.
+
+**Mapping cycle → amplifier channel.** Because of the 2-command SPI readback pipeline, a
+`CONVERT(ch)` result lands two cycles later, so **amplifier channel `ch` (0–31) is at
+`cycle = ch + 2`**. Cycles 0, 1, and 34 carry pipeline/aux readback (register reads, etc.),
+**not** amplifier data — a displaying plugin should take cycles 2–33 as channels 0–31.
+
+**Samples are offset binary** (mid-scale `0x8000` = 0 µV) — subtract `0x8000` for signed. This
+layout is identical in debug mode (`SET_DEBUG_MODE`), which fills the streams with synthetic
+sinewaves so a plugin can be tested with no chip attached.
+
+**Reference parser:** `net.py` `unpack_data_segments()` (flatten words → 16-bit samples) +
+`expected_debug_segments()` (the cycle×stream order) + `calculate_packet_size()` (size from
+mask). The host/plugin **must** compute the expected size from the mask and check it — a size
+mismatch is the classic dual-port "dropout" symptom; keep the plugin's size calc in lockstep.
 
 ## LFP UDP stream (port 5001) — the decimated band, a *separate* product
 
