@@ -56,7 +56,7 @@
 
 // Number of PL control registers (must match axi_lite_registers N_CTRL --
 // the status registers are read back starting right after the control block)
-#define PL_N_CTRL_REGS      31
+#define PL_N_CTRL_REGS      32
 
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
@@ -95,6 +95,16 @@
 #define STFT_UDP_PORT               5003       // jumbo spectrum stream
 #define STFT_K                      32         // channels analyzed (build param, matches PL)
 #define STFT_MAX_N                  64         // max FFT length this build (xfft transform_length)
+
+// Synthetic-data playback (PL reg 31; see data_generator_core/playback_bram_wrapper).
+// In debug mode, broadcasts a host-loaded waveform (offset-binary 16-bit, 2/word)
+// to all channels instead of the synthetic sinewaves.
+#define CTRL_REG_PLAYBACK_OFFSET    (31 * 4)   // [0] enable, [25:8] loop length (samples)
+#define PLAYBACK_EN                 (1u << 0)
+#define PLAYBACK_LEN_SHIFT          8
+#define PLAYBACK_BRAM_BASE_ADDR     0x8C000000
+#define PLAYBACK_BRAM_SIZE_BYTES    0x40000    // 256 KB = 128K samples = ~4.3 s @ 30 ksps
+#define PLAYBACK_MAX_SAMPLES        (PLAYBACK_BRAM_SIZE_BYTES / 2)
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
@@ -321,6 +331,11 @@ typedef struct __attribute__((packed)) {
     uint32_t stft_frame_seq;    // completed STFT passes
     uint32_t stft_packets_sent; // STFT UDP packets emitted
 
+    // Synthetic-data playback config (CTRL_REG 31). 8 bytes.
+    uint8_t  playback_enable;
+    uint8_t  playback_reserved[3];
+    uint32_t playback_length;   // loaded loop length (samples)
+
 } status_response_t;
 
 // Flag definitions
@@ -523,5 +538,15 @@ void stft_stream_service(void);
 extern uint8_t  stft_cfg_enable, stft_cfg_nfft_log2;
 extern uint16_t stft_cfg_hop;
 extern uint32_t stft_udp_packets_sent;
+
+// ============================================================================
+// SYNTHETIC-DATA PLAYBACK -- control (pl_control.c) + bulk load (network.c)
+// ============================================================================
+void pl_playback_set_config(uint8_t enable, uint32_t length);  // CTRL_REG 31
+// Bulk load is handled in tcp_recv_cb (a raw-receive mode); pl_playback_load_arm
+// sets up the destination + byte count for the incoming stream.
+void pl_playback_load_arm(uint32_t byte_offset, uint32_t byte_len, uint32_t ack_id, void *tpcb);
+extern uint8_t  playback_cfg_enable;
+extern uint32_t playback_cfg_length;
 
 #endif // MAIN_H

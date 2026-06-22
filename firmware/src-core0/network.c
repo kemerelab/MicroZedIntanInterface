@@ -75,6 +75,9 @@ ID   | Command          | Param1              | Param2
 #define CMD_STFT_SET_CHANNELS 0x86  // param1 = [0] clear-ptr-first; param2 = channel index (one lane)
 #define CMD_STFT_WRITE_WINDOW 0x87  // param1 = [0] clear-ptr-first; param2 = Q15 Hann coeff (one tap)
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
+// Synthetic-data playback
+#define CMD_PLAYBACK_LOAD    0x91  // param1 = byte offset, param2 = byte length; raw bytes follow
+#define CMD_PLAYBACK_EN      0x92  // param1 = 0/1, param2 = loop length (samples)
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
@@ -94,6 +97,43 @@ typedef struct {
 // alignment must come from this buffer itself.
 static uint8_t recv_buffer[CMD_PACKET_SIZE] __attribute__((aligned(8)));
 static uint16_t recv_buffer_pos = 0;
+
+static void send_ack(struct tcp_pcb *tpcb, uint32_t ack_id, uint8_t status);  // fwd decl
+
+// Bulk playback load: after CMD_PLAYBACK_LOAD, the next pb_load_remaining bytes of
+// the TCP stream are written straight into the playback BRAM (not parsed as
+// commands), and the load's ACK is sent once they all arrive.
+static uint32_t pb_load_remaining = 0;   // bytes still expected
+static uint32_t pb_load_addr      = 0;   // next BRAM byte address (word writes)
+static uint32_t pb_load_word      = 0;   // partial-word accumulator
+static uint8_t  pb_load_phase     = 0;   // 0..3 byte within the word
+static uint32_t pb_load_ack_id    = 0;
+static struct tcp_pcb *pb_load_pcb = NULL;
+
+void pl_playback_load_arm(uint32_t byte_offset, uint32_t byte_len, uint32_t ack_id, void *tpcb) {
+    if (byte_offset + byte_len > PLAYBACK_BRAM_SIZE_BYTES) byte_len = 0;  // bounds guard
+    pb_load_addr      = PLAYBACK_BRAM_BASE_ADDR + byte_offset;
+    pb_load_remaining = byte_len;
+    pb_load_word = 0; pb_load_phase = 0;
+    pb_load_ack_id = ack_id; pb_load_pcb = (struct tcp_pcb *)tpcb;
+}
+
+// Drain raw bytes from a pbuf into the playback BRAM; returns the new position.
+static uint16_t pb_drain(const uint8_t *data, uint16_t pos, uint16_t len) {
+    while (pos < len && pb_load_remaining > 0) {
+        pb_load_word |= ((uint32_t)data[pos]) << (8 * pb_load_phase);
+        pos++; pb_load_remaining--; pb_load_phase++;
+        if (pb_load_phase == 4) {
+            Xil_Out32(pb_load_addr, pb_load_word);
+            pb_load_addr += 4; pb_load_word = 0; pb_load_phase = 0;
+        }
+    }
+    if (pb_load_remaining == 0) {
+        if (pb_load_phase != 0) { Xil_Out32(pb_load_addr, pb_load_word); pb_load_word = 0; pb_load_phase = 0; }
+        if (pb_load_pcb) send_ack(pb_load_pcb, pb_load_ack_id, ACK_SUCCESS);
+    }
+    return pos;
+}
 
 // TCP connection tracking for hotplug support
 static struct tcp_pcb *tcp_server_pcb = NULL;  // Listening PCB
@@ -284,6 +324,10 @@ void collect_status_data(status_response_t* status) {
     status->stft_reserved    = 0;
     status->stft_frame_seq   = stft_st & 0x3FFFFFFF;
     status->stft_packets_sent = stft_udp_packets_sent;
+
+    // Synthetic-data playback config (host-set)
+    status->playback_enable = playback_cfg_enable;
+    status->playback_length = playback_cfg_length;
 }
 
 // ============================================================================
@@ -563,6 +607,18 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             udp_bench_blast(cmd->param1, cmd->param2);
             break;
 
+        case CMD_PLAYBACK_LOAD:
+            // param1 = byte offset, param2 = byte length; the raw waveform bytes
+            // follow in the stream. ACK is deferred until the bulk load completes.
+            pl_playback_load_arm(cmd->param1, cmd->param2, cmd->ack_id, tpcb);
+            return;   // do NOT send_ack here
+
+        case CMD_PLAYBACK_EN:
+            pl_playback_set_config(cmd->param1 ? 1 : 0, cmd->param2);
+            send_message("Binary Command: PLAYBACK_EN %u len=%u\r\n",
+                         cmd->param1 ? 1 : 0, cmd->param2);
+            break;
+
         default:
             status = ACK_ERROR;
             send_message("Binary Command: UNKNOWN (0x%08X)\r\n", cmd->cmd_id);
@@ -603,15 +659,20 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     uint16_t data_len = p->len;
     uint16_t data_pos = 0;
     
-    // First, handle any incomplete command from previous packet
-    if (recv_buffer_pos > 0) {
+    // 0) Bulk playback load armed in a prior callback: drain raw bytes into BRAM.
+    if (pb_load_remaining > 0) {
+        data_pos = pb_drain(data, data_pos, data_len);
+    }
+
+    // First, handle any incomplete command from previous packet (not while loading)
+    if (pb_load_remaining == 0 && recv_buffer_pos > 0) {
         uint16_t bytes_needed = CMD_PACKET_SIZE - recv_buffer_pos;
-        uint16_t bytes_available = data_len < bytes_needed ? data_len : bytes_needed;
-        
-        memcpy(&recv_buffer[recv_buffer_pos], data, bytes_available);
+        uint16_t bytes_available = data_len - data_pos < bytes_needed ? data_len - data_pos : bytes_needed;
+
+        memcpy(&recv_buffer[recv_buffer_pos], &data[data_pos], bytes_available);
         recv_buffer_pos += bytes_available;
         data_pos += bytes_available;
-        
+
         // Check if we now have a complete command
         if (recv_buffer_pos == CMD_PACKET_SIZE) {
             cmd_packet_t *cmd = (cmd_packet_t *)recv_buffer;
@@ -621,7 +682,7 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
             recv_buffer_pos = 0;  // Reset for next incomplete command
         }
     }
-    
+
     // Process complete commands from the TCP buffer.
     //
     // IMPORTANT: copy each command into a word-aligned struct instead of
@@ -632,25 +693,31 @@ err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     // adjacent field reads into LDRD, which ALIGNMENT-FAULTS on non-word
     // addresses regardless. -O3 did exactly that for one handler (the aux
     // bank-select case) and hard-wedged the CPU in the abort handler.
-    while (data_pos + CMD_PACKET_SIZE <= data_len) {
+    //
+    // CMD_PLAYBACK_LOAD arms a bulk transfer: when it does, the rest of the
+    // stream is raw waveform bytes, so drain instead of parsing them as commands.
+    while (pb_load_remaining == 0 && data_pos + CMD_PACKET_SIZE <= data_len) {
         cmd_packet_t cmd_aligned __attribute__((aligned(8)));
         memcpy(&cmd_aligned, &data[data_pos], CMD_PACKET_SIZE);
         if (cmd_aligned.magic == CMD_MAGIC) {
             process_command(tpcb, &cmd_aligned);
             data_pos += CMD_PACKET_SIZE;
+            if (pb_load_remaining > 0) data_pos = pb_drain(data, data_pos, data_len);
         } else {
             // Skip bad data and look for next magic
             data_pos++;
         }
     }
-    
-    // Copy any remaining partial command to recv_buffer
-    uint16_t remaining_bytes = data_len - data_pos;
-    if (remaining_bytes > 0) {
-        memcpy(recv_buffer, &data[data_pos], remaining_bytes);
-        recv_buffer_pos = remaining_bytes;
+
+    // Copy any remaining partial command to recv_buffer (not while loading)
+    if (pb_load_remaining == 0) {
+        uint16_t remaining_bytes = data_len - data_pos;
+        if (remaining_bytes > 0) {
+            memcpy(recv_buffer, &data[data_pos], remaining_bytes);
+            recv_buffer_pos = remaining_bytes;
+        }
     }
-    
+
     tcp_recved(tpcb, p->len);
     pbuf_free(p);
     return ERR_OK;

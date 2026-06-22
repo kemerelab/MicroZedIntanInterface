@@ -740,3 +740,18 @@ void pl_stft_upload_channels(const uint8_t *chans, int n) {
 uint32_t pl_stft_read_status(void) {
     return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_14_OFFSET);
 }
+
+// ============================================================================
+// Synthetic-data playback control (CTRL_REG 31)
+// ============================================================================
+uint8_t  playback_cfg_enable = 0;
+uint32_t playback_cfg_length = 0;
+
+void pl_playback_set_config(uint8_t enable, uint32_t length) {
+    if (length > PLAYBACK_MAX_SAMPLES) length = PLAYBACK_MAX_SAMPLES;
+    uint32_t cfg = ((uint32_t)(enable ? 1u : 0u))
+                 | ((length & 0x3FFFFu) << PLAYBACK_LEN_SHIFT);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_PLAYBACK_OFFSET, cfg);
+    playback_cfg_enable = enable ? 1 : 0;
+    if (length) playback_cfg_length = length;   // keep last loaded length when toggling
+}
