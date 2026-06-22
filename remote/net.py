@@ -73,7 +73,7 @@ STFT_K = 32                 # channels analyzed (build param, matches firmware/P
 CMD_PLAYBACK_LOAD = 0x91    # param1 = byte offset, param2 = byte length; raw bytes follow
 CMD_PLAYBACK_EN = 0x92      # param1 = 0/1, param2 = loop length (samples)
 PLAYBACK_FS = 30000         # broadband sample rate (Hz)
-PLAYBACK_MAX_SAMPLES = 131072  # 256 KB / 2 bytes
+PLAYBACK_MAX_SAMPLES = 65536  # 128 KB / 2 bytes (~2.13 s @ 30 ksps)
 
 AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
 

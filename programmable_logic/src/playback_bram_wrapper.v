@@ -1,13 +1,15 @@
-// playback_bram_wrapper.v -- 256 KB dual-port BRAM for synthetic-data playback.
+// playback_bram_wrapper.v -- 128 KB dual-port BRAM for synthetic-data playback.
 //
 // Mirror image of simple_dual_port_bram_wrapper: here Port A is the PL READ side
 // (data_generator reads the waveform) and Port B is the PS READ/WRITE side (an
-// axi_bram_ctrl @ 0x8C000000 loads the waveform). 64K x 32-bit = 256 KB, 2x16-bit
-// samples per word. Port B carries the BRAM_CTRL MEM_SIZE metadata (262144).
+// axi_bram_ctrl @ 0x8C000000 loads the waveform). 32K x 32-bit = 128 KB = 64K
+// samples = ~2.13 s @ 30 ksps, 2x16-bit samples per word. (128 KB, not 256 KB,
+// so RAMB36 fits alongside capture/LFP/STFT on the -1 part.) Port B carries the
+// BRAM_CTRL MEM_SIZE metadata (131072).
 module playback_bram_wrapper #(
-    parameter integer ADDR_WIDTH = 18,    // 256 KB byte address
+    parameter integer ADDR_WIDTH = 17,    // 128 KB byte address
     parameter integer DATA_WIDTH = 32,
-    parameter integer DEPTH      = 65536  // 64K words
+    parameter integer DEPTH      = 32768  // 32K words
 )(
     // Port A - PL READ side (data generator)
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA CLK" *)
@@ -27,7 +29,7 @@ module playback_bram_wrapper #(
 
     // Port B - PS READ/WRITE side (axi_bram_ctrl loads the waveform)
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB CLK" *)
-    (* X_INTERFACE_PARAMETER = "MASTER_TYPE BRAM_CTRL,MEM_SIZE 262144,MEM_WIDTH 32,MEM_ECC NONE,READ_WRITE_MODE READ_WRITE" *)
+    (* X_INTERFACE_PARAMETER = "MASTER_TYPE BRAM_CTRL,MEM_SIZE 131072,MEM_WIDTH 32,MEM_ECC NONE,READ_WRITE_MODE READ_WRITE" *)
     input  wire                    portb_clk,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTB RST" *)
     input  wire                    portb_rst,

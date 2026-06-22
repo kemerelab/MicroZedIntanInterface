@@ -871,8 +871,8 @@ proc create_root_design { parentCell } {
   assign_bd_address -offset 0x84000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
   # STFT results BRAM, PS read view @ 0x88000000
   assign_bd_address -offset 0x88000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
-  # Playback BRAM, PS write view @ 0x8C000000 (256 KB)
-  assign_bd_address -offset 0x8C000000 -range 0x00040000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_3/S_AXI/Mem0] -force
+  # Playback BRAM, PS write view @ 0x8C000000 (128 KB)
+  assign_bd_address -offset 0x8C000000 -range 0x00020000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_3/S_AXI/Mem0] -force
   assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers/s_axi/reg0] -force
   # CDMA control registers in the PS GP address space
   assign_bd_address -offset 0x44A00000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_cdma_0/S_AXI_LITE/Reg] -force

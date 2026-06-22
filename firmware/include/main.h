@@ -103,7 +103,7 @@
 #define PLAYBACK_EN                 (1u << 0)
 #define PLAYBACK_LEN_SHIFT          8
 #define PLAYBACK_BRAM_BASE_ADDR     0x8C000000
-#define PLAYBACK_BRAM_SIZE_BYTES    0x40000    // 256 KB = 128K samples = ~4.3 s @ 30 ksps
+#define PLAYBACK_BRAM_SIZE_BYTES    0x20000    // 128 KB = 64K samples = ~2.13 s @ 30 ksps
 #define PLAYBACK_MAX_SAMPLES        (PLAYBACK_BRAM_SIZE_BYTES / 2)
 
 // CTRL_REG_AUX_CTRL bit fields

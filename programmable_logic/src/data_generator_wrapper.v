@@ -79,13 +79,13 @@ module data_generator #(
     output wire [3:0]      stft_bram_we,
 
     // Playback BRAM Port A (PS writes the synthetic waveform; PL reads it). Mapped
-    // at 0x8C000000 via a 4th axi_bram_ctrl. 256 KB (64K x 32-bit, 2 samples/word).
+    // at 0x8C000000 via a 4th axi_bram_ctrl. 128 KB (32K x 32-bit, 2 samples/word).
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM CLK" *)
     output wire            playback_bram_clk,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM RST" *)
     output wire            playback_bram_rst,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM ADDR" *)
-    output wire [17:0]     playback_bram_addr,
+    output wire [16:0]     playback_bram_addr,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM DIN" *)
     output wire [31:0]     playback_bram_din,    // PL side reads only -> tied 0
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM DOUT" *)
@@ -188,7 +188,7 @@ module data_generator #(
     assign playback_bram_en   = 1'b1;
     assign playback_bram_we   = 4'h0;        // PL reads only
     assign playback_bram_din  = 32'h0;
-    assign playback_bram_addr = {pb_rd_addr[15:0], 2'b00};   // word -> byte (256 KB)
+    assign playback_bram_addr = {pb_rd_addr[14:0], 2'b00};   // word -> byte (128 KB)
 
     // Data generator status (only 10 registers - wrapper adds 11th..13th)
     wire [32*10-1:0] data_gen_status;
