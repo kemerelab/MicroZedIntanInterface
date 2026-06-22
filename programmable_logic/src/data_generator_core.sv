@@ -53,7 +53,16 @@ module data_generator_core (
     output logic        dsp_sample_valid,
     output logic [127:0] dsp_sample_data,
     output logic [5:0]  dsp_sample_slot,
-    output logic        dsp_packet_tick
+    output logic        dsp_packet_tick,
+
+    // Playback: synthetic-data injection in debug mode. The wrapper supplies the
+    // enable + loop length (from a control reg) and a read port into the playback
+    // BRAM (32-bit words, 2x16-bit samples each). When enabled it replaces the
+    // synthetic sinewaves with one buffer sample/packet, broadcast to all channels.
+    input  logic        playback_en,
+    input  logic [17:0] playback_length,    // valid sample count (loop length)
+    output logic [16:0] pb_rd_addr,          // word address into playback BRAM
+    input  logic [31:0] pb_rd_data           // 2x16-bit samples per word
 );
 
 // Extract control bits
@@ -177,6 +186,14 @@ logic [31:0] loop_counter;
 logic [8:0] dummy_data_index;
 // Debug mode 512-entry sine lookup table (unsigned 16-bit values)
 logic [15:0] sine_lut [0:511];
+
+// Playback: per-packet sample index into the playback buffer (loops at
+// playback_length). The buffer packs 2x16-bit samples per 32-bit word; the word
+// address is index>>1 and the low index bit selects the half. Offset-binary like
+// the sine LUT (the buffer is loaded in offset-binary by the host).
+logic [17:0] playback_index;
+assign pb_rd_addr = playback_index[17:1];                // word address
+wire [15:0] playback_sample = playback_index[0] ? pb_rd_data[31:16] : pb_rd_data[15:0];
 
 // Initialize sine lookup table
 initial begin
@@ -579,6 +596,7 @@ always_ff @(posedge clk) begin
         fifo_packet_end_flag <= 1'b0;
 
         dummy_data_index <= 9'd0;
+        playback_index   <= 18'd0;
         dsp_sample_valid <= 1'b0;
         dsp_sample_slot  <= 6'd0;
         dsp_packet_tick  <= 1'b0;
@@ -670,6 +688,16 @@ always_ff @(posedge clk) begin
                     cipo3_regular_val = sine_lut[(base_phase_p1 << 2) & 9'h1FF];
                     cipo3_ddr_val     = sine_lut[(base_phase_p1 << 3) & 9'h1FF];
 
+                    // Playback override: when enabled, replace the per-channel sines
+                    // with one buffer sample/packet, broadcast to all 8 streams (the
+                    // same time series on every channel). Sinewaves remain the default.
+                    if (playback_en) begin
+                        cipo0_regular_val = playback_sample;  cipo0_ddr_val = playback_sample;
+                        cipo1_regular_val = playback_sample;  cipo1_ddr_val = playback_sample;
+                        cipo2_regular_val = playback_sample;  cipo2_ddr_val = playback_sample;
+                        cipo3_regular_val = playback_sample;  cipo3_ddr_val = playback_sample;
+                    end
+
                     fifo_write_data <= {
                         {cipo3_ddr_val, cipo3_regular_val}, {cipo2_ddr_val, cipo2_regular_val},
                         {cipo1_ddr_val, cipo1_regular_val}, {cipo0_ddr_val, cipo0_regular_val}};
@@ -681,6 +709,11 @@ always_ff @(posedge clk) begin
                     packets_sent <= packets_sent + 1;
                     // Increment dummy data index for continuous sine wave across packets
                     dummy_data_index <= dummy_data_index + 9'd1;
+                    // advance playback one sample/packet, loop at playback_length
+                    if (playback_index + 18'd1 >= playback_length)
+                        playback_index <= 18'd0;
+                    else
+                        playback_index <= playback_index + 18'd1;
                     // DSP tap: the packet is complete -> advance the engine's ring
                     // (one tick per packet, after all 35 slot samples are ingested).
                     dsp_packet_tick <= 1'b1;

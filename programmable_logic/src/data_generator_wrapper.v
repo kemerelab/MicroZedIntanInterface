@@ -17,12 +17,12 @@ module data_generator #(
     input  wire        rstn,
     
     // Control and status interfaces
-    // Widths must match axi_lite_registers (N_CTRL=31, N_STATUS=15). Control
+    // Widths must match axi_lite_registers (N_CTRL=32, N_STATUS=15). Control
     // regs 0..21 are the legacy map; 22..24 configure the aux command
     // sequencer / override layer; 25..27 configure the LFP/DSP engine; 28..30
-    // configure the Tier-2 STFT engine. Status 11 = aux, 12 = read result,
-    // 13 = LFP, 14 = STFT.
-    input  wire [32*31-1:0] ctrl_regs_pl,
+    // configure the Tier-2 STFT engine; 31 configures synthetic-data playback.
+    // Status 11 = aux, 12 = read result, 13 = LFP, 14 = STFT.
+    input  wire [32*32-1:0] ctrl_regs_pl,
     output wire [32*15-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
@@ -77,6 +77,23 @@ module data_generator #(
     output wire            stft_bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 STFT_BRAM WE" *)
     output wire [3:0]      stft_bram_we,
+
+    // Playback BRAM Port A (PS writes the synthetic waveform; PL reads it). Mapped
+    // at 0x8C000000 via a 4th axi_bram_ctrl. 256 KB (64K x 32-bit, 2 samples/word).
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM CLK" *)
+    output wire            playback_bram_clk,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM RST" *)
+    output wire            playback_bram_rst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM ADDR" *)
+    output wire [17:0]     playback_bram_addr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM DIN" *)
+    output wire [31:0]     playback_bram_din,    // PL side reads only -> tied 0
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM DOUT" *)
+    input  wire [31:0]     playback_bram_dout,   // PL reads the waveform here
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM EN" *)
+    output wire            playback_bram_en,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 PLAYBACK_BRAM WE" *)
+    output wire [3:0]      playback_bram_we,     // PL side reads only -> tied 0
 
     // Serial interface signals
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
@@ -161,6 +178,18 @@ module data_generator #(
     wire [31:0]  stft_frame_seq;
     wire         stft_busy, stft_overflow;
 
+    // Playback control (CTRL_REG 31): [0] enable, [25:8] loop length (samples).
+    // PL read port into the playback BRAM (word address from the core).
+    wire        playback_en     = ctrl_regs_pl[31*32 + 0];
+    wire [17:0] playback_length = ctrl_regs_pl[31*32 + 8 +: 18];
+    wire [16:0] pb_rd_addr;
+    assign playback_bram_clk  = clk;
+    assign playback_bram_rst  = ~rstn;
+    assign playback_bram_en   = 1'b1;
+    assign playback_bram_we   = 4'h0;        // PL reads only
+    assign playback_bram_din  = 32'h0;
+    assign playback_bram_addr = {pb_rd_addr[15:0], 2'b00};   // word -> byte (256 KB)
+
     // Data generator status (only 10 registers - wrapper adds 11th..13th)
     wire [32*10-1:0] data_gen_status;
     wire [31:0] aux_status;
@@ -200,7 +229,13 @@ module data_generator #(
         .dsp_sample_valid(dsp_sample_valid),
         .dsp_sample_data(dsp_sample_data),
         .dsp_sample_slot(dsp_sample_slot),
-        .dsp_packet_tick(dsp_packet_tick)
+        .dsp_packet_tick(dsp_packet_tick),
+
+        // Synthetic-data playback (reg 31 + the playback BRAM read port)
+        .playback_en(playback_en),
+        .playback_length(playback_length),
+        .pb_rd_addr(pb_rd_addr),
+        .pb_rd_data(playback_bram_dout)
     );
 
     // Instantiate the on-PL LFP/DSP engine (control regs 25..27; writes its own
