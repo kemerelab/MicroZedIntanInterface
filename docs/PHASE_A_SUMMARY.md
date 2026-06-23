@@ -131,6 +131,17 @@ Clean build from `scripts/create_vivado_project.tcl` + `build_bitstream.tcl`
 
 **LFP engine (`lfp_dsp_inst`) hierarchical: 64 RAMB36 + 2 RAMB18 + 3 DSP48.**
 
+**Firmware:** `scripts/create_vitis_project.py` rebuilt the platform from the new
+`.xsa` and compiled **both cores at −O3 → "Build Finished successfully"** (core0
+`klab-firmware.elf` + core1 + FSBL). This confirms the `_Static_assert(sizeof(
+status_response_t)==168)` passes and all firmware changes (chirp fns, CMD_SET_CHIRP,
+status fields) compile clean.
+
+**256-channel realistic-cadence check:** a focused TB ran the dual-MAC engine at
+the true ~2800-clk/packet rate, lane_mask=0xFF (all 256 ch), 131 taps, R=10 →
+**PASS, no compute_overrun**, 7168 outputs bit-exact. This proves the compute pass
+fits the real-time budget for the *full* configuration, not just the padded TBs.
+
 **Before vs after BRAM (the dual-MAC tradeoff):**
 - Single-MAC baseline (R=15) LFP engine: **~32 RAMB36** (delay lines = 8 lanes ×
   N_SLOTS×RING_DEPTH×16 b, coef RAM small).
