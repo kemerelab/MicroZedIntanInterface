@@ -48,4 +48,7 @@ vitis_workspace/
 build_logs/
 programmable_logic/sim/lfp_*.hex
 programmable_logic/sim/lfp_blk_*.hex
+programmable_logic/sim/wav_*.hex
+programmable_logic/sim/wav_meta.txt
+programmable_logic/sim/__pycache__/
 remote/ripple_envelope.csv
