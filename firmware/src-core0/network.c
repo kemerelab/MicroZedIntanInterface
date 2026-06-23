@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include "xil_io.h"
 #include "shared_print.h"
+#include "pl_dma.h"     // CDMA read for the STFT spectrum (pl_dma_staging, pl_dma_read_addr)
 
 /*
 Binary Command Protocol:
@@ -868,7 +869,10 @@ static struct udp_pcb *stft_pcb = NULL;
 static uint32_t stft_last_seq = 0xFFFFFFFF;
 uint32_t stft_udp_packets_sent = 0;
 // 8-word header + max payload (K x (MAX_N/2+1) complex float32).
-static uint32_t stft_pktbuf[8 + STFT_K * (STFT_MAX_N/2 + 1) * 2] __attribute__((aligned(8)));
+// STFT packets are assembled in the non-cacheable DMA staging region (the spectrum
+// is DMA'd straight there); this offset is clear of the broadband's first-packet
+// use at staging[0]. Packet = 8-word header + up to K*(MAX_N/2+1)*2 float32 words.
+#define STFT_DMA_OFF 0x20000u
 
 void stft_stream_init(void) {
     stft_pcb = udp_new();
@@ -879,47 +883,41 @@ void stft_stream_init(void) {
 
 void stft_stream_service(void) {
     if (!stft_cfg_enable || stft_pcb == NULL) return;
-    // Rate-limit the spectrum stream to ~30/s. The ~2100-word single-beat read +
-    // 8.5 KB jumbo send is expensive, and at small hops (e.g. hop=1 -> 2 kHz) doing
-    // it every loop iteration starves core-0 (broadband stutters, control commands
-    // time out). 30 spectra/s is plenty for a heat-map display; if you need faster,
-    // DMA the read like the broadband path. Cheap to skip (just XTime + compare).
-    static XTime stft_last_send_t = 0;
-    XTime now_t; XTime_GetTime(&now_t);
-    if (stft_last_send_t && perf_timer_hz &&
-        (now_t - stft_last_send_t) < (perf_timer_hz / 30)) return;
     uint32_t st  = pl_stft_read_status();
     uint32_t seq = st & 0x3FFFFFFF;
     if (seq == stft_last_seq) return;              // no new spectrum
-    stft_last_send_t = now_t;                       // commit -> reset the rate gate
 
     uint32_t N      = 1u << stft_cfg_nfft_log2;
     uint32_t nbins  = N / 2 + 1;
     uint32_t pwords = (uint32_t)STFT_K * nbins * 2; // complex float32 (re,im)
     if (pwords > (uint32_t)STFT_K * (STFT_MAX_N/2 + 1) * 2) return;  // config guard
 
-    uint64_t ts = (uint64_t)seq * (stft_cfg_hop ? stft_cfg_hop : 1);
-    stft_pktbuf[0] = 0x5DEC7A00;                    // STFT magic (low)
-    stft_pktbuf[1] = 0xCAFEBABE;                    // magic (high)
-    stft_pktbuf[2] = (uint32_t)ts;
-    stft_pktbuf[3] = (uint32_t)(ts >> 32);
-    stft_pktbuf[4] = (uint32_t)stft_cfg_nfft_log2
-                   | ((uint32_t)STFT_K << 8)
-                   | (((st >> 31) & 1u) << 24);     // [31:24] flags: bit0 = overflow
-    stft_pktbuf[5] = seq;
-    stft_pktbuf[6] = nbins | ((uint32_t)stft_cfg_hop << 16);
-    stft_pktbuf[7] = 0;
-    for (uint32_t i = 0; i < pwords; i++)
-        stft_pktbuf[8 + i] = Xil_In32(STFT_BRAM_BASE_ADDR + (i << 2));
+    // DMA the spectrum out of the STFT BRAM (BRAM->DDR via the CDMA, like the
+    // broadband path) into the non-cacheable staging region -- NOT 2100 single-beat
+    // CPU reads, which starve core-0. The hop now governs the rate freely.
+    uint32_t *pkt = (uint32_t *)(pl_dma_staging + STFT_DMA_OFF);
+    if (pl_dma_read_addr(pkt + 8, (uintptr_t)STFT_BRAM_BASE_ADDR, pwords) != 0) return;
 
-    // integrity: if a new pass started during the copy, the spectrum may be torn.
+    uint64_t ts = (uint64_t)seq * (stft_cfg_hop ? stft_cfg_hop : 1);
+    pkt[0] = 0x5DEC7A00;                            // STFT magic (low)
+    pkt[1] = 0xCAFEBABE;                            // magic (high)
+    pkt[2] = (uint32_t)ts;
+    pkt[3] = (uint32_t)(ts >> 32);
+    pkt[4] = (uint32_t)stft_cfg_nfft_log2
+           | ((uint32_t)STFT_K << 8)
+           | (((st >> 31) & 1u) << 24);             // [31:24] flags: bit0 = overflow
+    pkt[5] = seq;
+    pkt[6] = nbins | ((uint32_t)stft_cfg_hop << 16);
+    pkt[7] = 0;
+
+    // integrity: if a new pass started during the DMA, the spectrum may be torn.
     if ((pl_stft_read_status() & 0x3FFFFFFF) != seq) return;
     stft_last_seq = seq;
 
     uint32_t total = (8 + pwords) * 4;
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_REF);
     if (p != NULL) {
-        p->payload = (void*)stft_pktbuf;
+        p->payload = (void*)pkt;
         ip_addr_t dst; dst.addr = udp_dest_ip;
         udp_sendto(stft_pcb, p, &dst, STFT_UDP_PORT);
         pbuf_free(p);

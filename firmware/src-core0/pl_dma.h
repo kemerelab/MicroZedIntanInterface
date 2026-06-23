@@ -32,4 +32,9 @@ int pl_dma_init(void);
 // error/timeout.
 int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words);
 
+// Copy n_words from an absolute source address via the CDMA (e.g. the STFT
+// results BRAM @0x88000000). src must be in the CDMA's Data address map and dst
+// in the non-cacheable DMA_BUF_ADDR section. Blocks until done. 0 = ok.
+int pl_dma_read_addr(uint32_t *dst, uintptr_t src_addr, uint32_t n_words);
+
 #endif // PL_DMA_H
