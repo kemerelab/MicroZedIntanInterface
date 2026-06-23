@@ -224,6 +224,23 @@ wire  [CHIRP_PHW-1:0] chirp_fmax  = {chirp_fspan_reg, {CHIRP_FSPAN_SHIFT{1'b0}}}
 wire  [CHIRP_PHW-1:0] chirp_rstep = {{(CHIRP_PHW-12-CHIRP_RATE_SHIFT){1'b0}},
                                      chirp_rate_reg, {CHIRP_RATE_SHIFT{1'b0}}};
 
+// Per-slot chirp phase, REGISTERED off the current cycle_counter. The
+// channel_offset*stride multiply lives here in its own pipeline stage so it
+// stays OFF the cycle_counter->fifo_write_data critical path (which fails 84 MHz
+// otherwise). cycle_counter is stable across a cycle's 80 states and the per-
+// packet chirp_phase_acc only advances at the packet boundary, so the registered
+// ch_phase is the correct value for the current slot well before it is consumed
+// at state 77. The 8 lane LUT reads + output mux (short) stay at state 77.
+logic [CHIRP_PHW-1:0] chirp_ch_phase;
+always_ff @(posedge clk) begin : chirp_phase_precompute
+    logic [5:0]  c_off;
+    logic [10:0] s_prod;
+    c_off  = (cycle_counter >= 6'd2) ? (cycle_counter - 6'd2) : 6'd0;
+    s_prod = c_off[4:0] * chirp_stride_reg;     // 5b*6b, isolated stage
+    chirp_ch_phase <= chirp_phase_acc +
+                      ({{(CHIRP_PHW-11){1'b0}}, s_prod} <<< CHIRP_STRIDE_SHIFT);
+end
+
 // Initialize sine lookup table
 initial begin
     // Generate 512-point sine wave (signed 16-bit, ±32767 range)
@@ -699,21 +716,14 @@ always_ff @(posedge clk) begin
                     // The phase comes from the dual-accumulator NCO (advanced once
                     // per packet); the top 9 bits of (phase_acc + per-channel
                     // offset) index the existing 512-entry sine LUT. No BRAM.
-                    logic [5:0]            channel_offset;   // slot index 0..31
-                    logic [10:0]           stride_prod;      // 5b*6b small multiply
-                    logic [CHIRP_PHW-1:0]  ch_phase;         // slot phase contribution
                     logic [15:0]           cv [0:7];         // 8 lane sine values
-                    channel_offset = (cycle_counter >= 6'd2) ? (cycle_counter - 6'd2) : 6'd0;
-                    // per-slot phase offset = (slot * stride) << CHIRP_STRIDE_SHIFT
-                    // (small 5b*6b product -> placed in the high phase bits).
-                    stride_prod = channel_offset[4:0] * chirp_stride_reg;
-                    ch_phase = chirp_phase_acc +
-                               ({{(CHIRP_PHW-11){1'b0}}, stride_prod} <<< CHIRP_STRIDE_SHIFT);
+                    // ch_phase (= phase_acc + slot*stride) is the REGISTERED
+                    // chirp_ch_phase (the multiply is pipelined off this path).
                     for (int l = 0; l < 8; l++) begin
                         logic [CHIRP_PHW-1:0] lane_phase;
-                        // additionally fan the 8 lanes out by 1/8-period steps so
-                        // a single packet shows 8 distinct phases too.
-                        lane_phase = ch_phase +
+                        // fan the 8 lanes out by 1/8-period steps so a single
+                        // packet shows 8 distinct phases too.
+                        lane_phase = chirp_ch_phase +
                                      ({{(CHIRP_PHW-3){1'b0}}, l[2:0]} <<< (CHIRP_PHW-3));
                         cv[l] = sine_lut[lane_phase[CHIRP_LUT_IDX_HI:CHIRP_LUT_IDX_LO]];
                     end
