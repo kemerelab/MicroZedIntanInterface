@@ -8,8 +8,8 @@ Branch: `claude/tier3-wavelet` (off `main`). No push / no merge (per the task). 
   pure-Python generalized-Morse (γ=3) multirate reference to **zero tolerance** — 128/128
   complex (re,im) bins, no overrun, all 256 frames processed.
 - **Full PL integration done** (RTL wrapper, AXI regs, block design, firmware, net.py) and
-  the **bitstream builds.** Timing: the first build missed by 6 endpoints (WNS −0.070 ns) on
-  one wavelet path; I pipelined that path and the rebuild result is recorded in §4 below.
+  the **bitstream builds with timing CLOSED: WNS = +0.286 ns @ 84 MHz, 0 failing endpoints**
+  (after pipelining one wavelet path — see §4).
 - IP-free / pure fixed-point throughout. **4 DSP48 / 220, BRAM 64.6 % / 140** for the whole
   design at K=32.
 
@@ -98,16 +98,25 @@ No Xilinx IP in the engine (pure fixed-point).
 
 - **First build:** bitstream wrote successfully; timing **missed by 6 endpoints**,
   **WNS = −0.070 ns** on the 84 MHz clock. All 6 failing paths were the wavelet
-  `v_emit_im` path: the last-tap beat did DSP-accumulate → round → variable barrel-shift →
-  saturate (an 18-level path with an 11-deep CARRY4) in a single cycle — the known ~0.45 ns
-  84 MHz margin couldn't absorb it.
+  `im1_reg → v_emit_im` path: the last-tap beat did DSP-accumulate → round → variable
+  barrel-shift → saturate (an 18-level path with an 11-deep CARRY4) in a single cycle — the
+  known ~0.45 ns 84 MHz margin couldn't absorb it.
 - **Fix:** pipelined the emit — on the last tap, register the *raw* accumulators + gain +
   routing; apply the round/variable-shift/saturate the *next* cycle. The FSM already waits on
   the emit pulse, so the extra latency is free in the per-frame budget. Sim re-verified
   bit-exact PASS after the change.
-- **Rebuild result:** _[see build_logs/build2_*.log — fill in the final WNS]_. The fix targets
-  exactly the failing path; if a stray endpoint remains, the same raw-capture split applies to
-  the re path / the hb path, or bump the emit to a 2-deep register.
+- **Final build: TIMING CLOSED. WNS = +0.286 ns, WHS = +0.050 ns, 0 failing endpoints**
+  (84972 total) on the 84 MHz path. The worst remaining path is a reset synchronizer (MET,
+  +7.3 ns) — no wavelet path is critical anymore. Bitstream + `.xsa` written.
+
+> **Build gotcha (note for the user):** `scripts/build_bitstream.tcl`'s `reset_run synth_1`
+> resets only the *top* run, NOT the per-module OOC synth run for `data_generator` (it is a
+> BD module-reference). An incremental `build_bitstream.tcl` after editing
+> `wavelet_cqt_engine.sv` therefore re-implemented the STALE pre-pipeline netlist (the second
+> build still showed −0.070). The fix is to also `reset_run design_1_data_generator_0_synth_1`
+> (see `build_logs/rebuild_ooc.tcl`) OR follow the canonical CLAUDE.md flow: re-run
+> `create_vivado_project.tcl` (regenerates all OOC runs) after a PL change. The closed-timing
+> result above is from a clean OOC re-synth.
 
 > Reproduce: `source /opt/Xilinx/2025.1/Vivado/settings64.sh`, then
 > `vivado -mode batch -source scripts/create_vivado_project.tcl` and
@@ -175,5 +184,3 @@ collide. The 0x84–0x87 command block and 0x88000000 BRAM were deliberately lef
    raise the column-skip in `wav_stream_service`.
 4. **HW bring-up** when a board is available: `wav_config` → `wav_on` → `wav_recv`, cross-check
    against the analytic chirp (log sweep traces a diagonal across scales) and a swept generator.
-```
-```
