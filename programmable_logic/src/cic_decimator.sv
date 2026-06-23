@@ -196,6 +196,7 @@ module cic_decimator #(
             istate <= I_IDLE; i_lane <= '0; i_slot <= '0; i_stage <= '0;
             i_run_acc <= '0; i_phase <= 1'b0; i_pending_comb <= 1'b0; i_x <= '0;
             i_stage_r <= '0; i_addr_r <= '0; k_addr_r <= '0;
+            integ_addr <= '0; comb_addr <= '0; integ_wr <= '0; comb_wr <= '0;
             kstate <= K_IDLE; k_lane <= '0; k_slot <= '0; k_stage <= '0;
             k_run <= '0; k_phase <= 1'b0; k_frame_first <= 1'b0;
             integ_we <= 1'b0; comb_we <= 1'b0;
