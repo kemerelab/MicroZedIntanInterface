@@ -75,17 +75,26 @@ module cic_decimator #(
     localparam signed [OUT_W:0] OUT_MIN = -(1 <<< (OUT_W-1));
 
     // -----------------------------------------------------------------
-    // Input capture: latch the just-arrived sample word per slot so the
-    // INTEGRATE pass (which runs after packet_tick) can read it.
+    // Input capture: latch the just-arrived sample word per slot into in_buf,
+    // then SNAPSHOT the whole packet into in_snap at packet_tick. The INTEGRATE
+    // pass reads in_snap, NOT in_buf -- on real hardware the next packet's slots
+    // start arriving ~80 clk after packet_tick (continuous acquisition) and would
+    // overwrite in_buf mid-pass (lane-major read order means late-lane slot reads
+    // would see the next packet's data). The snapshot decouples the running pass
+    // from the live ingest. (Cost: a second 32x8x16b register array, trivial.)
     // -----------------------------------------------------------------
-    logic signed [DATA_W-1:0] in_buf [0:N_SLOTS-1][0:N_LANES-1];
+    logic signed [DATA_W-1:0] in_buf  [0:N_SLOTS-1][0:N_LANES-1];
+    logic signed [DATA_W-1:0] in_snap [0:N_SLOTS-1][0:N_LANES-1];
     genvar gs, gl;
     generate
         for (gs = 0; gs < N_SLOTS; gs++) begin : g_inbuf_s
             for (gl = 0; gl < N_LANES; gl++) begin : g_inbuf_l
-                always_ff @(posedge clk)
+                always_ff @(posedge clk) begin
                     if (sample_valid && sample_slot == SLOT_W'(gs))
                         in_buf[gs][gl] <= $signed(sample_data[gl*DATA_W +: DATA_W]);
+                    if (packet_tick)
+                        in_snap[gs][gl] <= in_buf[gs][gl];   // freeze the packet
+                end
             end
         end
     endgenerate
@@ -237,7 +246,7 @@ module cic_decimator #(
                             // read addr is combinational (= i_chan); just latch
                             // the channel + input for the phase1 write.
                             i_ch_r     <= i_chan;
-                            i_x_r      <= in_buf[i_slot][i_lane];
+                            i_x_r      <= in_snap[i_slot][i_lane];  // frozen packet
                             i_phase    <= 1'b1;
                         end else begin
                             // integ_rd valid: cascade, write back
