@@ -17,12 +17,13 @@ module data_generator #(
     input  wire        rstn,
     
     // Control and status interfaces
-    // Widths must match axi_lite_registers (N_CTRL=28, N_STATUS=13). Control
+    // Widths must match axi_lite_registers (N_CTRL=32, N_STATUS=15). Control
     // regs 0..21 are the legacy map; 22..24 configure the aux command
-    // sequencer / override layer; 25..27 configure the LFP/DSP engine. Status
-    // 11 = aux status, 12 = read result.
-    input  wire [32*28-1:0] ctrl_regs_pl,
-    output wire [32*14-1:0]  status_regs_pl,
+    // sequencer / override layer; 25..27 configure the LFP/DSP engine; 28..31
+    // configure the Tier-3 wavelet scalogram engine. Status 11 = aux status,
+    // 12 = read result, 13 = LFP, 14 = wavelet.
+    input  wire [32*32-1:0] ctrl_regs_pl,
+    output wire [32*15-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
     input  wire [7:0]  digital_in,
@@ -59,6 +60,23 @@ module data_generator #(
     output wire            lfp_bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM WE" *)
     output wire [3:0]      lfp_bram_we,
+
+    // Wavelet (Tier-3) results BRAM Port A (PL writes the scalogram columns;
+    // PS reads via a third axi_bram_ctrl mapped at 0x90000000).
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM CLK" *)
+    output wire            wav_bram_clk,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM RST" *)
+    output wire            wav_bram_rst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM ADDR" *)
+    output wire [BRAM_ADDR_WIDTH-1:0] wav_bram_addr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM DIN" *)
+    output wire [BRAM_DATA_WIDTH-1:0] wav_bram_din,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM DOUT" *)
+    input  wire [BRAM_DATA_WIDTH-1:0] wav_bram_dout,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM EN" *)
+    output wire            wav_bram_en,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM WE" *)
+    output wire [3:0]      wav_bram_we,
 
     // Serial interface signals
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
@@ -135,6 +153,15 @@ module data_generator #(
     wire [15:0]  lfp_wr_addr;
     wire         lfp_overrun;
 
+    // Decimated LFP output stream tap -> the Tier-3 wavelet engine.
+    wire         lfp_out_valid;
+    wire [7:0]   lfp_out_channel;     // $clog2(8*32) = 8
+    wire signed [15:0] lfp_out_data;
+    wire         lfp_out_frame_start;
+    // Wavelet engine status
+    wire [31:0]  wav_frame_seq;
+    wire         wav_busy, wav_overrun;
+
     // Data generator status (only 10 registers - wrapper adds 11th..13th)
     wire [32*10-1:0] data_gen_status;
     wire [31:0] aux_status;
@@ -199,7 +226,41 @@ module data_generator #(
         .bram_en(lfp_bram_en),
         .bram_we(lfp_bram_we),
         .lfp_wr_addr(lfp_wr_addr),
-        .lfp_overrun(lfp_overrun)
+        .lfp_overrun(lfp_overrun),
+        // decimated output stream tap (signed) -> wavelet engine
+        .lfp_out_valid(lfp_out_valid),
+        .lfp_out_channel(lfp_out_channel),
+        .lfp_out_data(lfp_out_data),
+        .lfp_out_frame_start(lfp_out_frame_start)
+    );
+
+    // Instantiate the Tier-3 on-PL wavelet scalogram engine (control regs
+    // 28..31; writes its own results BRAM read by the PS via a 3rd
+    // axi_bram_ctrl mapped at 0x90000000). K=32 first build, single MAC.
+    wavelet_dsp_block #(
+        .N_CH(256), .K(32), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
+        .RES_AW(BRAM_ADDR_WIDTH)
+    ) wav_dsp_inst (
+        .clk(clk),
+        .rstn(rstn),
+        .lfp_out_valid(lfp_out_valid),
+        .lfp_out_channel(lfp_out_channel),
+        .lfp_out_data(lfp_out_data),
+        .lfp_frame_start(lfp_out_frame_start),
+        .wav_cfg(ctrl_regs_pl[28*32 +: 32]),
+        .wav_gain(ctrl_regs_pl[29*32 +: 32]),
+        .wav_data(ctrl_regs_pl[30*32 +: 32]),
+        .wav_strobe(ctrl_regs_pl[31*32 +: 32]),
+        .bram_clk(wav_bram_clk),
+        .bram_rst(wav_bram_rst),
+        .bram_addr(wav_bram_addr),
+        .bram_din(wav_bram_din),
+        .bram_dout(wav_bram_dout),
+        .bram_en(wav_bram_en),
+        .bram_we(wav_bram_we),
+        .wav_frame_seq(wav_frame_seq),
+        .wav_busy(wav_busy),
+        .wav_overrun(wav_overrun)
     );
 
     // Instantiate the FIFO-BRAM interface
@@ -252,6 +313,11 @@ module data_generator #(
     // LFP engine status: [15:0] output-BRAM write byte-address (PS read pointer),
     // [16] sticky compute-overrun flag.
     assign status_regs_pl[13*32 +: 32] = {15'd0, lfp_overrun, lfp_wr_addr};
+
+    // Wavelet (Tier-3) engine status: [29:0] completed scalogram-column count
+    // (the PS polls this to detect a fresh column), [30] busy, [31] sticky
+    // compute-overrun flag.
+    assign status_regs_pl[14*32 +: 32] = {wav_overrun, wav_busy, wav_frame_seq[29:0]};
 
     // Port-B master outputs are the same broadcast commands as port A.
     assign csn_b  = csn;

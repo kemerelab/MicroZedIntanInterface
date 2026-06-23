@@ -56,7 +56,16 @@ module lfp_dsp_block #(
 
     // ---- status ----
     output logic [LFP_BRAM_AW-1:0] lfp_wr_addr,  // current write byte address (PS read ptr)
-    output logic                   lfp_overrun   // engine compute overrun (sticky)
+    output logic                   lfp_overrun,  // engine compute overrun (sticky)
+
+    // ---- decimated LFP output stream tap (signed) -> downstream DSP (Tier-3
+    //      wavelet engine). Same stream the BRAM packer consumes, exposed for
+    //      consumers that want the signed samples directly (mirrors the
+    //      claude/tier2-stft lfp_dsp_block tap). ----
+    output logic                   lfp_out_valid,
+    output logic [$clog2(N_LANES*N_SLOTS)-1:0] lfp_out_channel,
+    output logic signed [OUT_W-1:0] lfp_out_data,
+    output logic                   lfp_out_frame_start
 );
 
     localparam int RING_AW = $clog2(RING_DEPTH);
@@ -191,5 +200,14 @@ module lfp_dsp_block #(
     assign bram_addr   = {bram_word_r, 2'b00};               // word -> byte address
     assign bram_din    = bram_din_r;
     assign lfp_wr_addr = {wr_word, 2'b00};
+
+    // Expose the engine's decimated output stream (signed) for downstream
+    // consumers (Tier-3 wavelet engine). This is the same stream the BRAM
+    // packer above consumes -- the wavelet engine wants signed samples, so it
+    // taps here (no offset-binary conversion needed downstream).
+    assign lfp_out_valid       = out_valid;
+    assign lfp_out_channel     = out_channel;
+    assign lfp_out_data        = out_data;
+    assign lfp_out_frame_start = out_frame_start;
 
 endmodule
