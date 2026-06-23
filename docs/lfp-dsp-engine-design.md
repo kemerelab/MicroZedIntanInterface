@@ -5,7 +5,14 @@ implemented. It captures the first module of an on-fabric **preprocessing engine
 at closed-loop work: a decimating low-pass filter that extracts an **LFP band** and streams
 it as a second, independent data product.
 
-LFP = anti-alias low-pass (~600 Hz) + downsample 30 kHz → **2 kHz** (decimation `R = 15`).
+LFP = anti-alias low-pass + downsample 30 kHz → **3 kHz** (decimation `R = 10`,
+Phase A; was 2 kHz / `R = 15`). See `docs/PHASE_A_SUMMARY.md` for the 3 kHz
+anti-alias design (a ~131-tap Kaiser run on a **dual-MAC** time-shared engine,
+passband ~1 kHz, ≥46 dB alias rejection) and the analytic-chirp debug signal.
+The single-stage budget at R=10 is ~109 taps/256ch per MAC, so the engine now
+processes `N_MAC=2` taps/clock (DSP48 is otherwise free); the delay-line BRAM is
+unchanged. A CIC÷5 + halfband÷2 variant (`cic_decimator.sv`/`lfp_halfband.sv`)
+that would cut the delay-line BRAM ~5× is the documented alternative.
 
 ## 1. Why these choices (the short version)
 
