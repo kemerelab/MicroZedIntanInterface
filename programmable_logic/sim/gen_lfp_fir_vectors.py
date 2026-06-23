@@ -13,9 +13,9 @@ DATA_W    = 16
 COEF_W    = 18
 COEF_FRAC = 17
 OUT_W     = 16
-NUM_TAPS  = 25
-DECIM_R   = 15
-K_PACKETS = 300                 # > 256 so the delay-line ring wrap is exercised
+NUM_TAPS  = 131                 # odd -> exercises the N_MAC=2 partial last group
+DECIM_R   = 10                  # Phase A: 30 kHz / 10 = 3 kHz LFP rate
+K_PACKETS = 320                 # > 256 so the delay-line ring wrap is exercised
 LANE_MASK = 0b1010_0101         # lanes 0, 2, 5, 7 (non-contiguous -> tests lane skip)
 
 # ---- tiny deterministic LCG (no numpy dependency) ----

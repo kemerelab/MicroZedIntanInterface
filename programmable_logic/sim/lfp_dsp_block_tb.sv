@@ -10,9 +10,9 @@ module lfp_dsp_block_tb;
     localparam int FIRST_AMP = 2;
     localparam int N_CYCLES  = 35;
     localparam int COEF_W    = 18;
-    localparam int NUM_TAPS  = 25;
-    localparam int DECIM_R   = 15;
-    localparam int K_PACKETS = 165;
+    localparam int NUM_TAPS  = 131;   // Phase A 3 kHz anti-alias (odd -> partial group)
+    localparam int DECIM_R   = 10;    // Phase A: 30 kHz / 10 = 3 kHz
+    localparam int K_PACKETS = 160;
     localparam logic [7:0] LANE_MASK = 8'b0010_0101;
     localparam int LFP_BRAM_AW = 14;
     localparam int MAXW = 8192;
@@ -93,9 +93,11 @@ module lfp_dsp_block_tb;
             end
             @(negedge clk); dsp_packet_tick = 1;
             @(negedge clk); dsp_packet_tick = 0;
-            repeat (3) @(negedge clk);
+            // Pad the inter-packet gap to cover the worst-case compute pass
+            // (real HW has ~2800 clk/packet*R; this TB streams far faster).
+            repeat (1200) @(negedge clk);
         end
-        repeat (4000) @(posedge clk);
+        repeat (12000) @(posedge clk);
 
         // ---- compare ----
         if (n_got != n_exp) begin

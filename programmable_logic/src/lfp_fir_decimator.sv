@@ -1,9 +1,10 @@
 // =====================================================================
 // lfp_fir_decimator.sv
 //
-// On-PL LFP extraction: a time-shared decimating FIR. ONE pipelined MAC
-// serves every (lane x slot) channel, so the whole thing costs ~1 DSP48 +
-// a per-lane delay-line BRAM + a small shared coefficient RAM.
+// On-PL LFP extraction: a time-shared decimating FIR. A pipelined MAC
+// (now N_MAC parallel lanes) serves every (lane x slot) channel, so the
+// whole thing costs ~N_MAC DSP48 + a per-lane delay-line BRAM + a small
+// shared coefficient RAM.
 //
 // See docs/lfp-dsp-engine-design.md for the architecture rationale.
 //
@@ -26,19 +27,21 @@
 // compute FSM walks the lane_mask-enabled channels and, for each, MACs the
 // last `num_taps` samples against the shared coefficients.
 //
-// Throughput note (v1 = single MAC, 1 tap/clock)
-// ----------------------------------------------
+// Throughput note (N_MAC parallel taps/clock)
+// -------------------------------------------
 // The compute pass must finish within DECIM_R packets. Budget (84 MHz,
 // 30 kHz packets) = DECIM_R * ~2800 clocks. Cost = n_enabled_channels *
-// num_taps MACs. At R=15 that is ~42000 clocks for up to ~256ch*160tap, or
-// ~128ch*312tap. If the host exceeds the budget, `compute_overrun` latches
-// and the late frame is dropped (never corrupted). Parallel MAC lanes are a
-// later optimization.
+// ceil(num_taps/N_MAC) MACs. At R=10 a single MAC tops out at ~109 taps for
+// 256 ch (256*109 ~ 28000); N_MAC=2 doubles that to ~218 taps, so a real
+// 3 kHz anti-alias (~130 taps) fits with margin. If the host exceeds the
+// budget, `compute_overrun` latches and the late frame is dropped (never
+// corrupted). DSP48 is otherwise 100% free, so a 2nd lane is cheap.
 //
-// MAC pipeline (3-cycle latency)
-//   s0 (addr gen): drive dl_rd_addr/coef_rd_addr (comb) + register markers
-//   s1 (read)    : dl_rdata[ag_lane], coef_rdata valid -> register product
-//   s2 (acc)     : accumulate; emit output on the last tap of a channel
+// MAC pipeline (3-cycle latency, identical per lane)
+//   s0 (addr gen): drive dl_rd_addr[k]/coef_rd_addr[k] (comb) + register markers
+//   s1 (read)    : dl_rdata[k][ag_lane], coef_rdata[k] valid -> register product
+//   s2 (acc)     : accumulate the lane products; emit output on the last group
+//                  of a channel
 // =====================================================================
 
 module lfp_fir_decimator #(
@@ -50,6 +53,7 @@ module lfp_fir_decimator #(
     parameter  int ACC_W      = 48,    // MAC accumulator width
     parameter  int RING_DEPTH = 256,   // delay-line depth per channel (power of 2)
     parameter  int OUT_W      = 16,    // decimated output sample width
+    parameter  int N_MAC      = 2,     // parallel MAC lanes (taps processed per clock)
     // ---- derived widths (do not override) ----
     localparam int SLOT_W  = (N_SLOTS  <= 1) ? 1 : $clog2(N_SLOTS),
     localparam int RING_AW = $clog2(RING_DEPTH),
@@ -95,42 +99,52 @@ module lfp_fir_decimator #(
 
     // =====================================================================
     // Coefficient RAM (shared, RING_DEPTH deep). Written from the config
-    // side, read by the MAC. Coefficients are only written while stopped,
-    // but keep it a true dual-port so a stray overlap can't X the read.
+    // side, read by the MAC. With N_MAC > 1 the MAC reads N_MAC adjacent taps
+    // per cycle, so the coef RAM is replicated N_MAC ways (same contents,
+    // independent read addresses) -- replication is cheaper than a true
+    // multi-port BRAM and keeps each read single-cycle.
     // =====================================================================
-    logic signed [COEF_W-1:0] coef_ram [0:RING_DEPTH-1];
-    logic signed [COEF_W-1:0] coef_rdata;
-    logic        [RING_AW-1:0] coef_rd_addr;
+    logic signed [COEF_W-1:0] coef_rdata [0:N_MAC-1];
+    logic        [RING_AW-1:0] coef_rd_addr [0:N_MAC-1];
 
-    initial for (int ii = 0; ii < RING_DEPTH; ii++) coef_ram[ii] = '0;  // BRAM config-init
-
-    always_ff @(posedge clk) begin
-        if (coef_wr_en) coef_ram[coef_wr_addr] <= coef_wr_data;
-        coef_rdata <= coef_ram[coef_rd_addr];
-    end
+    genvar gc;
+    generate
+        for (gc = 0; gc < N_MAC; gc++) begin : g_coef_ram
+            logic signed [COEF_W-1:0] coef_ram [0:RING_DEPTH-1];
+            initial for (int ii = 0; ii < RING_DEPTH; ii++) coef_ram[ii] = '0;  // BRAM config-init
+            always_ff @(posedge clk) begin
+                if (coef_wr_en) coef_ram[coef_wr_addr] <= coef_wr_data;
+                coef_rdata[gc] <= coef_ram[coef_rd_addr[gc]];
+            end
+        end
+    endgenerate
 
     // =====================================================================
     // Delay-line BRAMs: one per lane, [slot][ring]. Written in parallel on
     // sample_valid (lanes share the write address); read one at a time
     // during compute (lanes share the read address, selected lane muxed out).
+    // With N_MAC > 1 each lane mem exposes N_MAC read ports (replicated mem).
     // =====================================================================
     logic [RING_AW-1:0] wr_pos;        // ring position of the in-progress packet
-    logic [MEM_AW-1:0]  dl_wr_addr, dl_rd_addr;
+    logic [MEM_AW-1:0]  dl_wr_addr;
+    logic [MEM_AW-1:0]  dl_rd_addr [0:N_MAC-1];
     logic               dl_we;
-    logic signed [DATA_W-1:0] dl_rdata [0:N_LANES-1];
+    logic signed [DATA_W-1:0] dl_rdata [0:N_LANES-1][0:N_MAC-1];
 
     assign dl_we      = sample_valid;
     assign dl_wr_addr = sample_slot * RING_DEPTH + wr_pos;
 
-    genvar gl;
+    genvar gl, gm;
     generate
         for (gl = 0; gl < N_LANES; gl++) begin : g_lane_mem
-            logic signed [DATA_W-1:0] mem [0:N_SLOTS*RING_DEPTH-1];
-            initial for (int ii = 0; ii < N_SLOTS*RING_DEPTH; ii++) mem[ii] = '0;  // BRAM config-init
-            always_ff @(posedge clk) begin
-                if (dl_we)
-                    mem[dl_wr_addr] <= sample_data[gl*DATA_W +: DATA_W];
-                dl_rdata[gl] <= mem[dl_rd_addr];
+            for (gm = 0; gm < N_MAC; gm++) begin : g_mac_port
+                logic signed [DATA_W-1:0] mem [0:N_SLOTS*RING_DEPTH-1];
+                initial for (int ii = 0; ii < N_SLOTS*RING_DEPTH; ii++) mem[ii] = '0;  // BRAM config-init
+                always_ff @(posedge clk) begin
+                    if (dl_we)
+                        mem[dl_wr_addr] <= sample_data[gl*DATA_W +: DATA_W];
+                    dl_rdata[gl][gm] <= mem[dl_rd_addr[gm]];
+                end
             end
         end
     endgenerate
@@ -169,28 +183,36 @@ module lfp_fir_decimator #(
 
     // =====================================================================
     // Compute FSM (address generation). Walks lane_mask-enabled channels,
-    // emitting one (delay,coef) read per tap. Markers ride the pipeline so
-    // the accumulate stage knows the first/last tap of each channel.
+    // emitting one (delay,coef) read GROUP of N_MAC adjacent taps per cycle.
+    // Markers ride the pipeline so the accumulate stage knows the first/last
+    // group of each channel. cur_tap advances by N_MAC each cycle.
     // =====================================================================
     typedef enum logic [1:0] {C_IDLE, C_RUN, C_DRAIN} cstate_t;
     cstate_t            cstate;
     logic [LANE_W-1:0]  cur_lane;
     logic [SLOT_W-1:0]  cur_slot;
-    logic [TAPN_W-1:0]  cur_tap;
+    logic [TAPN_W-1:0]  cur_tap;       // base tap of the current group
     logic [1:0]         drain_cnt;
 
     // s0 markers (registered here, valid next cycle alongside the RAM reads).
+    // tap_valid[k]: is base+k a live tap (< num_taps)? lets odd num_taps work.
     logic               ag_valid, ag_first, ag_last;
+    logic [N_MAC-1:0]   ag_tapvld;
     logic [CH_W-1:0]    ag_chan;
     logic [LANE_W-1:0]  ag_lane;
 
     wire last_lane = (cur_lane == LANE_W'(N_LANES-1));
     wire last_slot = (cur_slot == SLOT_W'(N_SLOTS-1));
-    wire last_tap  = (cur_tap  == num_taps - 1'b1);
+    // last group of a channel: this group covers tap num_taps-1
+    wire last_group = ((cur_tap + TAPN_W'(N_MAC)) >= num_taps);
 
     always_comb begin
-        dl_rd_addr   = cur_slot * RING_DEPTH + ((head_snap - cur_tap) & RMASK);
-        coef_rd_addr = cur_tap[RING_AW-1:0];
+        for (int k = 0; k < N_MAC; k++) begin
+            logic [TAPN_W-1:0] t;
+            t = cur_tap + TAPN_W'(k);
+            dl_rd_addr[k]   = cur_slot * RING_DEPTH + ((head_snap - t[RING_AW-1:0]) & RMASK);
+            coef_rd_addr[k] = t[RING_AW-1:0];
+        end
     end
 
     always_ff @(posedge clk) begin
@@ -199,6 +221,7 @@ module lfp_fir_decimator #(
             cur_lane <= '0; cur_slot <= '0; cur_tap <= '0;
             drain_cnt<= '0;
             ag_valid <= 1'b0; ag_first <= 1'b0; ag_last <= 1'b0;
+            ag_tapvld<= '0;
             ag_chan  <= '0; ag_lane <= '0;
             busy     <= 1'b0;
             compute_overrun <= 1'b0;
@@ -222,14 +245,17 @@ module lfp_fir_decimator #(
                 C_RUN: begin
                     busy <= 1'b1;
                     if (lane_mask[cur_lane]) begin
-                        // Emit a tap for (cur_lane, cur_slot, cur_tap).
+                        // Emit a tap GROUP for (cur_lane, cur_slot, cur_tap..+N_MAC-1).
                         ag_valid <= 1'b1;
                         ag_first <= (cur_tap == '0);
-                        ag_last  <= last_tap;
+                        ag_last  <= last_group;
                         ag_lane  <= cur_lane;
                         ag_chan  <= CH_W'(cur_lane * N_SLOTS + cur_slot);
+                        // per-lane validity for odd num_taps
+                        for (int k = 0; k < N_MAC; k++)
+                            ag_tapvld[k] <= ((cur_tap + TAPN_W'(k)) < num_taps);
 
-                        if (last_tap) begin
+                        if (last_group) begin
                             cur_tap <= '0;
                             if (last_slot) begin
                                 cur_slot <= '0;
@@ -239,7 +265,7 @@ module lfp_fir_decimator #(
                                 cur_slot <= cur_slot + 1'b1;
                             end
                         end else begin
-                            cur_tap <= cur_tap + 1'b1;
+                            cur_tap <= cur_tap + TAPN_W'(N_MAC);
                         end
                     end else begin
                         // Skip a disabled lane (no emit).
@@ -262,17 +288,29 @@ module lfp_fir_decimator #(
     end
 
     // =====================================================================
-    // MAC pipeline.
+    // MAC pipeline (N_MAC parallel lanes feeding one accumulator).
     // =====================================================================
-    // s1: product (consumes the s0 markers + the now-valid RAM reads).
-    logic signed [PROD_W-1:0] prod1;
+    // s1: products (consume the s0 markers + the now-valid RAM reads). Invalid
+    // taps (base+k >= num_taps) are forced to 0 so a partial last group adds
+    // nothing.
+    logic signed [PROD_W-1:0] prod1 [0:N_MAC-1];
     logic                     v1, first1, last1;
     logic [CH_W-1:0]          chan1;
     always_ff @(posedge clk) begin
         if (!rstn) begin
-            prod1 <= '0; v1 <= 1'b0; first1 <= 1'b0; last1 <= 1'b0; chan1 <= '0;
+            for (int k = 0; k < N_MAC; k++) prod1[k] <= '0;
+            v1 <= 1'b0; first1 <= 1'b0; last1 <= 1'b0; chan1 <= '0;
         end else begin
-            prod1  <= dl_rdata[ag_lane] * coef_rdata;   // both signed
+            // NB: size operands to PROD_W before the multiply. A bare `a*b`
+            // inside a ternary takes a self-determined width of max(|a|,|b|)
+            // (18), truncating the product; the explicit signed'() widen keeps
+            // full DATA_W+COEF_W precision (matches the original single-MAC path
+            // where the wide assignment target propagated the width).
+            for (int k = 0; k < N_MAC; k++)
+                prod1[k] <= ag_tapvld[k]
+                          ? (PROD_W'($signed(dl_rdata[ag_lane][k])) *
+                             PROD_W'($signed(coef_rdata[k])))
+                          : '0;
             v1     <= ag_valid;
             first1 <= ag_first;
             last1  <= ag_last;
@@ -285,11 +323,15 @@ module lfp_fir_decimator #(
     // unsigned and turn negative partial sums into huge positives.
     localparam signed [ACC_W-1:0] RND = ACC_W'(1) <<< (COEF_FRAC-1);  // round-to-nearest
     logic signed [ACC_W-1:0] acc, acc_sum, rounded;
+    logic signed [ACC_W-1:0] prod_sum;
     logic                    frame_first;     // 1 until the first output of a pass
     wire                     mac_out = v1 & last1;
 
     always_comb begin
-        acc_sum = first1 ? $signed(prod1) : (acc + prod1);
+        prod_sum = '0;
+        for (int k = 0; k < N_MAC; k++)
+            prod_sum = prod_sum + $signed(prod1[k]);
+        acc_sum = first1 ? prod_sum : (acc + prod_sum);
         rounded = (acc_sum + RND) >>> COEF_FRAC;
     end
 
