@@ -32,7 +32,12 @@ module lfp_dsp_block_tb;
     logic [LFP_BRAM_AW-1:0] lfp_wr_addr;
     logic                   lfp_overrun;
 
-    lfp_dsp_block #(.LFP_BRAM_AW(LFP_BRAM_AW)) dut (
+    // This TB checks the integration *plumbing* (amplifier-slot gate, offset-
+    // binary<->signed, 2x16 BRAM packing) against the FIR reference, so force the
+    // FIR datapath (USE_CIC=0). The CIC datapath's math is verified end-to-end by
+    // cic_chain_tb (CIC->glue->halfband, bit-exact); the wrapper plumbing is
+    // identical for both since only the engine in the middle changes.
+    lfp_dsp_block #(.LFP_BRAM_AW(LFP_BRAM_AW), .USE_CIC(0)) dut (
         .clk(clk), .rstn(rstn),
         .dsp_sample_valid(dsp_sample_valid), .dsp_sample_data(dsp_sample_data),
         .dsp_sample_slot(dsp_sample_slot), .dsp_packet_tick(dsp_packet_tick),
