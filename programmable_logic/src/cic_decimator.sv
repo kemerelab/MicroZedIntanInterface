@@ -114,10 +114,13 @@ module cic_decimator #(
     kstate_t           kstate;
     logic [LANE_W-1:0] i_lane, k_lane;
     logic [SLOT_W-1:0] i_slot, k_slot;
-    logic              i_phase, k_phase;
+    logic              i_phase;
+    logic [1:0]        k_phase;          // 0=read, 1=cascade+register, 2=saturate+emit
     logic [CH_W-1:0]   i_ch_r, k_ch_r;
     logic signed [DATA_W-1:0] i_x_r;
-    logic              i_pending_comb, k_frame_first;
+    logic              i_pending_comb, k_frame_first, k_emit_r, k_fs_r;
+    logic signed [ACC_W-1:0] k_res_r;     // registered comb-cascade result (pipeline cut)
+    logic [CH_W-1:0]   k_ch_r2;           // channel held into the emit phase
     wire [CH_W-1:0] i_chan = CH_W'(i_lane * N_SLOTS + i_slot);
     wire [CH_W-1:0] k_chan = CH_W'(k_lane * N_SLOTS + k_slot);
     wire i_last_slot = (i_slot == SLOT_W'(N_SLOTS-1));
@@ -216,8 +219,9 @@ module cic_decimator #(
         if (!rstn) begin
             istate <= I_IDLE; i_lane <= '0; i_slot <= '0; i_phase <= 1'b0;
             i_ch_r <= '0; i_x_r <= '0; i_pending_comb <= 1'b0;
-            kstate <= K_IDLE; k_lane <= '0; k_slot <= '0; k_phase <= 1'b0;
-            k_ch_r <= '0; k_frame_first <= 1'b0;
+            kstate <= K_IDLE; k_lane <= '0; k_slot <= '0; k_phase <= 2'd0;
+            k_ch_r <= '0; k_frame_first <= 1'b0; k_emit_r <= 1'b0; k_fs_r <= 1'b0;
+            k_res_r <= '0; k_ch_r2 <= '0;
             integ_waddr <= '0; comb_waddr <= '0; integ_wr <= '0; comb_wr <= '0;
             integ_we <= 1'b0; comb_we <= 1'b0;
             out_valid <= 1'b0; out_channel <= '0; out_data <= '0; out_frame_start <= 1'b0;
@@ -276,41 +280,48 @@ module cic_decimator #(
                 default: istate <= I_IDLE;
             endcase
 
-            // ============ COMB ============
+            // ============ COMB (3-phase, pipelined to close timing) ============
+            // phase0: drive combinational read addrs (integ_raddr/comb_raddr=k_chan)
+            // phase1: integ_rd/comb_rd valid -> comb cascade; REGISTER the result
+            //         (k_res_r) + write comb_ram. (cuts the long cascade->output path)
+            // phase2: gain-shift + saturate + emit out_data. Channel advances here.
+            // The comb pass has a ~14000-clk window for 256ch*3cyc -> plenty.
+            k_emit_r <= 1'b0;
             case (kstate)
                 K_IDLE: ;
                 K_RUN: begin
                     busy <= 1'b1;
                     if (lane_mask[k_lane]) begin
-                        if (k_phase == 1'b0) begin
-                            // read addrs combinational (integ_raddr/comb_raddr =
-                            // k_chan); latch the channel for the phase1 write.
-                            k_ch_r     <= k_chan;
-                            k_phase    <= 1'b1;
-                        end else begin
-                            logic [WIDE_W-1:0] ncprev;
-                            logic signed [ACC_W-1:0] res, y;
-                            comb_cascade(integ_rd, comb_rd, ncprev, res);
-                            comb_waddr <= k_ch_r;
-                            comb_wr    <= ncprev;
-                            comb_we    <= 1'b1;
-                            y = res >>> GAIN_SHIFT;
-                            out_valid   <= 1'b1;
-                            out_channel <= k_ch_r;
-                            if (y > OUT_MAX)      out_data <= OUT_MAX[OUT_W-1:0];
-                            else if (y < OUT_MIN) out_data <= OUT_MIN[OUT_W-1:0];
-                            else                  out_data <= y[OUT_W-1:0];
-                            out_frame_start <= k_frame_first;
-                            k_frame_first   <= 1'b0;
-                            k_phase <= 1'b0;
-                            if (k_last_slot) begin
-                                k_slot <= '0;
-                                if (k_last_lane) kstate <= K_DONE;
-                                else             k_lane <= k_lane + 1'b1;
-                            end else k_slot <= k_slot + 1'b1;
-                        end
+                        case (k_phase)
+                            2'd0: begin
+                                k_ch_r  <= k_chan;
+                                k_phase <= 2'd1;
+                            end
+                            2'd1: begin
+                                logic [WIDE_W-1:0] ncprev;
+                                logic signed [ACC_W-1:0] res;
+                                comb_cascade(integ_rd, comb_rd, ncprev, res);
+                                comb_waddr <= k_ch_r;
+                                comb_wr    <= ncprev;
+                                comb_we    <= 1'b1;
+                                k_res_r    <= res;            // pipeline register
+                                k_ch_r2    <= k_ch_r;
+                                k_fs_r     <= k_frame_first;
+                                k_emit_r   <= 1'b1;           // emit next cycle
+                                k_frame_first <= 1'b0;
+                                k_phase <= 2'd2;
+                            end
+                            default: begin // 2'd2: advance to the next channel
+                                k_phase <= 2'd0;
+                                if (k_last_slot) begin
+                                    k_slot <= '0;
+                                    if (k_last_lane) kstate <= K_DONE;
+                                    else             k_lane <= k_lane + 1'b1;
+                                end else k_slot <= k_slot + 1'b1;
+                            end
+                        endcase
                     end else begin
-                        k_slot <= '0; k_phase <= 1'b0;
+                        k_slot <= '0; k_phase <= 2'd0;
                         if (k_last_lane) kstate <= K_DONE;
                         else             k_lane <= k_lane + 1'b1;
                     end
@@ -318,6 +329,18 @@ module cic_decimator #(
                 K_DONE: begin kstate <= K_IDLE; busy <= 1'b0; end
                 default: kstate <= K_IDLE;
             endcase
+
+            // ---- emit stage (registered off k_res_r; short path: shift+sat) ----
+            if (k_emit_r) begin
+                logic signed [ACC_W-1:0] y;
+                y = k_res_r >>> GAIN_SHIFT;
+                out_valid   <= 1'b1;
+                out_channel <= k_ch_r2;
+                if (y > OUT_MAX)      out_data <= OUT_MAX[OUT_W-1:0];
+                else if (y < OUT_MIN) out_data <= OUT_MIN[OUT_W-1:0];
+                else                  out_data <= y[OUT_W-1:0];
+                out_frame_start <= k_fs_r;
+            end
         end
     end
 endmodule
