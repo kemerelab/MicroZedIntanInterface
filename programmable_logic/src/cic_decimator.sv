@@ -5,26 +5,32 @@
 // per channel, for the LFP front end. Integrators run at the input rate (one
 // pass per packet_tick); combs run at the output rate (every R-th tick). All
 // per-channel state lives in BRAM (no multipliers, no coefficient RAM, no long
-// FIR delay line) -- this is the ~5x BRAM saving vs the single-stage FIR delay
-// lines. One CIC instance feeds the lfp_halfband (/2) comp stage.
+// FIR delay line) -- this is the ~5x delay-line-BRAM saving vs the single-stage
+// FIR. One CIC instance feeds the lfp_halfband (/2) comp stage.
+//
+// State storage: the N_ORDER integrator (and comb) accumulators for a channel
+// are packed into ONE wide word at address = channel. So each channel is a clean
+// single read -> combinational cascade -> single write-back; no per-stage RAM
+// addressing dance, no read-latency hazards. N_ORDER is small (4) so the
+// combinational adder cascade is cheap at 84 MHz.
 //
 // Fixed-point: the integrator/comb accumulators are MODULAR two's-complement at
 // ACC_W bits. The classic CIC guarantee: as long as
 //   ACC_W >= input_W + ceil(N_ORDER*log2(R*M)),
-// the modular wraparound is exact and the comb output is correct. The output is
+// the modular wraparound is exact and the comb output is correct. For R=5, M=1,
+// N=4, input 16b: need >= 16 + 10 = 26 -> ACC_W=32 is comfortable. The output is
 // the final comb value arithmetic-right-shifted by GAIN_SHIFT (= the same
 // ceil(...) term -> ~unity DC gain) then saturated to OUT_W.
 //
 // Schedule (all channels advance together: one new sample per packet_tick):
-//   * INTEGRATE pass (every tick): walk channels x stages, cascade-add into the
-//     per-channel integrator RAM. Pipelined read->add->write.
-//   * On the R-th tick the COMB pass runs after INTEGRATE: walk channels,
-//     cascade-diff the last integrator value against the per-channel comb RAM,
-//     emit the gain-normalized output.
-// Budget @ 84 MHz: INTEGRATE = N_CH*N_ORDER ops/tick (256*4=1024 << 2800 clk);
-// COMB = N_CH*N_ORDER ops every R ticks (<< R*2800). compute_overrun latches if
-// a pass cannot finish before the next tick (never corrupts: the late frame is
-// dropped).
+//   * INTEGRATE pass (every tick): per channel read its packed integrator word,
+//     cascade-add the input through N_ORDER stages, write the new word back.
+//   * On the R-th tick the COMB pass runs after INTEGRATE: per channel read the
+//     packed integrator word (top stage = the decimated value) + the packed comb
+//     word, cascade-diff, write comb back, emit the gain-normalized output.
+// Budget @ 84 MHz: INTEGRATE = 2*N_CH cyc/tick (2*256=512 << 2800); COMB the same
+// every R ticks. compute_overrun latches if a pass can't finish before the next
+// tick (never corrupts: the late frame is dropped).
 // =====================================================================
 
 module cic_decimator #(
@@ -35,14 +41,13 @@ module cic_decimator #(
     parameter  int N_ORDER   = 4,
     parameter  int ACC_W     = 32,
     parameter  int OUT_W     = 16,
-    parameter  int GAIN_SHIFT = 10,   // = ceil(N_ORDER*log2(R*M)); host/build picks
+    parameter  int GAIN_SHIFT = 10,   // = ceil(N_ORDER*log2(R*M))
     // ---- derived ----
     localparam int SLOT_W = (N_SLOTS  <= 1) ? 1 : $clog2(N_SLOTS),
     localparam int N_CH   = N_LANES * N_SLOTS,
     localparam int CH_W   = (N_CH    <= 1) ? 1 : $clog2(N_CH),
     localparam int LANE_W = (N_LANES <= 1) ? 1 : $clog2(N_LANES),
-    localparam int ORD_W  = (N_ORDER <= 1) ? 1 : $clog2(N_ORDER),
-    localparam int STAGE_AW = $clog2(N_CH * N_ORDER)
+    localparam int WIDE_W = N_ORDER * ACC_W
 ) (
     input  logic                      clk,
     input  logic                      rstn,
@@ -71,8 +76,7 @@ module cic_decimator #(
 
     // -----------------------------------------------------------------
     // Input capture: latch the just-arrived sample word per slot so the
-    // INTEGRATE pass (which runs after packet_tick) can read it. We need the
-    // whole packet's slots, so store them in a small per-(slot,lane) buffer.
+    // INTEGRATE pass (which runs after packet_tick) can read it.
     // -----------------------------------------------------------------
     logic signed [DATA_W-1:0] in_buf [0:N_SLOTS-1][0:N_LANES-1];
     genvar gs, gl;
@@ -87,20 +91,60 @@ module cic_decimator #(
     endgenerate
 
     // -----------------------------------------------------------------
-    // Per-channel integrator + comb state RAMs. Address = ch*N_ORDER + stage.
+    // Per-channel packed state RAMs (one wide word per channel).
     // -----------------------------------------------------------------
-    logic signed [ACC_W-1:0] integ_ram [0:N_CH*N_ORDER-1];
-    logic signed [ACC_W-1:0] comb_ram  [0:N_CH*N_ORDER-1];
-    initial begin
-        for (int i = 0; i < N_CH*N_ORDER; i++) begin integ_ram[i]='0; comb_ram[i]='0; end
+    logic [WIDE_W-1:0] integ_ram [0:N_CH-1];
+    logic [WIDE_W-1:0] comb_ram  [0:N_CH-1];
+    initial for (int i = 0; i < N_CH; i++) begin integ_ram[i]='0; comb_ram[i]='0; end
+
+    // ---- FSM state (declared up here so the combinational read-address mux can
+    // reference the current channel before the FSM bodies below) ----
+    typedef enum logic [1:0] {I_IDLE, I_RUN, I_DONE} istate_t;
+    typedef enum logic [1:0] {K_IDLE, K_RUN, K_DONE} kstate_t;
+    istate_t           istate;
+    kstate_t           kstate;
+    logic [LANE_W-1:0] i_lane, k_lane;
+    logic [SLOT_W-1:0] i_slot, k_slot;
+    logic              i_phase, k_phase;
+    logic [CH_W-1:0]   i_ch_r, k_ch_r;
+    logic signed [DATA_W-1:0] i_x_r;
+    logic              i_pending_comb, k_frame_first;
+    wire [CH_W-1:0] i_chan = CH_W'(i_lane * N_SLOTS + i_slot);
+    wire [CH_W-1:0] k_chan = CH_W'(k_lane * N_SLOTS + k_slot);
+    wire i_last_slot = (i_slot == SLOT_W'(N_SLOTS-1));
+    wire i_last_lane = (i_lane == LANE_W'(N_LANES-1));
+    wire k_last_slot = (k_slot == SLOT_W'(N_SLOTS-1));
+    wire k_last_lane = (k_lane == LANE_W'(N_LANES-1));
+
+    // Read address is COMBINATIONAL (driven from the FSM state at phase0) so the
+    // registered read `*_rd` captures the addressed word at the phase0->phase1
+    // edge and is valid AT phase1 -- a registered read address would land the
+    // data one cycle late. The write address/data are registered (applied the
+    // cycle after the read), to a separate held write address so a read and a
+    // write to different locations coexist on the same inferred-BRAM port.
+    logic [CH_W-1:0]   integ_raddr, comb_raddr;     // combinational read address
+    logic [CH_W-1:0]   integ_waddr, comb_waddr;     // registered write address
+    logic [WIDE_W-1:0] integ_rd, integ_wr, comb_rd, comb_wr;
+    logic              integ_we, comb_we;
+    always_ff @(posedge clk) begin
+        integ_rd <= integ_ram[integ_raddr];
+        if (integ_we) integ_ram[integ_waddr] <= integ_wr;
+        comb_rd  <= comb_ram[comb_raddr];
+        if (comb_we) comb_ram[comb_waddr] <= comb_wr;
+    end
+
+    // combinational read-address mux from whichever pass is active at phase0
+    always_comb begin
+        integ_raddr = i_chan;
+        comb_raddr  = k_chan;
+        if (kstate == K_RUN) integ_raddr = k_chan;   // comb reads integrators too
     end
 
     // -----------------------------------------------------------------
     // Tick scheduling.
     // -----------------------------------------------------------------
     logic [$clog2(R+1)-1:0] decim_cnt;
-    logic                   run_int;    // pulse: start an integrate pass
-    logic                   run_comb;   // pulse: start a comb pass (after integrate)
+    logic                   run_int, run_comb;
     always_ff @(posedge clk) begin
         if (!rstn) begin
             decim_cnt <= '0; run_int <= 1'b0; run_comb <= 1'b0;
@@ -110,95 +154,62 @@ module cic_decimator #(
                 run_int <= 1'b1;
                 if (decim_cnt + 1'b1 >= R[$clog2(R+1)-1:0]) begin
                     decim_cnt <= '0;
-                    run_comb  <= 1'b1;     // comb pass is queued behind the integrate pass
-                end else begin
-                    decim_cnt <= decim_cnt + 1'b1;
-                end
+                    run_comb  <= 1'b1;
+                end else decim_cnt <= decim_cnt + 1'b1;
             end
         end
     end
 
     // -----------------------------------------------------------------
-    // INTEGRATE pass FSM. For each enabled channel, cascade the N_ORDER
-    // integrators: integ[0]+=x; integ[1]+=integ[0]; ... Sequentially walks
-    // (lane,slot,stage). Pipelined: s0 addr, s1 read, s2 add+write.
-    // The cascade input for stage k is the just-written stage k-1 value, so we
-    // process stages strictly in order and forward the running accumulator.
+    // INTEGRATE FSM: per channel, 2 cycles (phase0 = drive read addr; phase1 =
+    // integ_rd valid -> combinational cascade -> write back). Walk (lane,slot).
+    // (state regs declared above the read-address mux.)
+    // combinational integrator cascade over the packed read word
     // -----------------------------------------------------------------
-    typedef enum logic [1:0] {I_IDLE, I_RUN, I_DONE} istate_t;
-    istate_t            istate;
-    logic [LANE_W-1:0]  i_lane;
-    logic [SLOT_W-1:0]  i_slot;
-    logic [ORD_W:0]     i_stage;        // 0..N_ORDER-1
-    logic signed [ACC_W-1:0] i_run_acc; // running cascade accumulator (= prev stage out)
-    logic               i_pending_comb; // remember to launch comb after integrate
-
-    wire i_last_stage = (i_stage == ORD_W'(N_ORDER-1));
-    wire i_last_slot  = (i_slot  == SLOT_W'(N_SLOTS-1));
-    wire i_last_lane  = (i_lane  == LANE_W'(N_LANES-1));
-    wire [CH_W-1:0] i_chan = CH_W'(i_lane * N_SLOTS + i_slot);
+    function automatic logic [WIDE_W-1:0] integ_cascade
+            (input logic [WIDE_W-1:0] state, input logic signed [ACC_W-1:0] x);
+        logic [WIDE_W-1:0] nstate;
+        logic signed [ACC_W-1:0] acc, s_i;
+        acc = x;
+        for (int i = 0; i < N_ORDER; i++) begin
+            s_i = $signed(state[i*ACC_W +: ACC_W]);
+            s_i = s_i + acc;                  // modular ACC_W add
+            nstate[i*ACC_W +: ACC_W] = s_i;
+            acc = s_i;                        // cascade: next stage input = this output
+        end
+        return nstate;
+    endfunction
 
     // -----------------------------------------------------------------
-    // COMB pass FSM. For each enabled channel, cascade the N_ORDER combs:
-    // d[0]=integ_last - cprev[0]; cprev[0]=integ_last; d[1]=d[0]-cprev[1]; ...
-    // Emits the gain-normalized, saturated output on the last stage.
-    // -----------------------------------------------------------------
-    typedef enum logic [1:0] {K_IDLE, K_RUN, K_DONE} kstate_t;
-    kstate_t            kstate;
-    logic [LANE_W-1:0]  k_lane;
-    logic [SLOT_W-1:0]  k_slot;
-    logic [ORD_W:0]     k_stage;
-    logic signed [ACC_W-1:0] k_run;     // running comb cascade value
-    logic               k_frame_first;
-    wire k_last_stage = (k_stage == ORD_W'(N_ORDER-1));
-    wire k_last_slot  = (k_slot  == SLOT_W'(N_SLOTS-1));
-    wire k_last_lane  = (k_lane  == LANE_W'(N_LANES-1));
-    wire [CH_W-1:0] k_chan = CH_W'(k_lane * N_SLOTS + k_slot);
-
-    // RAM access arbitration: INTEGRATE owns integ_ram, COMB reads integ_ram
-    // (last stage) + read/writes comb_ram. The two passes never overlap (comb is
-    // launched only after integrate finishes), so a single combinational addr mux
-    // per RAM is safe.
-    logic [STAGE_AW-1:0] integ_addr;
-    logic signed [ACC_W-1:0] integ_rd, integ_wr;
-    logic                integ_we;
-    logic [STAGE_AW-1:0] comb_addr;
-    logic signed [ACC_W-1:0] comb_rd, comb_wr;
-    logic                comb_we;
-
-    always_ff @(posedge clk) begin
-        integ_rd <= integ_ram[integ_addr];
-        if (integ_we) integ_ram[integ_addr] <= integ_wr;
-        comb_rd  <= comb_ram[comb_addr];
-        if (comb_we) comb_ram[comb_addr] <= comb_wr;
-    end
-
-    // ---- INTEGRATE datapath (read stage k state @ s1, add running acc, write) ----
-    // We march stage-by-stage; the running accumulator i_run_acc holds the output
-    // of the previous stage (or the input x for stage 0). Because read latency is
-    // 1, we register the address at s0, read at s1, and the add/write also at s1+1.
-    // To keep it simple and correct we use a 2-cycle-per-stage schedule.
-    logic               i_phase;        // 0 = issue read, 1 = add+write
-    logic [STAGE_AW-1:0] i_addr_r;
-    logic signed [ACC_W-1:0] i_x;       // stage-0 input for the current channel (held)
-    logic [ORD_W:0]     i_stage_r;      // stage being written at phase1
-    // combinational cascade input at phase1: stage 0 = channel input, else the
-    // previous stage's output (held in i_run_acc from the prior phase1).
-    logic signed [ACC_W-1:0] i_casc_in;
-    always_comb i_casc_in = (i_stage_r == 0) ? i_x : i_run_acc;
-
-    // ---- COMB datapath ----
-    logic               k_phase;        // 0 = issue reads, 1 = compute+write
-    logic [STAGE_AW-1:0] k_addr_r;
+    // COMB FSM: per channel, 2 cycles (phase0 = drive read addrs; phase1 =
+    // integ_rd + comb_rd valid -> combinational comb cascade -> write comb back,
+    // emit output). Walk (lane,slot). (state regs declared above.)
+    // combinational comb cascade. Input = the top integrator stage (decimated
+    // value). cprev (packed) are the per-stage previous inputs; returns the new
+    // packed cprev and the final difference.
+    function automatic void comb_cascade
+            (input  logic [WIDE_W-1:0] integ_state,
+             input  logic [WIDE_W-1:0] cprev,
+             output logic [WIDE_W-1:0] ncprev,
+             output logic signed [ACC_W-1:0] result);
+        logic signed [ACC_W-1:0] stage, prev, diff;
+        stage = $signed(integ_state[(N_ORDER-1)*ACC_W +: ACC_W]);  // last integrator
+        for (int i = 0; i < N_ORDER; i++) begin
+            prev = $signed(cprev[i*ACC_W +: ACC_W]);
+            diff = stage - prev;               // modular ACC_W
+            ncprev[i*ACC_W +: ACC_W] = stage;  // store current as next prev
+            stage = diff;                      // cascade
+        end
+        result = stage;
+    endfunction
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
-            istate <= I_IDLE; i_lane <= '0; i_slot <= '0; i_stage <= '0;
-            i_run_acc <= '0; i_phase <= 1'b0; i_pending_comb <= 1'b0; i_x <= '0;
-            i_stage_r <= '0; i_addr_r <= '0; k_addr_r <= '0;
-            integ_addr <= '0; comb_addr <= '0; integ_wr <= '0; comb_wr <= '0;
-            kstate <= K_IDLE; k_lane <= '0; k_slot <= '0; k_stage <= '0;
-            k_run <= '0; k_phase <= 1'b0; k_frame_first <= 1'b0;
+            istate <= I_IDLE; i_lane <= '0; i_slot <= '0; i_phase <= 1'b0;
+            i_ch_r <= '0; i_x_r <= '0; i_pending_comb <= 1'b0;
+            kstate <= K_IDLE; k_lane <= '0; k_slot <= '0; k_phase <= 1'b0;
+            k_ch_r <= '0; k_frame_first <= 1'b0;
+            integ_waddr <= '0; comb_waddr <= '0; integ_wr <= '0; comb_wr <= '0;
             integ_we <= 1'b0; comb_we <= 1'b0;
             out_valid <= 1'b0; out_channel <= '0; out_data <= '0; out_frame_start <= 1'b0;
             busy <= 1'b0; compute_overrun <= 1'b0;
@@ -208,7 +219,6 @@ module cic_decimator #(
             out_valid <= 1'b0;
             out_frame_start <= 1'b0;
 
-            // overrun: a new tick arrives while a pass is still running
             if (run_int && (istate != I_IDLE || kstate != K_IDLE))
                 compute_overrun <= 1'b1;
 
@@ -216,45 +226,33 @@ module cic_decimator #(
             case (istate)
                 I_IDLE: begin
                     if (run_int) begin
-                        istate <= I_RUN;
-                        i_lane <= '0; i_slot <= '0; i_stage <= '0;
-                        i_phase <= 1'b0;
-                        i_run_acc <= '0;
+                        istate <= I_RUN; i_lane <= '0; i_slot <= '0; i_phase <= 1'b0;
                         i_pending_comb <= run_comb;
-                        i_x <= in_buf[0][0];          // (slot0,lane0) loaded below
                     end
                 end
                 I_RUN: begin
                     busy <= 1'b1;
                     if (lane_mask[i_lane]) begin
                         if (i_phase == 1'b0) begin
-                            // issue read of stage state; latch the channel input
-                            // and the stage index for phase1.
-                            integ_addr <= STAGE_AW'(i_chan * N_ORDER + i_stage);
-                            i_addr_r   <= STAGE_AW'(i_chan * N_ORDER + i_stage);
-                            i_stage_r  <= i_stage;
-                            i_x        <= in_buf[i_slot][i_lane];  // x for this channel
+                            // read addr is combinational (= i_chan); just latch
+                            // the channel + input for the phase1 write.
+                            i_ch_r     <= i_chan;
+                            i_x_r      <= in_buf[i_slot][i_lane];
                             i_phase    <= 1'b1;
                         end else begin
-                            // integ_rd valid now: new = state + cascade_in
-                            integ_wr  <= integ_rd + i_casc_in;
-                            integ_addr<= i_addr_r;
-                            integ_we  <= 1'b1;
-                            i_run_acc <= integ_rd + i_casc_in;   // feed next stage
-                            i_phase   <= 1'b0;
-                            // advance (lane,slot,stage)
-                            if (i_last_stage) begin
-                                i_stage <= '0;
-                                if (i_last_slot) begin
-                                    i_slot <= '0;
-                                    if (i_last_lane) istate <= I_DONE;
-                                    else             i_lane <= i_lane + 1'b1;
-                                end else i_slot <= i_slot + 1'b1;
-                            end else i_stage <= i_stage + 1'b1;
+                            // integ_rd valid: cascade, write back
+                            integ_waddr <= i_ch_r;
+                            integ_wr    <= integ_cascade(integ_rd, i_x_r);
+                            integ_we    <= 1'b1;
+                            i_phase     <= 1'b0;
+                            if (i_last_slot) begin
+                                i_slot <= '0;
+                                if (i_last_lane) istate <= I_DONE;
+                                else             i_lane <= i_lane + 1'b1;
+                            end else i_slot <= i_slot + 1'b1;
                         end
                     end else begin
-                        // skip disabled lane
-                        i_slot <= '0; i_stage <= '0; i_phase <= 1'b0;
+                        i_slot <= '0; i_phase <= 1'b0;
                         if (i_last_lane) istate <= I_DONE;
                         else             i_lane <= i_lane + 1'b1;
                     end
@@ -262,12 +260,9 @@ module cic_decimator #(
                 I_DONE: begin
                     istate <= I_IDLE;
                     if (i_pending_comb) begin
-                        kstate  <= K_RUN;
-                        k_lane  <= '0; k_slot <= '0; k_stage <= '0;
-                        k_phase <= 1'b0; k_run <= '0; k_frame_first <= 1'b1;
-                    end else if (kstate == K_IDLE) begin
-                        busy <= 1'b0;
-                    end
+                        kstate <= K_RUN; k_lane <= '0; k_slot <= '0; k_phase <= 1'b0;
+                        k_frame_first <= 1'b1;
+                    end else if (kstate == K_IDLE) busy <= 1'b0;
                 end
                 default: istate <= I_IDLE;
             endcase
@@ -279,53 +274,39 @@ module cic_decimator #(
                     busy <= 1'b1;
                     if (lane_mask[k_lane]) begin
                         if (k_phase == 1'b0) begin
-                            // read comb prev state AND (stage 0) the last integrator
-                            comb_addr  <= STAGE_AW'(k_chan * N_ORDER + k_stage);
-                            k_addr_r   <= STAGE_AW'(k_chan * N_ORDER + k_stage);
-                            if (k_stage == 0)
-                                integ_addr <= STAGE_AW'(k_chan * N_ORDER + (N_ORDER-1));
-                            k_phase <= 1'b1;
+                            // read addrs combinational (integ_raddr/comb_raddr =
+                            // k_chan); latch the channel for the phase1 write.
+                            k_ch_r     <= k_chan;
+                            k_phase    <= 1'b1;
                         end else begin
-                            // for stage 0, k_run source = last integrator value
-                            // (integ_rd valid this cycle); else k_run already holds
-                            // previous stage diff.
-                            logic signed [ACC_W-1:0] stage_in, diff;
-                            stage_in = (k_stage == 0) ? integ_rd : k_run;
-                            diff      = stage_in - comb_rd;     // x[n]-x[n-1]
-                            comb_wr   <= stage_in;              // store current as prev
-                            comb_addr <= k_addr_r;
-                            comb_we   <= 1'b1;
-                            k_run     <= diff;
-                            k_phase   <= 1'b0;
-                            if (k_last_stage) begin
-                                // emit gain-normalized + saturated output
-                                logic signed [ACC_W-1:0] y;
-                                y = diff >>> GAIN_SHIFT;
-                                out_valid   <= 1'b1;
-                                out_channel <= k_chan;
-                                if (y > OUT_MAX)      out_data <= OUT_MAX[OUT_W-1:0];
-                                else if (y < OUT_MIN) out_data <= OUT_MIN[OUT_W-1:0];
-                                else                  out_data <= y[OUT_W-1:0];
-                                out_frame_start <= k_frame_first;
-                                k_frame_first   <= 1'b0;
-                                k_stage <= '0;
-                                if (k_last_slot) begin
-                                    k_slot <= '0;
-                                    if (k_last_lane) kstate <= K_DONE;
-                                    else             k_lane <= k_lane + 1'b1;
-                                end else k_slot <= k_slot + 1'b1;
-                            end else k_stage <= k_stage + 1'b1;
+                            logic [WIDE_W-1:0] ncprev;
+                            logic signed [ACC_W-1:0] res, y;
+                            comb_cascade(integ_rd, comb_rd, ncprev, res);
+                            comb_waddr <= k_ch_r;
+                            comb_wr    <= ncprev;
+                            comb_we    <= 1'b1;
+                            y = res >>> GAIN_SHIFT;
+                            out_valid   <= 1'b1;
+                            out_channel <= k_ch_r;
+                            if (y > OUT_MAX)      out_data <= OUT_MAX[OUT_W-1:0];
+                            else if (y < OUT_MIN) out_data <= OUT_MIN[OUT_W-1:0];
+                            else                  out_data <= y[OUT_W-1:0];
+                            out_frame_start <= k_frame_first;
+                            k_frame_first   <= 1'b0;
+                            k_phase <= 1'b0;
+                            if (k_last_slot) begin
+                                k_slot <= '0;
+                                if (k_last_lane) kstate <= K_DONE;
+                                else             k_lane <= k_lane + 1'b1;
+                            end else k_slot <= k_slot + 1'b1;
                         end
                     end else begin
-                        k_slot <= '0; k_stage <= '0; k_phase <= 1'b0;
+                        k_slot <= '0; k_phase <= 1'b0;
                         if (k_last_lane) kstate <= K_DONE;
                         else             k_lane <= k_lane + 1'b1;
                     end
                 end
-                K_DONE: begin
-                    kstate <= K_IDLE;
-                    busy   <= 1'b0;
-                end
+                K_DONE: begin kstate <= K_IDLE; busy <= 1'b0; end
                 default: kstate <= K_IDLE;
             endcase
         end
