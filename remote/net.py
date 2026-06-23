@@ -1259,6 +1259,45 @@ def design_lfp_lowpass(num_taps, cutoff_hz=1250.0, fs=30000.0, window="kaiser",
     scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
     return [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
 
+def design_cic_comp_fir(num_taps=43, fc=1300.0, beta=6.0,
+                        R_cic=5, n_order=4, gain_shift=10, fs_in=30000.0):
+    """Droop-compensated comp-FIR / halfband (/2) for the CIC^4(/5)+FIR(/2) = /10
+    LFP datapath (USE_CIC=1, the default build). Designed at the CIC output rate
+    fs_in/R_cic (6 kHz) via frequency sampling: the target passband response is
+    1/CIC-droop so the COMBINED /10 chain is flat to ~1 kHz (<=0.02 dB), with
+    ~ -54 dB worst alias-into-passband and unity DC gain. Quantized Q1.17.
+    MUST match programmable_logic/sim/gen_cic_chain_vectors.py exactly."""
+    import math
+    fs1 = fs_in / R_cic                       # comp-FIR input rate (6 kHz)
+    def cic_mag(f):
+        w = math.pi * f / fs_in
+        if abs(w) < 1e-12: return 1.0
+        d = R_cic * math.sin(w)
+        return (math.sin(R_cic * w) / d) ** n_order if abs(d) > 1e-15 else 1.0
+    cic_dc = (R_cic ** n_order) / (1 << gain_shift)
+    win = _kaiser_window(num_taps, beta)
+    M = num_taps - 1
+    a = M / 2.0
+    def desired(f):
+        if f > fc: return 0.0
+        dr = cic_mag(f)
+        return (1.0 / dr) if dr > 1e-6 else 1.0
+    L = 2048
+    fs_grid = [fs1 / 2 * k / L for k in range(L + 1)]
+    Hd = [desired(f) for f in fs_grid]
+    df = fs_grid[1] - fs_grid[0]
+    h = [0.0] * num_taps
+    for n in range(num_taps):
+        acc = 0.0
+        for k in range(L + 1):
+            wgt = 0.5 if (k == 0 or k == L) else 1.0
+            acc += wgt * Hd[k] * math.cos(2 * math.pi * fs_grid[k] * (n - a) / fs1)
+        h[n] = acc * df * 2.0 / (fs1 / 2) * win[n]
+    dc = sum(h) or 1.0
+    h = [c * (1.0 / cic_dc) / dc for c in h]   # combined DC gain -> unity
+    scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
+    return [max(-lim, min(lim - 1, int(round(c * scale)))) for c in h]
+
 def lfp_upload_coeffs(sock, coeffs):
     """Stream taps through the indirect window (first write clears the pointer).
     This is a 100+ command burst that the board acks one-by-one, so use a generous
@@ -1274,17 +1313,35 @@ def lfp_upload_coeffs(sock, coeffs):
             return False
     return True
 
-def configure_lfp(sock, lane_mask=0x0F, decim_R=10, num_taps=131, cutoff_hz=1250.0):
+def configure_lfp(sock, lane_mask=0x0F, datapath="cic", num_taps=None,
+                  cutoff_hz=1250.0):
     """Disable, set channels/params, design + upload the LP kernel. Call
     lfp_enable(sock, True) afterwards to start streaming on UDP 5001.
-    Phase A default: R=10 -> 3 kHz LFP, 131-tap Kaiser 3 kHz anti-alias."""
+
+    datapath="cic" (default, matches the USE_CIC=1 build): uploads the 43-tap
+      droop-compensated comp-FIR halfband; the engine's CIC^4(/5)+halfband(/2)=/10
+      decimation is hardwired -> 3 kHz LFP. num_taps defaults to 43.
+    datapath="fir" (USE_CIC=0 fallback build): uploads a 131-tap single-stage
+      Kaiser 3 kHz anti-alias; decim_R=10. num_taps defaults to 131.
+
+    Either way R=10 -> 3 kHz; the LFP packet's self-describing R field is set
+    accordingly so the host/plugin auto-tracks the rate."""
     send_binary_command(sock, CMD_LFP_ENABLE, 0)
     send_binary_command(sock, CMD_LFP_SET_CHANNELS, lane_mask & 0xFF)
-    send_binary_command(sock, CMD_LFP_SET_PARAMS, decim_R & 0xFF, num_taps & 0xFF)
-    coeffs = design_lfp_lowpass(num_taps, cutoff_hz)
-    lfp_upload_coeffs(sock, coeffs)
-    print(f"[LFP] configured: mask=0x{lane_mask:02X} R={decim_R} taps={num_taps} "
-          f"cutoff={cutoff_hz:.0f}Hz -> {fs_out_str(decim_R)}")
+    if datapath == "cic":
+        nt = num_taps if num_taps else 43
+        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
+        coeffs = design_cic_comp_fir(nt)
+        lfp_upload_coeffs(sock, coeffs)
+        print(f"[LFP] configured CIC^4(/5)+halfband(/2)=/10: mask=0x{lane_mask:02X} "
+              f"comp_taps={nt} -> 3000 sps out (flat to ~1 kHz)")
+    else:
+        nt = num_taps if num_taps else 131
+        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
+        coeffs = design_lfp_lowpass(nt, cutoff_hz)
+        lfp_upload_coeffs(sock, coeffs)
+        print(f"[LFP] configured single-stage FIR /10: mask=0x{lane_mask:02X} "
+              f"taps={nt} cutoff={cutoff_hz:.0f}Hz -> 3000 sps out")
     return coeffs
 
 def fs_out_str(decim_R):
@@ -1890,7 +1947,7 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
-        print(f"  LFP (Tier-1): lfp_config [mask] [R=10] [taps=131] [cutoff=1250], lfp_on, lfp_off, lfp_recv [n]")
+        print(f"  LFP (Tier-1): lfp_config [mask] [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n]")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  auto_cable_detect - Automated cable detection!")
@@ -2010,13 +2067,13 @@ def tcp_control():
                 elif cmd == "bench_sweep":
                     udp_bench_sweep(sock)
                 elif cmd == "lfp_config" or cmd.startswith("lfp_config "):
-                    # lfp_config [mask] [decimR] [taps] [cutoff_hz]  (configure while off)
+                    # lfp_config [mask] [datapath=cic|fir] [taps]  (configure while off)
+                    # default = CIC^4(/5)+halfband(/2)=/10 -> 3 kHz, 43 comp taps.
                     parts = cmd.split()
                     mask = int(parts[1], 0) if len(parts) > 1 else 0x0F
-                    R    = int(parts[2])    if len(parts) > 2 else 10     # Phase A: 3 kHz
-                    taps = int(parts[3])    if len(parts) > 3 else 131
-                    cut  = float(parts[4])  if len(parts) > 4 else 1250.0
-                    configure_lfp(sock, mask, R, taps, cut)
+                    dp   = parts[2] if len(parts) > 2 else "cic"
+                    taps = int(parts[3]) if len(parts) > 3 else None
+                    configure_lfp(sock, mask, datapath=dp, num_taps=taps)
                 elif cmd == "chirp" or cmd.startswith("chirp "):
                     # chirp [f_max_hz] [period_s] [stride]  (analytic swept-sine debug)
                     parts = cmd.split()
