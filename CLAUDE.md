@@ -172,8 +172,11 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 - `net.py` runs on macOS and Linux. Some socket options are platform-specific (e.g.
   `TCP_KEEPIDLE` is Linux-only, `TCP_KEEPALIVE` is the macOS equivalent) — guard new ones
   with `hasattr(socket, ...)`. See `configure_tcp_keepalive()`.
-- Git: remote `origin` uses the `github.com-microzed` SSH host alias. Commit/push only
-  when asked.
+- Git: remote `origin` uses the `github.com-microzed` SSH host alias. **Push feature
+  branches to `origin` by default** — after committing work, `git push -u origin <branch>`
+  (the maintainer debugs on a separate machine and needs branches available remotely). Do
+  **not** commit or push directly to `main`, and never `merge` to `main`, without being
+  asked — open a PR (or push the branch and let the maintainer merge) instead.
 
 ## Working autonomously / overnight
 
