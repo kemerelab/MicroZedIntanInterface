@@ -1143,7 +1143,7 @@ def udp_listener():
         sock.close()
         validator.print_statistics()
 
-def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
+def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=2.0):
     """Send a binary command and wait for ACK or data response"""
     try:
         ack_id = random.randint(1, 65535)
