@@ -1177,18 +1177,41 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
 # ============================================================================
 # LFP/DSP engine (Tier-1) host control + receive
 # ============================================================================
-def design_lfp_lowpass(num_taps, cutoff_hz=600.0, fs=30000.0):
-    """Windowed-sinc (Hamming) low-pass FIR, unity DC gain, quantized to Q1.17
-    (18-bit signed). The decimation anti-alias filter; cutoff < fs/(2*R)."""
+def _kaiser_window(num_taps, beta):
+    """Kaiser window via the I0 Bessel series (no numpy dependency)."""
+    import math
+    def i0(x):
+        s, t, k = 1.0, 1.0, 0
+        while True:
+            k += 1
+            t *= (x * x) / (4 * k * k)
+            s += t
+            if t < 1e-12 * s:
+                return s
+    a = (num_taps - 1) / 2.0
+    return [i0(beta * math.sqrt(1 - ((n - a) / a) ** 2)) / i0(beta)
+            for n in range(num_taps)]
+
+def design_lfp_lowpass(num_taps, cutoff_hz=1250.0, fs=30000.0, window="kaiser",
+                       beta=6.5):
+    """Windowed-sinc low-pass FIR, unity DC gain, quantized to Q1.17 (18-bit
+    signed). The decimation anti-alias; place cutoff (-6 dB) inside the
+    transition band fs/(2*R_pass) .. fs/(2*R). For R=10 (3 kHz, Nyquist 1.5 kHz)
+    the default ~131-tap Kaiser(beta=6.5) gives <1 dB ripple to 1 kHz, ~21 dB at
+    1.5 kHz, and >46 dB rejection of any band that folds onto the 0-1 kHz
+    passband. 'hamming' reproduces the legacy 2 kHz designer."""
     import math
     fc = cutoff_hz / fs                       # normalized cutoff (cycles/sample)
     M = num_taps - 1
+    if window == "kaiser":
+        win = _kaiser_window(num_taps, beta)
+    else:  # legacy Hamming
+        win = [0.54 - 0.46 * math.cos(2 * math.pi * n / M) for n in range(num_taps)]
     h = []
     for n in range(num_taps):
         x = n - M / 2.0
         s = 2 * fc if abs(x) < 1e-9 else math.sin(2 * math.pi * fc * x) / (math.pi * x)
-        w = 0.54 - 0.46 * math.cos(2 * math.pi * n / M)   # Hamming
-        h.append(s * w)
+        h.append(s * win[n])
     g = sum(h) or 1.0
     scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
     return [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
@@ -1208,9 +1231,10 @@ def lfp_upload_coeffs(sock, coeffs):
             return False
     return True
 
-def configure_lfp(sock, lane_mask=0x0F, decim_R=15, num_taps=128, cutoff_hz=600.0):
+def configure_lfp(sock, lane_mask=0x0F, decim_R=10, num_taps=131, cutoff_hz=1250.0):
     """Disable, set channels/params, design + upload the LP kernel. Call
-    lfp_enable(sock, True) afterwards to start streaming on UDP 5001."""
+    lfp_enable(sock, True) afterwards to start streaming on UDP 5001.
+    Phase A default: R=10 -> 3 kHz LFP, 131-tap Kaiser 3 kHz anti-alias."""
     send_binary_command(sock, CMD_LFP_ENABLE, 0)
     send_binary_command(sock, CMD_LFP_SET_CHANNELS, lane_mask & 0xFF)
     send_binary_command(sock, CMD_LFP_SET_PARAMS, decim_R & 0xFF, num_taps & 0xFF)

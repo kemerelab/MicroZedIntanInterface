@@ -635,7 +635,8 @@ void pl_run_full_cable_test(void) {
 // ============================================================================
 // LFP/DSP engine control (CTRL_REG_LFP_*; see lfp_dsp_block.sv)
 // ============================================================================
-uint8_t  lfp_cfg_enable = 0, lfp_cfg_lane_mask = 0, lfp_cfg_decim_R = 15, lfp_cfg_num_taps = 0;
+// Phase A default decimation: 30 kHz / 10 = 3 kHz LFP (was R=15 -> 2 kHz).
+uint8_t  lfp_cfg_enable = 0, lfp_cfg_lane_mask = 0, lfp_cfg_decim_R = 10, lfp_cfg_num_taps = 0;
 
 void pl_lfp_set_config(uint8_t enable, uint8_t lane_mask, uint8_t decim_R, uint8_t num_taps) {
     uint32_t cfg = ((uint32_t)enable & 0x1)
