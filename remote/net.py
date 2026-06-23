@@ -48,6 +48,13 @@ CMD_READ_REGISTER = 0x73    # param1 = reg -> 4-byte {cipo1, cipo0} response
 CMD_WRITE_REGISTER = 0x74   # param1 = reg; param2 = value -> 4-byte echo response
 CMD_SET_FAST_SETTLE = 0x75  # param1 = amp: sw|gpio_en<<1|pin<<4; param2 = dsp: same layout
 CMD_SET_DIGOUT = 0x76       # param1 = sw|gpio_en<<1|pin<<4; param2 = reg3_static byte
+CMD_SET_CHIRP = 0x77        # param1 = mode | stride<<8; param2 = fspan | rate<<16 (CTRL_REG_3)
+
+# Analytic chirp NCO scaling (must match data_generator_core.sv CTRL_REG_3)
+CHIRP_PHW          = 32
+CHIRP_FSPAN_SHIFT  = 16     # f_max = fspan << 16 (phase-accumulator units)
+CHIRP_RATE_SHIFT   = 9      # freq_acc step/packet = rate << 9
+PACKET_RATE_HZ     = 30000  # one phase update per broadband packet
 # LFP/DSP engine (Tier-1) -- configure while disabled, then enable
 CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
@@ -1177,6 +1184,42 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
 # ============================================================================
 # LFP/DSP engine (Tier-1) host control + receive
 # ============================================================================
+# ============================================================================
+# Analytic chirp NCO (memory-free swept sine in the PL; reuses the sine LUT)
+# ============================================================================
+def chirp_fmax_to_fspan(f_max_hz):
+    """Map a desired sweep top frequency (Hz) to the 12-bit f_span field.
+    f_max = (fspan << 16) / 2^32 * 30000  ->  fspan = f_max/30000 * 2^16."""
+    f_max_acc = f_max_hz / PACKET_RATE_HZ * (1 << CHIRP_PHW)
+    fspan = round(f_max_acc) >> CHIRP_FSPAN_SHIFT
+    return max(0, min(0xFFF, fspan))
+
+def chirp_sweep_to_rate(f_max_hz, period_s):
+    """Pick the 12-bit sweep_rate so one ramp (0->f_max) takes ~period_s/2
+    (a full triangle period is `period_s`). freq_acc step/packet = rate<<9."""
+    fmax_acc = (chirp_fmax_to_fspan(f_max_hz) << CHIRP_FSPAN_SHIFT)
+    half_packets = max(1, PACKET_RATE_HZ * period_s / 2.0)
+    rate = round((fmax_acc / half_packets)) >> CHIRP_RATE_SHIFT
+    return max(1, min(0xFFF, rate))
+
+def configure_chirp(sock, f_max_hz=1400.0, period_s=2.0, stride=4, enable=True):
+    """Enable the analytic chirp debug signal: a swept sine 0->f_max->0 with a
+    full triangle period of `period_s`, per-channel phase `stride`. Requires
+    debug mode (set it too). Disable with enable=False (or CMD_SET_DEBUG_MODE 0).
+    Default sweep ~1 Hz -> ~1.4 kHz covers the new 3 kHz LFP passband + transition."""
+    fspan = chirp_fmax_to_fspan(f_max_hz)
+    rate  = chirp_sweep_to_rate(f_max_hz, period_s)
+    p1 = (1 if enable else 0) | ((stride & 0x3F) << 8)
+    p2 = (fspan & 0xFFF) | ((rate & 0xFFF) << 16)
+    if enable:
+        send_binary_command(sock, CMD_SET_DEBUG_MODE, 1)
+    send_binary_command(sock, CMD_SET_CHIRP, p1, p2)
+    f_lo = 0.0
+    f_hi = (fspan << CHIRP_FSPAN_SHIFT) / (1 << CHIRP_PHW) * PACKET_RATE_HZ
+    print(f"[CHIRP] {'ENABLED' if enable else 'disabled'}: sweep {f_lo:.0f}->{f_hi:.0f} Hz, "
+          f"period~{period_s:.1f}s, stride={stride} (fspan={fspan} rate={rate})")
+    return fspan, rate
+
 def _kaiser_window(num_taps, beta):
     """Kaiser window via the I0 Bessel series (no numpy dependency)."""
     import math
@@ -1436,8 +1479,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 160:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 160)")
+    if len(data) != 168:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 168)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1479,6 +1522,10 @@ def get_status(sock):
     (lfp_enable, lfp_lane_mask, lfp_decim_R, lfp_num_taps) = struct.unpack('<4B', data[148:152])
     (lfp_packets_sent,) = struct.unpack('<I', data[152:156])
     (lfp_overrun,) = struct.unpack('<B', data[156:157])
+    # data[157:160] = lfp_reserved[3]
+    # Analytic chirp NCO config (8 bytes): mode, stride, fspan(u16), rate(u16), 2 rsvd
+    (chirp_mode, chirp_stride, chirp_fspan, chirp_rate) = \
+        struct.unpack('<BBHH2x', data[160:168])
 
     status = {
         'version': version,
@@ -1540,6 +1587,10 @@ def get_status(sock):
         'lfp_num_taps': lfp_num_taps,
         'lfp_packets_sent': lfp_packets_sent,
         'lfp_overrun': lfp_overrun,
+        'chirp_mode': chirp_mode,
+        'chirp_stride': chirp_stride,
+        'chirp_fspan': chirp_fspan,
+        'chirp_rate': chirp_rate,
     }
 
     return status
@@ -1628,6 +1679,13 @@ def print_status(status):
           f"(-> {30000.0/R:.0f} sps)  num_taps={status['lfp_num_taps']}")
     print(f"  packets sent: {status['lfp_packets_sent']}   "
           f"overrun: {'YES' if status['lfp_overrun'] else 'no'}")
+
+    # Analytic chirp NCO config
+    f_hi = (status['chirp_fspan'] << CHIRP_FSPAN_SHIFT) / (1 << CHIRP_PHW) * PACKET_RATE_HZ
+    print(f"\n--- Analytic chirp NCO (CTRL_REG_3) ---")
+    print(f"  {'ENABLED' if status['chirp_mode'] else 'disabled'}  "
+          f"sweep 0->{f_hi:.0f} Hz  stride={status['chirp_stride']}  "
+          f"(fspan={status['chirp_fspan']} rate={status['chirp_rate']})")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):
@@ -1832,8 +1890,9 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
-        print(f"  LFP (Tier-1): lfp_config [mask] [R] [taps] [cutoff], lfp_on, lfp_off, lfp_recv [n]")
+        print(f"  LFP (Tier-1): lfp_config [mask] [R=10] [taps=131] [cutoff=1250], lfp_on, lfp_off, lfp_recv [n]")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
+        print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
         print(f"       read_reg <r>, write_reg <r> <v>")
@@ -1954,10 +2013,20 @@ def tcp_control():
                     # lfp_config [mask] [decimR] [taps] [cutoff_hz]  (configure while off)
                     parts = cmd.split()
                     mask = int(parts[1], 0) if len(parts) > 1 else 0x0F
-                    R    = int(parts[2])    if len(parts) > 2 else 15
-                    taps = int(parts[3])    if len(parts) > 3 else 128
-                    cut  = float(parts[4])  if len(parts) > 4 else 600.0
+                    R    = int(parts[2])    if len(parts) > 2 else 10     # Phase A: 3 kHz
+                    taps = int(parts[3])    if len(parts) > 3 else 131
+                    cut  = float(parts[4])  if len(parts) > 4 else 1250.0
                     configure_lfp(sock, mask, R, taps, cut)
+                elif cmd == "chirp" or cmd.startswith("chirp "):
+                    # chirp [f_max_hz] [period_s] [stride]  (analytic swept-sine debug)
+                    parts = cmd.split()
+                    fmx = float(parts[1]) if len(parts) > 1 else 1400.0
+                    per = float(parts[2]) if len(parts) > 2 else 2.0
+                    std = int(parts[3])   if len(parts) > 3 else 4
+                    configure_chirp(sock, fmx, per, std, enable=True)
+                elif cmd == "chirp_off":
+                    configure_chirp(sock, enable=False)
+                    send_binary_command(sock, CMD_SET_DEBUG_MODE, 0)
                 elif cmd == "lfp_on":
                     st = get_status(sock)        # quietly read back the configured mask
                     if st and st.get('lfp_lane_mask', 0) == 0:
