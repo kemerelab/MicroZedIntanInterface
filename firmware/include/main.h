@@ -56,7 +56,7 @@
 
 // Number of PL control registers (must match axi_lite_registers N_CTRL --
 // the status registers are read back starting right after the control block)
-#define PL_N_CTRL_REGS      28
+#define PL_N_CTRL_REGS      32
 
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
@@ -81,6 +81,30 @@
 #define LFP_UDP_PORT                5001       // separate UDP stream for the LFP band
 #define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
+
+// Wavelet (Tier-3) scalogram engine control registers (PL regs 28..31;
+// see wavelet_dsp_block.sv). Build params: K=32, N_OCTAVES=8, V=4, N_TAPS=24.
+#define CTRL_REG_WAV_CFG_OFFSET     (28 * 4)  // [0]en [7:4]n_oct [11:8]n_voices [19:12]n_taps
+#define CTRL_REG_WAV_GAIN_OFFSET    (29 * 4)  // 4 bits/octave: gain[4*o +: 4] = left-shift
+#define CTRL_REG_WAV_DATA_OFFSET    (30 * 4)  // upload payload (target-dependent, [17:0] coef / [7:0] chan)
+#define CTRL_REG_WAV_STROBE_OFFSET  (31 * 4)  // [0] write toggle, [1] ptr clear, [3:2] target
+#define WAV_STROBE_TOGGLE           (1u << 0)
+#define WAV_STROBE_PTR_CLR          (1u << 1)
+#define WAV_TARGET_VOICE_COEF       (0u << 2)  // interleaved re,im
+#define WAV_TARGET_HALFBAND         (1u << 2)
+#define WAV_TARGET_SELECTOR         (2u << 2)
+// Wavelet build dimensions (must match wavelet_dsp_block.sv instantiation)
+#define WAV_K                       32
+#define WAV_N_OCTAVES               8
+#define WAV_V                       4
+#define WAV_N_TAPS                  24
+#define WAV_HB_TAPS                 7
+#define WAV_N_SCALES                (WAV_N_OCTAVES * WAV_V)   // 32 scales
+// Wavelet results BRAM (PS read via 3rd axi_bram_ctrl). Layout: per lane,
+// WAV_N_SCALES complex bins (re,im); word(lane,scale)=(lane*N_SCALES+scale)*2.
+#define WAV_BRAM_BASE_ADDR          0x90000000
+#define WAV_BRAM_SIZE_WORDS         16384      // 64 KB
+#define WAV_UDP_PORT                5004       // decimated scalogram monitor stream
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
@@ -137,6 +161,7 @@
 #define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 #define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
+#define STATUS_REG_14_OFFSET (STATUS_REG_BASE + 14 * 4)  // Wavelet: [29:0] column count, [30] busy, [31] overrun
 
 // STATUS_REG_11 bit fields
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
@@ -293,6 +318,21 @@ typedef struct __attribute__((packed)) {
     uint32_t lfp_packets_sent;  // LFP UDP packets emitted
     uint8_t  lfp_overrun;       // sticky compute-overrun flag
     uint8_t  lfp_reserved[3];
+
+    // Wavelet (Tier-3) scalogram engine config + status (CTRL_REG_WAV_* +
+    // STATUS_REG_14). Per the "get_status reports everything configurable"
+    // rule. 20 bytes.
+    uint8_t  wav_enable;        // engine enabled
+    uint8_t  wav_n_octaves;     // active octaves
+    uint8_t  wav_n_voices;      // active voices/octave
+    uint8_t  wav_n_taps;        // active complex taps/voice
+    uint8_t  wav_K;             // selected channels (build param)
+    uint8_t  wav_overrun;       // sticky compute-overrun flag
+    uint8_t  wav_busy;          // a compute pass is in progress
+    uint8_t  wav_reserved;
+    uint32_t wav_gain;          // per-octave output gain word (4 bits/octave)
+    uint32_t wav_frame_seq;     // completed scalogram columns (PL counter)
+    uint32_t wav_packets_sent;  // wavelet monitor UDP packets emitted
 
 } status_response_t;
 
@@ -473,5 +513,30 @@ void lfp_stream_service(void);   // call from the core-0 maintenance loop
 // Tracked config / counters (mirrored into status_response_t).
 extern uint8_t  lfp_cfg_enable, lfp_cfg_lane_mask, lfp_cfg_decim_R, lfp_cfg_num_taps;
 extern uint32_t lfp_udp_packets_sent;
+
+// ============================================================================
+// WAVELET SCALOGRAM ENGINE (Tier-3) -- control + streaming
+// ============================================================================
+// Control (pl_control.c): config latches while the engine is disabled.
+void pl_wav_set_enable(uint8_t enable);
+void pl_wav_set_params(uint8_t n_octaves, uint8_t n_voices, uint8_t n_taps, uint32_t gain);
+void pl_wav_sel_begin(void);                  // clear the upload pointer, target = selector
+void pl_wav_sel_push(uint8_t channel);        // write one selector lane
+void pl_wav_coef_begin(void);                 // clear ptr, target = voice coef RAM
+void pl_wav_coef_push(int32_t coef);          // write one Q1.17 tap (re,im interleaved)
+void pl_wav_hb_begin(void);                   // clear ptr, target = halfband RAM
+void pl_wav_hb_push(int32_t coef);            // write one halfband Q1.17 tap
+uint32_t pl_wav_read_status(void);            // STATUS_REG_14
+
+// Streaming (network.c): rate-limited single-beat read of the results BRAM ->
+// UDP on WAV_UDP_PORT. (CDMA-from-results-BRAM is avoided -- the STFT branch
+// found it HANGS on real HW; the full DDR-resident path is v2.)
+void wav_stream_init(void);
+void wav_stream_service(void);   // call from the core-0 maintenance loop
+
+// Tracked config / counters (mirrored into status_response_t).
+extern uint8_t  wav_cfg_enable, wav_cfg_n_octaves, wav_cfg_n_voices, wav_cfg_n_taps;
+extern uint32_t wav_cfg_gain;
+extern uint32_t wav_udp_packets_sent;
 
 #endif // MAIN_H

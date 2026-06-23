@@ -68,6 +68,14 @@ ID   | Command          | Param1              | Param2
 #define CMD_LFP_SET_PARAMS   0x81  // param1 = decim_R, param2 = num_taps
 #define CMD_LFP_SET_CHANNELS 0x82  // param1 = 8-bit lane mask
 #define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+// Wavelet (Tier-3) scalogram engine: set params + gains + upload coeffs/halfband/
+// selector while disabled, then enable. NOTE: 0x88 block (not 0x90 -- 0x90 is the
+// UDP bench; the 0x84-0x87 block stays free for a future STFT merge).
+#define CMD_WAV_ENABLE       0x88  // param1 = 0/1
+#define CMD_WAV_SET_PARAMS   0x89  // param1 = [3:0]n_oct [7:4]n_voices [15:8]n_taps; param2 = gain word
+#define CMD_WAV_SET_CHANNELS 0x8A  // param1 = [0] clear-ptr-first; param2 = channel index (one lane)
+#define CMD_WAV_WRITE_COEF   0x8B  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef (re,im interleaved)
+#define CMD_WAV_WRITE_HB     0x8C  // param1 = [0] clear-ptr-first; param2 = 18-bit signed halfband tap
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
 
 #define ACK_SUCCESS         0x06
@@ -267,6 +275,20 @@ void collect_status_data(status_response_t* status) {
     status->lfp_num_taps     = lfp_cfg_num_taps;
     status->lfp_packets_sent = lfp_udp_packets_sent;
     status->lfp_overrun      = (pl_lfp_read_status() >> 16) & 1;
+
+    // Wavelet (Tier-3) scalogram engine config (host-set) + live status
+    uint32_t wav_st          = pl_wav_read_status();
+    status->wav_enable       = wav_cfg_enable;
+    status->wav_n_octaves    = wav_cfg_n_octaves;
+    status->wav_n_voices     = wav_cfg_n_voices;
+    status->wav_n_taps       = wav_cfg_n_taps;
+    status->wav_K            = WAV_K;
+    status->wav_overrun      = (wav_st >> 31) & 1;
+    status->wav_busy         = (wav_st >> 30) & 1;
+    status->wav_reserved     = 0;
+    status->wav_gain         = wav_cfg_gain;
+    status->wav_frame_seq    = wav_st & 0x3FFFFFFF;
+    status->wav_packets_sent = wav_udp_packets_sent;
 }
 
 // ============================================================================
@@ -521,6 +543,36 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             pl_lfp_coef_push((int32_t)(cmd->param2 << 14) >> 14);  // sign-extend 18-bit
             break;
 
+        case CMD_WAV_ENABLE:
+            pl_wav_set_enable(cmd->param1 ? 1 : 0);
+            send_message("Binary Command: WAV_ENABLE %u\r\n", cmd->param1 ? 1 : 0);
+            break;
+
+        case CMD_WAV_SET_PARAMS:
+            pl_wav_set_params((cmd->param1 & 0xF),          // n_octaves
+                              (cmd->param1 >> 4) & 0xF,      // n_voices
+                              (cmd->param1 >> 8) & 0xFF,     // n_taps
+                              cmd->param2);                  // per-octave gain word
+            send_message("Binary Command: WAV_SET_PARAMS oct=%u voc=%u taps=%u gain=0x%08X\r\n",
+                         cmd->param1 & 0xF, (cmd->param1 >> 4) & 0xF,
+                         (cmd->param1 >> 8) & 0xFF, cmd->param2);
+            break;
+
+        case CMD_WAV_SET_CHANNELS:
+            if (cmd->param1 & 0x1) pl_wav_sel_begin();
+            pl_wav_sel_push(cmd->param2 & 0xFF);
+            break;
+
+        case CMD_WAV_WRITE_COEF:
+            if (cmd->param1 & 0x1) pl_wav_coef_begin();
+            pl_wav_coef_push((int32_t)(cmd->param2 << 14) >> 14);  // sign-extend 18-bit
+            break;
+
+        case CMD_WAV_WRITE_HB:
+            if (cmd->param1 & 0x1) pl_wav_hb_begin();
+            pl_wav_hb_push((int32_t)(cmd->param2 << 14) >> 14);    // sign-extend 18-bit
+            break;
+
         case CMD_UDP_BENCH:
             udp_bench_blast(cmd->param1, cmd->param2);
             break;
@@ -749,5 +801,80 @@ void lfp_stream_service(void) {
         }
         lfp_read_word = (lfp_read_word + frame_words) & mask;
         lfp_frame_seq++;
+    }
+}
+
+// ============================================================================
+// WAVELET (Tier-3) STREAM: poll the column counter (STATUS_REG_14); when it
+// advances, read the wavelet results BRAM (at 0x90000000) -- per lane,
+// WAV_N_SCALES complex int (re,im) -- and ship ONE self-describing UDP packet
+// on WAV_UDP_PORT. The results BRAM is a SNAPSHOT (not a ring): the engine
+// overwrites each (lane,scale) bin on the octave that advanced, so we read the
+// whole current surface.
+//
+// IMPORTANT: the read is a rate-limited single-beat Xil_In32 loop, NOT CDMA.
+// The STFT branch found that a CDMA read from a results BRAM HANGS on real
+// hardware; until the DDR-resident path is built (v2) we read directly and
+// cap the work per call so the broadband loop is never starved.
+// ============================================================================
+static struct udp_pcb *wav_pcb = NULL;
+static uint32_t wav_last_seq = 0xFFFFFFFF;
+uint32_t wav_udp_packets_sent = 0;
+// 8-word header + K*N_SCALES complex int32 (re,im) = 32*32*2 = 2048 words.
+static uint32_t wav_pktbuf[8 + WAV_K * WAV_N_SCALES * 2] __attribute__((aligned(8)));
+
+void wav_stream_init(void) {
+    wav_pcb = udp_new();
+    wav_last_seq = 0xFFFFFFFF;
+    wav_udp_packets_sent = 0;
+    if (wav_pcb == NULL) send_message("ERROR: Could not create wavelet UDP PCB\r\n");
+}
+
+void wav_stream_service(void) {
+    if (!wav_cfg_enable || wav_pcb == NULL) return;
+    uint32_t st  = pl_wav_read_status();
+    uint32_t seq = st & 0x3FFFFFFF;
+    if (seq == wav_last_seq) return;                // no new scalogram column
+    uint8_t overrun = (st >> 31) & 1;
+
+    uint32_t nscales = (uint32_t)wav_cfg_n_octaves * wav_cfg_n_voices;
+    if (nscales > WAV_N_SCALES) nscales = WAV_N_SCALES;
+    uint32_t pwords  = (uint32_t)WAV_K * nscales * 2;   // complex int32 (re,im)
+    if (pwords > (uint32_t)WAV_K * WAV_N_SCALES * 2) return;  // config guard
+
+    wav_pktbuf[0] = 0x5CA70900;                     // wavelet magic (low)  "SCALOG"
+    wav_pktbuf[1] = 0xCAFEBABE;                     // magic (high)
+    wav_pktbuf[2] = seq;                            // column index (== timestamp surrogate)
+    wav_pktbuf[3] = 0;
+    wav_pktbuf[4] = (uint32_t)wav_cfg_n_octaves
+                  | ((uint32_t)wav_cfg_n_voices << 8)
+                  | ((uint32_t)WAV_K            << 16)
+                  | ((uint32_t)overrun          << 24);
+    wav_pktbuf[5] = seq;
+    wav_pktbuf[6] = nscales | ((uint32_t)wav_cfg_n_taps << 16);
+    wav_pktbuf[7] = wav_cfg_gain;
+    // results layout: word(lane,scale) = (lane*WAV_N_SCALES + scale)*2; +0=re, +1=im.
+    // We read the active (lane, scale<nscales) sub-region, packed contiguously.
+    uint32_t o = 8;
+    for (uint32_t lane = 0; lane < WAV_K; lane++) {
+        uint32_t base = (lane * WAV_N_SCALES) * 2;
+        for (uint32_t s = 0; s < nscales; s++) {
+            uint32_t w = base + s * 2;
+            wav_pktbuf[o++] = Xil_In32(WAV_BRAM_BASE_ADDR + (w       << 2));  // re
+            wav_pktbuf[o++] = Xil_In32(WAV_BRAM_BASE_ADDR + ((w + 1) << 2));  // im
+        }
+    }
+    // re-read the counter: if it advanced mid-read the surface is torn -> skip
+    if ((pl_wav_read_status() & 0x3FFFFFFF) != seq) return;
+    wav_last_seq = seq;
+
+    uint32_t total = (8 + pwords) * 4;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_REF);
+    if (p != NULL) {
+        p->payload = (void*)wav_pktbuf;
+        ip_addr_t dst; dst.addr = udp_dest_ip;
+        udp_sendto(wav_pcb, p, &dst, WAV_UDP_PORT);
+        pbuf_free(p);
+        wav_udp_packets_sent++;
     }
 }
