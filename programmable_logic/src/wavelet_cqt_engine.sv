@@ -372,20 +372,54 @@ module wavelet_cqt_engine #(
     logic                     hb_emit;         // a halfband ÷2 sample is ready
     logic signed [DATA_W-1:0] hb_emit_data;
 
+    // ---- emit pipeline (timing): on the last tap, register the RAW
+    // accumulators + routing; apply the round/variable-shift/saturate in the
+    // NEXT cycle. This breaks the DSP-add -> barrel-shift-round-saturate carry
+    // chain that otherwise failed setup at 84 MHz on the v_emit_im path. The
+    // FSM (S_V_EMIT / S_HB_STORE) already waits for the *_emit pulse, so the
+    // extra cycle is free in the per-frame budget. ----
+    logic                     v_raw;           // raw voice result captured, shift/sat pending
+    logic signed [ACC_W-1:0]  v_raw_re, v_raw_im;
+    logic [3:0]               v_raw_gain;
+    logic [LANE_W-1:0]        v_raw_lane;
+    logic [OCT_W:0]           v_raw_oct;
+    logic [VOICE_W:0]         v_raw_voice;
+    logic                     hb_raw;
+    logic signed [ACC_W-1:0]  hb_raw_sum;
+
     always_ff @(posedge clk) begin
         if (!rstn) begin
             acc_re<='0; acc_im<='0; acc_hb<='0;
             v_emit<=0; hb_emit<=0; v_emit_re<='0; v_emit_im<='0;
             v_emit_lane<='0; v_emit_oct<='0; v_emit_voice<='0; hb_emit_data<='0;
+            v_raw<=0; v_raw_re<='0; v_raw_im<='0; v_raw_gain<='0;
+            v_raw_lane<='0; v_raw_oct<='0; v_raw_voice<='0; hb_raw<=0; hb_raw_sum<='0;
         end else begin
             v_emit  <= 1'b0;
             hb_emit <= 1'b0;
+            v_raw   <= 1'b0;
+            hb_raw  <= 1'b0;
+
+            // stage 2 of the emit pipeline: shift/saturate the captured raw
+            if (v_raw) begin
+                v_emit       <= 1'b1;
+                v_emit_re    <= vshift_sat(v_raw_re, v_raw_gain);
+                v_emit_im    <= vshift_sat(v_raw_im, v_raw_gain);
+                v_emit_lane  <= v_raw_lane;
+                v_emit_oct   <= v_raw_oct;
+                v_emit_voice <= v_raw_voice;
+            end
+            if (hb_raw) begin
+                hb_emit      <= 1'b1;
+                hb_emit_data <= hbshift_sat(hb_raw_sum);
+            end
+
             if (v1) begin
                 if (is_hb1) begin
                     acc_hb <= hb_sum;
-                    if (last1) begin
-                        hb_emit      <= 1'b1;
-                        hb_emit_data <= hbshift_sat(hb_sum);
+                    if (last1) begin   // capture the raw sum; saturate next cycle
+                        hb_raw     <= 1'b1;
+                        hb_raw_sum <= hb_sum;
                     end
                 end else begin
                     // voice: re phase -> acc_re, im phase -> acc_im
@@ -394,12 +428,14 @@ module wavelet_cqt_engine #(
                     if (last1) begin   // last tap, im phase -> complex done
                         // acc_re already holds the full re sum (the last re beat
                         // preceded this im beat); vim_sum is the just-finished im.
-                        v_emit       <= 1'b1;
-                        v_emit_re    <= vshift_sat(acc_re,  gain1);
-                        v_emit_im    <= vshift_sat(vim_sum, gain1);
-                        v_emit_lane  <= lane1;
-                        v_emit_oct   <= oct1;
-                        v_emit_voice <= voice1;
+                        // Capture RAW here; shift/saturate is the next cycle.
+                        v_raw        <= 1'b1;
+                        v_raw_re     <= acc_re;
+                        v_raw_im     <= vim_sum;
+                        v_raw_gain   <= gain1;
+                        v_raw_lane   <= lane1;
+                        v_raw_oct    <= oct1;
+                        v_raw_voice  <= voice1;
                     end
                 end
             end
