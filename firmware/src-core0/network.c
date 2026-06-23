@@ -879,9 +879,19 @@ void stft_stream_init(void) {
 
 void stft_stream_service(void) {
     if (!stft_cfg_enable || stft_pcb == NULL) return;
+    // Rate-limit the spectrum stream to ~30/s. The ~2100-word single-beat read +
+    // 8.5 KB jumbo send is expensive, and at small hops (e.g. hop=1 -> 2 kHz) doing
+    // it every loop iteration starves core-0 (broadband stutters, control commands
+    // time out). 30 spectra/s is plenty for a heat-map display; if you need faster,
+    // DMA the read like the broadband path. Cheap to skip (just XTime + compare).
+    static XTime stft_last_send_t = 0;
+    XTime now_t; XTime_GetTime(&now_t);
+    if (stft_last_send_t && perf_timer_hz &&
+        (now_t - stft_last_send_t) < (perf_timer_hz / 30)) return;
     uint32_t st  = pl_stft_read_status();
     uint32_t seq = st & 0x3FFFFFFF;
     if (seq == stft_last_seq) return;              // no new spectrum
+    stft_last_send_t = now_t;                       // commit -> reset the rate gate
 
     uint32_t N      = 1u << stft_cfg_nfft_log2;
     uint32_t nbins  = N / 2 + 1;

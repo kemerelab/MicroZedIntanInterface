@@ -526,6 +526,8 @@ int main() {
   memset((void *)command_flags, 0, sizeof(command_flags_t));
   psmon_init();   // zero the status snapshot before core 1 reads it
   pl_rhd_shadow_init();   // seed the RHD register mirror from the init defaults
+  pl_set_channel_enable(current_channel_enable);  // default mask at boot (0x0F) so
+                                                  // `start` works without set_channels first
 #if BRAM_READ_METHOD == BRAM_READ_DMA
   pl_dma_init();  // AXI CDMA + non-cacheable DDR staging buffer for the read path
 #endif
