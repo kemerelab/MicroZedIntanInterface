@@ -1388,6 +1388,98 @@ def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
     print(f"[LFP] received {got} frames, {bad} non-LFP/short datagrams")
     return got
 
+def _goertzel_power(x, f, fs):
+    """Power of x at frequency f (Hz), sample rate fs (Goertzel; pure Python)."""
+    import math
+    cw = 2.0 * math.cos(2.0 * math.pi * (f / fs))
+    s1 = s2 = 0.0
+    for v in x:
+        s0 = v + cw * s1 - s2
+        s2 = s1; s1 = s0
+    return s1*s1 + s2*s2 - cw*s1*s2
+
+def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
+                         channel=0, lane_mask=0x0F, fmin=25, fstep=25):
+    """Drive the analytic chirp across [0, f_max] and MEASURE the LFP anti-alias
+    magnitude response |H(f)| from the host. Method: capture one LFP channel for a
+    few chirp triangle periods; in each short window find the dominant frequency
+    (Goertzel peak over a grid) and its amplitude; bin amplitude vs frequency.
+    Self-calibrating -- does NOT assume a flat chirp spectrum. f_max defaults just
+    under the 1500 Hz LFP Nyquist so nothing folds. Prints a dB table + ASCII plot.
+    The chirp/debug/coef configs latch only while stopped, so this stops, arms, and
+    restarts the stream itself."""
+    import math
+    fs = 3000.0   # LFP rate (30 kHz / decim_R=10)
+    send_binary_command(sock, CMD_STOP)
+    configure_lfp(sock, lane_mask, datapath="cic")          # upload CIC comp-FIR
+    configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
+    lfp_enable(sock, True)
+    send_binary_command(sock, CMD_START)
+    # ---- capture one channel's time series off UDP 5001 ----
+    settle = int(0.3 * fs)
+    n_want = int(n_periods * period * fs) + settle
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('', LFP_UDP_PORT)); s.settimeout(3.0)
+    series = []
+    try:
+        while len(series) < n_want:
+            data, _ = s.recvfrom(4096)
+            if len(data) < 24: continue
+            mlo, mhi = struct.unpack('<II', data[:8])
+            if mlo != LFP_MAGIC_LOW or mhi != LFP_MAGIC_HIGH: continue
+            usamp = struct.unpack(f'<{(len(data)-24)//2}H', data[24:])
+            if channel < len(usamp):
+                series.append(usamp[channel] - 0x8000)      # offset-binary -> signed
+    except socket.timeout:
+        print("[SWEEP] capture timed out -- is the chirp+LFP streaming?")
+    finally:
+        s.close()
+    series = series[settle:]
+    if len(series) < int(period * fs):
+        print(f"[SWEEP] too few LFP samples ({len(series)}) -- aborting."); return
+    # ---- short-time dominant-freq + amplitude -> response ----
+    grid = list(range(int(fmin), int(min(f_max, fs/2.0)) + 1, int(fstep)))
+    win, hop = 256, 64    # hop small enough that the swept tone hits every grid bin
+    acc = {f: [0.0, 0] for f in grid}
+    i, n = 0, len(series)
+    while i + win <= n:
+        w = series[i:i+win]
+        m = sum(w) / win
+        w = [v - m for v in w]
+        bf, bp = grid[0], -1.0
+        for f in grid:
+            p = _goertzel_power(w, f, fs)
+            if p > bp: bp, bf = p, f
+        acc[bf][0] += math.sqrt(max(bp, 0.0)) * 2.0 / win   # dominant-tone amplitude
+        acc[bf][1] += 1
+        i += hop
+    resp = [(f, (acc[f][0]/acc[f][1] if acc[f][1] else 0.0), acc[f][1]) for f in grid]
+    pb = sorted(a for (f, a, c) in resp if 100 <= f <= 800 and c)   # passband ref
+    ref = pb[len(pb)//2] if pb else (max((a for _, a, _ in resp), default=1.0) or 1.0)
+    print(f"\n[SWEEP] LFP anti-alias |H(f)|  (chirp 0->{f_max:.0f} Hz, "
+          f"{n_periods}x{period:.1f}s, ch{channel}, {len(series)} samp @ {fs:.0f} Hz)")
+    print("  f(Hz)  |H| dB  hits  |" + "-"*42)
+    crossings, pf, pdb = {}, None, None
+    for f, a, c in resp:
+        if c == 0:
+            print(f"  {f:5d}     --     0  |")     # no window peaked here
+            continue
+        db = 20*math.log10(a/ref) if (a > 0 and ref > 0) else -99.0
+        bar = "#" * int(max(0, min(42, (db + 60.0) / 60.0 * 42)))
+        print(f"  {f:5d}  {db:6.1f}  {c:4d}  |{bar}")
+        for thr in (-3.0, -6.0, -20.0):
+            if thr not in crossings and pdb is not None and pdb >= thr > db:
+                crossings[thr] = pf + (thr - pdb) * (f - pf) / (db - pdb)
+        pf, pdb = f, db
+    for thr in (-3.0, -6.0, -20.0):
+        if thr in crossings:
+            print(f"  measured {thr:+.0f} dB at ~{crossings[thr]:.0f} Hz")
+    print("  predicted (shipped CIC+comp): flat to ~1.0 kHz, -3 dB ~1.25 kHz, "
+          "-6 dB ~1.30 kHz, -32 dB @ 1.50 kHz Nyquist")
+    print("  (chirp left running; 'chirp_off' to stop, or raise f_max for more transition)")
+    return resp
+
 # ============================================================================
 # UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
 # replacing the ~18 MB/s small-packet broadband assumption with a measured
@@ -1950,6 +2042,7 @@ def tcp_control():
         print(f"  LFP (Tier-1): lfp_config [mask] [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n]")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
+        print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
         print(f"       read_reg <r>, write_reg <r> <v>")
@@ -2084,6 +2177,14 @@ def tcp_control():
                 elif cmd == "chirp_off":
                     configure_chirp(sock, enable=False)
                     send_binary_command(sock, CMD_SET_DEBUG_MODE, 0)
+                elif cmd == "lfp_sweep" or cmd.startswith("lfp_sweep "):
+                    # lfp_sweep [f_max=1490] [period=3.0] [n_periods=2]
+                    # chirp across the band + measure the LFP anti-alias |H(f)|
+                    parts = cmd.split()
+                    fmx = float(parts[1]) if len(parts) > 1 else 1490.0
+                    per = float(parts[2]) if len(parts) > 2 else 3.0
+                    npd = int(parts[3])   if len(parts) > 3 else 2
+                    measure_lfp_response(sock, f_max=fmx, period=per, n_periods=npd)
                 elif cmd == "lfp_on":
                     st = get_status(sock)        # quietly read back the configured mask
                     if st and st.get('lfp_lane_mask', 0) == 0:
