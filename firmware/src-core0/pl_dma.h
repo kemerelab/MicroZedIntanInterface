@@ -10,21 +10,27 @@
 // and writes each packet to a DDR staging buffer over S_AXI_HP0, so the CPU GP
 // port leaves the bulk-read path entirely.
 //
-// pl_dma_staging: the DDR staging buffer the CDMA writes each packet into. It is
-// a LINKER-RESERVED static array (1 MB, 1 MB-aligned), NOT a hardcoded address --
-// so the linker places it inside core-0's own DDR region. That means it can never
-// collide with core-0 code/data/heap/stack, and it is portable across boards with
-// different DDR sizes (no assumption about where DDR ends -- important for, e.g.,
-// 7010 parts). pl_dma_init() marks its 1 MB section NORM_NONCACHE (the cache
-// attribute granularity is 1 MB, hence the 1 MB size + alignment so the buffer
-// owns its whole section); the DMA path then needs no per-packet cache ops and
-// the EMAC TX transmits the freshly DMA'd bytes directly.
-extern uint8_t pl_dma_staging[];
-#define DMA_BUF_ADDR   ((uintptr_t)pl_dma_staging)
-
-// Separate non-cacheable staging buffer for the LFP stream (see pl_dma.c).
-extern uint8_t pl_dma_lfp_staging[];
-#define LFP_DMA_BUF_ADDR  ((uintptr_t)pl_dma_lfp_staging)
+// OCM staging buffers at FIXED low-OCM addresses. The CDMA writes each packet
+// here and the GEM TX DMA then reads it (zero-copy PBUF_REF). The linker leaves
+// the low 192 KB OCM (region ps7_ram_0 @ 0x0) entirely unused -- every firmware
+// section maps to DDR -- so these fixed addresses are collision-free WITHOUT a
+// linker reservation, board-independent (OCM-low is 0x0..0x2FFFF on every
+// Zynq-7000 part), and reproducible regardless of how the Vitis-generated linker
+// script is laid out. We deliberately avoid 0x0 (a NULL pointer -O3 may treat as
+// unreachable); the CPU never dereferences these anyway -- the CDMA writes them
+// over S_AXI_HP0 (the HP0_DDR_LOWOCM segment reaches low OCM) and the GEM TX DMA
+// reads them.
+//
+// Keeping BOTH the CDMA write dest and the Ethernet read source in OCM keeps the
+// whole PL->PS->wire data path OFF the DDR controller, so CDMA writes and GEM
+// reads no longer contend on DDR (the measured recv->transmit spike: the
+// broadband CDMA stalling 4 -> 44 us once a 2nd stream loads DDR). OCM has no
+// refresh and far lower latency, so the two ~20 MB/s flows no longer collide.
+// pl_dma_init() marks the 0x0 1 MB TLB section non-cacheable -> no per-packet
+// cache ops. Each buffer holds one packet (broadband <= 600 B, LFP <= 536 B);
+// they sit 4 KB apart inside that single non-cacheable section.
+#define DMA_BUF_ADDR       0x00001000U   // broadband staging (low OCM)
+#define LFP_DMA_BUF_ADDR   0x00002000U   // LFP staging (low OCM)
 
 // Initialize the AXI CDMA (polled mode) and mark the staging buffer
 // non-cacheable. Returns 0 on success, negative on failure.

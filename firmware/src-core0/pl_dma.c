@@ -16,29 +16,24 @@
 // Must match the S_AXI_LITE address assigned in design_1_bd.tcl.
 #define CDMA_BASEADDR  0x44A00000U
 
-// Linker-reserved 1 MB DDR staging buffer (see pl_dma.h). 1 MB-aligned so it
-// owns exactly one 1 MB TLB section, which pl_dma_init() marks non-cacheable.
-uint8_t pl_dma_staging[0x100000] __attribute__((aligned(0x100000)));
-
-// Separate 1 MB-aligned non-cacheable staging buffer for the LFP stream, so the
-// LFP path's CDMA + zero-copy pbuf never share/clobber the broadband staging
-// buffer (the two run sequentially in the same loop, but each holds a pbuf
-// reference into its own buffer until the EMAC transmits it).
-uint8_t pl_dma_lfp_staging[0x100000] __attribute__((aligned(0x100000)));
+// OCM staging buffers live at FIXED low-OCM addresses (DMA_BUF_ADDR /
+// LFP_DMA_BUF_ADDR in pl_dma.h), not C arrays: the linker leaves low OCM unused
+// so no reservation is needed, and fixed addresses are reproducible regardless of
+// how the Vitis-generated linker script is laid out. See pl_dma.h for the full
+// OCM rationale (kills the CDMA-vs-GEM DDR contention -- the recv->transmit spike).
 
 static XAxiCdma cdma;
 static int      cdma_ready = 0;
 
 int pl_dma_init(void) {
-    // The staging buffer lives in .bss (zeroed at startup as cached writes).
-    // Clean those dirty lines to DDR, THEN mark its 1 MB section non-cacheable,
-    // so no stale cache line can later evict over DMA'd data. After this the DMA
-    // path needs no per-packet cache ops.
-    Xil_DCacheFlushRange((UINTPTR)pl_dma_staging, sizeof(pl_dma_staging));
-    Xil_SetTlbAttributes((UINTPTR)pl_dma_staging, NORM_NONCACHE_SHARED);
-    // Same treatment for the LFP staging buffer.
-    Xil_DCacheFlushRange((UINTPTR)pl_dma_lfp_staging, sizeof(pl_dma_lfp_staging));
-    Xil_SetTlbAttributes((UINTPTR)pl_dma_lfp_staging, NORM_NONCACHE_SHARED);
+    // OCM staging buffers at DMA_BUF_ADDR (0x1000) / LFP_DMA_BUF_ADDR (0x2000),
+    // both inside the 1 MB TLB section at 0x0. Flush any cache lines covering the
+    // range (the BootROM/FSBL may have touched OCM), THEN mark the section
+    // non-cacheable so no stale line can later evict over DMA'd data. One marking
+    // covers both buffers (same 1 MB section). After this the DMA path needs no
+    // per-packet cache ops.
+    Xil_DCacheFlushRange(DMA_BUF_ADDR, 0x2000U);   // 0x1000..0x2FFF: both buffers
+    Xil_SetTlbAttributes(DMA_BUF_ADDR, NORM_NONCACHE_SHARED);
 
     XAxiCdma_Config *cfg = XAxiCdma_LookupConfig(CDMA_BASEADDR);
     if (cfg == NULL) {
@@ -53,8 +48,11 @@ int pl_dma_init(void) {
     // Polled mode (avoids the dual-core GIC distributor init gotcha).
     XAxiCdma_IntrDisable(&cdma, XAXICDMA_XR_IRQ_ALL_MASK);
     cdma_ready = 1;
-    send_message("CDMA: ready (ctrl 0x%08lX, staging 0x%08lX)\r\n",
-                 (unsigned long)CDMA_BASEADDR, (unsigned long)DMA_BUF_ADDR);
+    // Print both staging addresses so the bench can confirm they landed in OCM
+    // (< 0x00030000); if they read as DDR the .ocm_staging placement failed.
+    send_message("CDMA: ready (ctrl 0x%08lX, OCM staging bb=0x%08lX lfp=0x%08lX)\r\n",
+                 (unsigned long)CDMA_BASEADDR, (unsigned long)DMA_BUF_ADDR,
+                 (unsigned long)LFP_DMA_BUF_ADDR);
 
     // Smoke test: one CDMA transfer BRAM[0]->staging exercises the control path
     // (GP0 -> CDMA regs) and the data path (CDMA -> BRAM read, CDMA -> HP0/DDR

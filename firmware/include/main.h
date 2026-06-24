@@ -215,7 +215,14 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         4   // 1.4: recv->transmit spike instrumentation -- split the
+#define FIRMWARE_VERSION_MINOR         5   // 1.5: CDMA<->Ethernet staging moved from DDR to low OCM
+                                           //      (DMA_BUF_ADDR=0x1000, LFP=0x2000). CDMA writes OCM,
+                                           //      GEM TX reads OCM -- neither touches DDR, removing the
+                                           //      CDMA-vs-GEM DDR contention (the recv->transmit spike:
+                                           //      broadband CDMA 4->44 us under a 2nd stream). Firmware-
+                                           //      only, PL unchanged, wire-compatible. Confirm at boot:
+                                           //      "CDMA: ready (... OCM staging bb=0x00001000 ...)".
+                                           // 1.4: recv->transmit spike instrumentation -- split the
                                            //      timed window into CDMA / udp_sendto / other, capture
                                            //      the worst packet's breakdown, a 6-bucket recv->transmit
                                            //      histogram + over-budget count, and CMD_PERF_RESET to
