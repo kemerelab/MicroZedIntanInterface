@@ -1408,8 +1408,25 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     under the 1500 Hz LFP Nyquist so nothing folds. Prints a dB table + ASCII plot.
     The chirp/debug/coef configs latch only while stopped, so this stops, arms, and
     restarts the stream itself."""
-    import math
+    import math, time
     fs = 3000.0   # LFP rate (30 kHz / decim_R=10)
+    # --- preflight: confirm the board is alive and on v1.3+ firmware. The chirp /
+    #     3 kHz-LFP commands lfp_sweep needs ONLY exist in v1.3; running against a
+    #     wedged or older-image board is the usual cause of an apparent "hang".
+    #     Fail fast and clearly instead. ---
+    st = get_status(sock)
+    if not st:
+        print("[SWEEP] board did NOT answer get_status -- unresponsive/wedged. "
+              "Power-cycle and flash main's v1.3 BOOT.bin (4,455,828 B). Aborting.")
+        return
+    fw = st.get('firmware_version', 0)
+    fmaj, fmin = (fw >> 24) & 0xFF, (fw >> 16) & 0xFF
+    print(f"[SWEEP] board firmware {fmaj}.{fmin}")
+    if (fmaj, fmin) < (1, 3):
+        print(f"[SWEEP] firmware {fmaj}.{fmin} is too old for the chirp/3kHz-LFP path "
+              f"(lfp_sweep needs >=1.3). You're on the wrong board image -- flash main's "
+              f"v1.3 BOOT.bin. Aborting.")
+        return
     send_binary_command(sock, CMD_STOP)
     configure_lfp(sock, lane_mask, datapath="cic")          # upload CIC comp-FIR
     configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
@@ -1422,8 +1439,10 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('', LFP_UDP_PORT)); s.settimeout(3.0)
     series = []
+    t_start = time.time()
+    max_wall = n_periods * period * 4.0 + 8.0   # hard wall-clock cap; never spin forever
     try:
-        while len(series) < n_want:
+        while len(series) < n_want and (time.time() - t_start) < max_wall:
             data, _ = s.recvfrom(4096)
             if len(data) < 24: continue
             mlo, mhi = struct.unpack('<II', data[:8])
@@ -1437,7 +1456,9 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
         s.close()
     series = series[settle:]
     if len(series) < int(period * fs):
-        print(f"[SWEEP] too few LFP samples ({len(series)}) -- aborting."); return
+        print(f"[SWEEP] only {len(series)} LFP samples in ~{max_wall:.0f}s -- the board "
+              f"answered control (fw {fmaj}.{fmin}) but isn't streaming LFP. The LFP/CIC "
+              f"datapath likely wedged on this image. Aborting."); return
     # ---- short-time dominant-freq + amplitude -> response ----
     grid = list(range(int(fmin), int(min(f_max, fs/2.0)) + 1, int(fstep)))
     win, hop = 256, 64    # hop small enough that the swept tone hits every grid bin
