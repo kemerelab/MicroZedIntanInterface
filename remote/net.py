@@ -61,6 +61,7 @@ CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
 CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband channel_enable (firmware accepts-and-ignores)
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
+CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
 
 UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
 LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
@@ -1675,8 +1676,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 168:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 168)")
+    if len(data) != 220:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 220)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1723,6 +1724,14 @@ def get_status(sock):
     (chirp_mode, chirp_stride, chirp_fspan, chirp_rate) = \
         struct.unpack('<BBHH2x', data[160:168])
 
+    # recv->transmit spike instrumentation (52 bytes): the recv->transmit window
+    # split into udp_sendto / worst-case breakdown + a 6-bucket histogram. All
+    # times are raw ticks (converted to us against timer_hz in print_status).
+    (send_ticks_last, send_ticks_max, over_budget_count, worst_pkt_index,
+     worst_cdma_ticks, worst_send_ticks, worst_other_ticks) = \
+        struct.unpack('<7I', data[168:196])
+    loop_hist = struct.unpack('<6I', data[196:220])
+
     status = {
         'version': version,
         'device_type': device_type,
@@ -1764,6 +1773,15 @@ def get_status(sock):
         'loop_ticks_last': loop_ticks_last,
         'loop_ticks_max': loop_ticks_max,
         'timer_hz': timer_hz,
+        # recv->transmit spike instrumentation (cleared by perf_reset)
+        'send_ticks_last': send_ticks_last,
+        'send_ticks_max': send_ticks_max,
+        'over_budget_count': over_budget_count,
+        'worst_pkt_index': worst_pkt_index,
+        'worst_cdma_ticks': worst_cdma_ticks,
+        'worst_send_ticks': worst_send_ticks,
+        'worst_other_ticks': worst_other_ticks,
+        'loop_hist': list(loop_hist),
         # Aux config decoded from CTRL_REG_22 (fast-settle / DSP / digout)
         'aux_ctrl': aux_ctrl,
         'fs_sw': bool(aux_ctrl & (1 << 4)),
@@ -1853,10 +1871,25 @@ def print_status(status):
     hz = status['timer_hz'] or 1   # raw ticks -> us converted here, not in firmware
     to_us = lambda t: t * 1e6 / hz
     print(f"CDMA transfer:  last {to_us(status['dma_ticks_last']):.2f} us, max {to_us(status['dma_ticks_max']):.2f} us")
+    print(f"UDP send:       last {to_us(status['send_ticks_last']):.2f} us, max {to_us(status['send_ticks_max']):.2f} us")
     print(f"Recv->transmit: last {to_us(status['loop_ticks_last']):.2f} us, max {to_us(status['loop_ticks_max']):.2f} us")
     lm = to_us(status['loop_ticks_max'])
     print(f"Headroom (max): {33.3 - lm:.2f} us  ({100.0*lm/33.3:.0f}% of budget used)")
-    print(f"DMA errors: {status['dma_errors']}   (timer {hz/1e6:.1f} MHz)")
+    # Worst-packet breakdown: WHAT dominated the worst recv->transmit. If send
+    # >> cdma here (and the histogram has a tail), the spike is the GEM TX reaping.
+    wc, ws, wo = (to_us(status['worst_cdma_ticks']),
+                  to_us(status['worst_send_ticks']),
+                  to_us(status['worst_other_ticks']))
+    print(f"Worst pkt #{status['worst_pkt_index']}: cdma={wc:.2f} send={ws:.2f} other={wo:.2f} us  (sum={wc+ws+wo:.2f})")
+    # recv->transmit distribution (us bucket edges) + over-budget frequency
+    h = status['loop_hist']
+    edges = ["<16", "16-25", "25-33", "33-50", "50-100", ">=100"]
+    total = sum(h) or 1
+    print("Recv->transmit histogram (us):")
+    for lbl, c in zip(edges, h):
+        print(f"   {lbl:>7}: {c:>10}  ({100.0*c/total:5.1f}%)")
+    print(f"Over budget (>=33 us): {status['over_budget_count']}  ({100.0*status['over_budget_count']/total:.3f}% of {total} pkts)")
+    print(f"DMA errors: {status['dma_errors']}   (timer {hz/1e6:.1f} MHz)   [perf_reset to clear maxes/histogram]")
 
     rr = status['rhd_reg']
     print("\n--- RHD Chip Registers (mirror, commanded state) ---")
@@ -2084,7 +2117,7 @@ def tcp_control():
         print(f"  Basic: start, stop, reset_timestamp, loop <count>")
         print(f"  COPI: convert, init, cable_test, full_cable_test, manual_cable_test")
         print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
-        print(f"  Network: set_udp <ip> <port>, get_status, ping")
+        print(f"  Network: set_udp <ip> <port>, get_status, perf_reset, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n]  (mask = broadband set_channels)")
@@ -2129,6 +2162,9 @@ def tcp_control():
                     status = get_status(sock)
                     if status:
                         print_status(status)
+                elif cmd == "perf_reset":
+                    ok, _ = send_binary_command(sock, CMD_PERF_RESET)
+                    print("[PERF] window reset" if ok else "[PERF] reset failed")
                 elif cmd == "ping":
                     ping(sock)
                 elif cmd.startswith("loop "):
@@ -2309,7 +2345,7 @@ def tcp_control():
                     print("  convert, init, cable_test")
                     print("  full_cable_test, manual_cable_test")
                     print("  auto_cable_detect - NEW: Automated detection!")
-                    print("  set_udp <ip> <port>, get_status, ping")
+                    print("  set_udp <ip> <port>, get_status, perf_reset, ping")
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, quit")
                     print("Bandwidth (raw UDP throughput, port 5002):")

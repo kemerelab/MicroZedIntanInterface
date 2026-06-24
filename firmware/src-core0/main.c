@@ -51,9 +51,31 @@ uint32_t dma_errors = 0;   // CDMA read failures (BRAM_READ_DMA path)
 uint32_t dma_ticks_last = 0, dma_ticks_max = 0;     // CDMA transfer (ticks)
 uint32_t loop_ticks_last = 0, loop_ticks_max = 0;   // receive->transmit (ticks)
 uint32_t perf_timer_hz = 0;                         // tick freq (set in main())
+// recv->transmit spike instrumentation. Split the recv->transmit window into the
+// CDMA, udp_sendto, and "other" components so the host can attribute the
+// occasional ~40 us spike; capture the worst packet's breakdown and a histogram
+// + over-budget count for the tail's shape/frequency. Cleared by perf_reset().
+uint32_t send_ticks_last = 0, send_ticks_max = 0;   // udp_sendto() call (ticks)
+uint32_t over_budget_count = 0;                     // packets over the 33.3 us budget
+uint32_t worst_pkt_index = 0;                       // packet idx of the worst loop
+uint32_t worst_cdma_ticks = 0, worst_send_ticks = 0, worst_other_ticks = 0;
+uint32_t loop_hist[PERF_HIST_BUCKETS] = {0};        // recv->transmit time distribution
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 168, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 220, "status_response_t size must match net.py get_status");
+
+// Clear the sticky maxes + worst-case snapshot + histogram + counts so the user
+// controls the measurement window (CMD_PERF_RESET). Leaves the last-sample fields
+// and dma_errors alone -- those self-refresh / are lifetime counters.
+void perf_reset(void) {
+  dma_ticks_max = 0;
+  loop_ticks_max = 0;
+  send_ticks_max = 0;
+  over_budget_count = 0;
+  worst_pkt_index = 0;
+  worst_cdma_ticks = worst_send_ticks = worst_other_ticks = 0;
+  for (int i = 0; i < PERF_HIST_BUCKETS; i++) loop_hist[i] = 0;
+}
 
 // UDP transmission
 uint32_t udp_packets_sent = 0;
@@ -227,12 +249,19 @@ static int process_packet_from_bram(void) {
     // Point pbuf payload directly to our buffer (zero-copy!)
     p->payload = (void*)pkt_buf;
 
-    // Send using udp_sendto (no connect required)
+    // Send using udp_sendto (no connect required).
+    // perf: time the send separately. The GEM TX path inside udp_sendto reaps a
+    // variable number of completed TX descriptors (xemacps_process_sent_bds, a
+    // while(1) loop), so this is the suspected source of the recv->transmit spike.
     ip_addr_t dest_ip;
     dest_ip.addr = udp_dest_ip;
+    XTime t_send0; XTime_GetTime(&t_send0);   // perf: udp_sendto timer
     err_t result = udp_sendto(udp, p, &dest_ip, udp_dest_port);
+    XTime t_send1; XTime_GetTime(&t_send1);
+    send_ticks_last = (uint32_t)(t_send1 - t_send0);
+    if (send_ticks_last > send_ticks_max) send_ticks_max = send_ticks_last;
     // err_t result = udp_send(udp, p);
-    
+
     if (result == ERR_OK) {
       udp_packets_sent++;
     } else {
@@ -243,9 +272,10 @@ static int process_packet_from_bram(void) {
     // Free pbuf (this won't free our buffer since it's PBUF_REF)
     pbuf_free(p);
   } else {
+    send_ticks_last = 0;   // perf: no send happened; keep the breakdown honest
     udp_send_errors++;
   }
-  
+
   // Update read pointer with variable packet size
   ps_read_address = (ps_read_address + current_packet_size) % BRAM_SIZE_WORDS;
   packets_received_count++;
@@ -253,7 +283,35 @@ static int process_packet_from_bram(void) {
   // perf: full receive->transmit time for this packet (the 33us-budget metric)
   XTime t_loop1; XTime_GetTime(&t_loop1);
   loop_ticks_last = (uint32_t)(t_loop1 - t_loop0);
-  if (loop_ticks_last > loop_ticks_max) loop_ticks_max = loop_ticks_last;
+
+  // perf: worst-case capture -- snapshot the breakdown the instant a new max is
+  // set, so we see WHAT dominated the worst packet (cdma vs send vs other).
+  if (loop_ticks_last > loop_ticks_max) {
+    loop_ticks_max = loop_ticks_last;
+    worst_pkt_index   = packets_received_count;
+    worst_cdma_ticks  = dma_ticks_last;
+    worst_send_ticks  = send_ticks_last;
+    // other = loop - cdma - send (clamp; the three samples are taken at slightly
+    // different instants so rounding can make the sum momentarily exceed loop)
+    uint32_t accounted = dma_ticks_last + send_ticks_last;
+    worst_other_ticks = (loop_ticks_last > accounted) ? (loop_ticks_last - accounted) : 0;
+  }
+
+  // perf: distribution + over-budget frequency. Convert this packet's
+  // recv->transmit ticks to microseconds against the histogram edges. The 33.3 us
+  // budget is one sample period at 30 kHz.
+  if (perf_timer_hz) {
+    uint32_t loop_us = (uint32_t)(((uint64_t)loop_ticks_last * 1000000ULL) / perf_timer_hz);
+    int b;
+    if      (loop_us <  16) b = 0;
+    else if (loop_us <  25) b = 1;
+    else if (loop_us <  33) b = 2;
+    else if (loop_us <  50) b = 3;
+    else if (loop_us < 100) b = 4;
+    else                    b = 5;
+    loop_hist[b]++;
+    if (loop_us >= 33) over_budget_count++;   // 33.3 us budget; >=33 us is over
+  }
 
   return 1;  // Success
 }

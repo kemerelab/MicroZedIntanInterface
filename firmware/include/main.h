@@ -215,7 +215,12 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         3   // 1.3: LFP default R=10 (3 kHz) + dual-MAC engine;
+#define FIRMWARE_VERSION_MINOR         4   // 1.4: recv->transmit spike instrumentation -- split the
+                                           //      timed window into CDMA / udp_sendto / other, capture
+                                           //      the worst packet's breakdown, a 6-bucket recv->transmit
+                                           //      histogram + over-budget count, and CMD_PERF_RESET to
+                                           //      clear the window. get_status grows to 220 bytes.
+                                           // 1.3: LFP default R=10 (3 kHz) + dual-MAC engine;
                                            //      analytic chirp NCO (CTRL_REG_3). get_status adds
                                            //      chirp config. Status wire = 168 bytes.
                                            // 1.2: AXI-CDMA read path; get_status config tracking
@@ -317,7 +322,27 @@ typedef struct __attribute__((packed)) {
     uint16_t chirp_rate;        // sweep_rate field (12-bit)
     uint8_t  chirp_reserved[2];
 
+    // recv->transmit spike instrumentation (52 bytes; appended -- keep net.py in
+    // sync). All times are raw global-timer ticks (host converts with timer_hz).
+    // The recv->transmit window (loop_ticks) is split into CDMA / udp_sendto /
+    // other so the host can attribute the occasional ~40 us spike. The worst-case
+    // snapshot is captured the instant a new loop_ticks_max is set, so we see WHAT
+    // dominated that packet; the histogram + over_budget_count give the frequency
+    // and shape of the tail. Cleared by CMD_PERF_RESET (see network.c).
+    uint32_t send_ticks_last;   // last udp_sendto() call (ticks)
+    uint32_t send_ticks_max;    // worst udp_sendto() call (ticks)
+    uint32_t over_budget_count; // packets whose loop_ticks exceeded the 33.3 us budget
+    uint32_t worst_pkt_index;   // packets_received_count at the worst-loop packet
+    uint32_t worst_cdma_ticks;  // that packet's CDMA time (ticks)
+    uint32_t worst_send_ticks;  // that packet's udp_sendto time (ticks)
+    uint32_t worst_other_ticks; // that packet's loop - cdma - send (ticks)
+    // recv->transmit histogram, microsecond bucket edges [<16,16-25,25-33,33-50,50-100,>=100]
+    uint32_t loop_hist[6];      // counts per bucket
+
 } status_response_t;
+
+// recv->transmit histogram bucket count (keep in sync with loop_hist[] + net.py)
+#define PERF_HIST_BUCKETS   6
 
 // Flag definitions
 #define STATUS_PL_TRANSMISSION_ACTIVE  (1 << 0)
@@ -357,6 +382,12 @@ extern uint32_t dma_errors;
 extern uint32_t dma_ticks_last, dma_ticks_max;
 extern uint32_t loop_ticks_last, loop_ticks_max;
 extern uint32_t perf_timer_hz;
+// recv->transmit spike instrumentation (raw ticks; see status_response_t)
+extern uint32_t send_ticks_last, send_ticks_max;
+extern uint32_t over_budget_count;
+extern uint32_t worst_pkt_index, worst_cdma_ticks, worst_send_ticks, worst_other_ticks;
+extern uint32_t loop_hist[PERF_HIST_BUCKETS];
+void perf_reset(void);   // clear sticky maxes + histogram + counts (CMD_PERF_RESET)
 
 // UDP transmission
 extern uint32_t udp_packets_sent;

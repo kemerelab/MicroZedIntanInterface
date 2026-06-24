@@ -71,6 +71,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_LFP_SET_CHANNELS 0x82  // param1 = 8-bit lane mask
 #define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
+#define CMD_PERF_RESET       0x91  // clear recv->transmit sticky maxes + histogram + counts
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
@@ -255,6 +256,17 @@ void collect_status_data(status_response_t* status) {
     status->loop_ticks_last = loop_ticks_last;
     status->loop_ticks_max  = loop_ticks_max;
     status->timer_hz        = perf_timer_hz;
+
+    // recv->transmit spike instrumentation (raw ticks; cleared by CMD_PERF_RESET)
+    status->send_ticks_last   = send_ticks_last;
+    status->send_ticks_max    = send_ticks_max;
+    status->over_budget_count = over_budget_count;
+    status->worst_pkt_index   = worst_pkt_index;
+    status->worst_cdma_ticks  = worst_cdma_ticks;
+    status->worst_send_ticks  = worst_send_ticks;
+    status->worst_other_ticks = worst_other_ticks;
+    for (int i = 0; i < PERF_HIST_BUCKETS; i++)
+        status->loop_hist[i] = loop_hist[i];
 
     // Aux config read-back (fast-settle / DSP / digout settings live in CTRL_REG_22)
     status->aux_ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
@@ -542,6 +554,11 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
 
         case CMD_UDP_BENCH:
             udp_bench_blast(cmd->param1, cmd->param2);
+            break;
+
+        case CMD_PERF_RESET:
+            perf_reset();   // fresh recv->transmit measurement window
+            send_message("Binary Command: PERF_RESET (maxes/histogram/counts cleared)\r\n");
             break;
 
         default:
