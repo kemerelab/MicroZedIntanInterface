@@ -167,13 +167,22 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 - The PL data path (`data_generator`, 84 MHz) must be reset from the **84 MHz**
   `proc_sys_reset_0_84M`, **not** the AXI/175-domain reset — a cross-domain reset fails
   timing on ~20k endpoints. (Root-caused in `docs/routing_report.md`.)
-- **PS↔BRAM bulk reads are a three-way tension — validate any new result-BRAM read path on
-  hardware.** The CPU's `M_AXI_GP` long burst reads corrupt the 0xFF broadband stream;
-  single-beat `Xil_In32` reads are **slow** and starve the core-0 loop (~2100 reads ≈ 0.5 ms
-  for one STFT spectrum); **CDMA (BRAM→DDR over HP0)** is the fast path for the capture BRAM —
-  but a CDMA read of the STFT *result* BRAM **hung on real hardware**, forcing a rate-limited
-  single-beat fallback. So CDMA-from-BRAM is **not** a guaranteed drop-in for a new
-  analysis-result BRAM; prove the read path on HW before relying on it.
+- **PL→PS bulk data ALWAYS moves by DMA — never loop the CPU over BRAM or staging.** This is
+  a hard rule, not a preference. The CPU's `M_AXI_GP` long burst reads corrupt the 0xFF stream,
+  and single-beat `Xil_In32` reads (or word-by-word reads of the non-cacheable DMA staging
+  buffer) are **slow** and starve the core-0 loop — the cost scales with payload, so it blows
+  the 33 µs/packet budget as channels/scales grow (an LFP `Xil_In32` loop pushed recv→transmit
+  to ~63 µs; a wavelet 2048-word uncached staging repack pushed it to **2.6 ms**, 80× over).
+  Move bulk data by **AXI CDMA landed straight into the pbuf payload**; the cleanest form is to
+  have the **PL build the whole wire packet (header + payload) in its result BRAM** and the PS
+  just DMA+send it — exactly as the broadband path does (the PL writes the 10-word header in
+  `data_generator_core.sv`). Result/analysis BRAMs must be in the `axi_cdma_0/Data` address
+  space in the BD (the wavelet @0x90000000 is; the LFP @0x84000000 was *excluded* — fix when
+  DMA-ing it). **`scripts/check_dma.sh` enforces this** (and the `/check-dma` skill) — run it
+  before declaring any PL↔PS data-path change done; annotate genuinely-justified single-beat
+  peeks (e.g. a 2-word magic/resync read) with `// DMA-EXEMPT: <reason>`.
+  (History: an earlier "CDMA hung on the STFT result BRAM" turned out to be a missing
+  `axi_cdma_0/Data` address segment, not a CDMA limitation — see the wavelet DMA fix.)
 - **A compute pass that spans multiple acquisition packets must snapshot its inputs.** The
   next 30 kHz packet's data arrives *during* a long pass, so a single-buffered input gets
   overwritten mid-pass (this bit the CIC LFP path; the FIR decimator avoids it with a ring +
