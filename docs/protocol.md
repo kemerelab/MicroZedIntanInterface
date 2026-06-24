@@ -55,12 +55,14 @@ Most commands reply with a small ack; `GET_STATUS`, `READ_REGISTER`, etc. reply 
 | `0x76` | SET_DIGOUT | p1 = sw \| gpio_en<<1 \| pin<<4; p2 = reg3 static byte | digital-out control |
 | `0x80` | LFP_ENABLE | p1 = 0/1 | enable the LFP/DSP engine + its UDP stream |
 | `0x81` | LFP_SET_PARAMS | p1 = decim_R, p2 = num_taps | decimation factor + active FIR length |
-| `0x82` | LFP_SET_CHANNELS | p1 = 8-bit lane mask | which of 8 streams to LFP-filter |
+| `0x82` | LFP_SET_CHANNELS | *(deprecated)* | **DEPRECATED** — the LFP lane mask now mirrors the broadband `channel_enable` mask (use `SET_CHANNEL_ENABLE` `0x13`); firmware accepts-and-ignores |
 | `0x83` | LFP_WRITE_COEF | p1 = [0] clear-ptr-first, p2 = 18-bit signed coef | upload one Q1.17 tap |
 
-Configure LFP while disabled (channels → params → coefficients via repeated `0x83`,
-the first with the clear bit), then `LFP_ENABLE`. (See `remote/net.py` `configure_lfp()`
-+ `design_lfp_lowpass()`.)
+Configure LFP while disabled (params → coefficients via repeated `0x83`, the first with the
+clear bit), then `LFP_ENABLE`. The **lane mask = the broadband `channel_enable` mask** (single
+source of truth) — pick which streams to LFP-filter with `SET_CHANNEL_ENABLE` (`0x13`); the
+LFP filters exactly the broadband-enabled lanes. (See `remote/net.py` `configure_lfp()`
++ `design_cic_comp_fir()` / `design_lfp_lowpass()`.)
 
 (See `remote/net.py` for the exact per-command parameter packing and the interactive
 command names like `start`, `set_channels`, `auto_cable_detect`, `verify_sine`.)
@@ -140,20 +142,29 @@ mismatch is the classic dual-port "dropout" symptom; keep the plugin's size calc
 
 When the LFP/DSP engine is enabled, the board emits a second, independent UDP stream on
 **port 5001** (broadband on 5000 is untouched). One datagram per decimation frame
-(broadband rate ÷ `decim_R`, e.g. 30 kHz ÷ 15 = 2 kHz). All 32-bit little-endian:
+(broadband rate ÷ effective decimation, e.g. 30 kHz ÷ 10 = 3 kHz).
+
+**The PL builds the whole wire packet** (6-word header + samples) in the LFP output BRAM
+(`0x84000000`) — just like `data_generator_core.sv` builds the 10-word broadband header in the
+capture BRAM. The PS then **CDMAs the complete frame straight into a pbuf and sends it**
+(`pl_dma_read_addr` → non-cacheable LFP staging → `udp_sendto` a `PBUF_REF`): no PS-side header
+math and no `Xil_In32` sample loop (enforced by `scripts/check_dma.sh`). All 32-bit
+little-endian:
 
 | words | field | notes |
 |------:|-------|-------|
 | 0–1 | magic `0xCAFEBABE_1F1FBEEF` | word0 = `0x1F1FBEEF`, word1 = `0xCAFEBABE` (distinct from broadband) |
-| 2–3 | 64-bit timestamp | `frame_seq × decim_R` ≈ the broadband packet index of this frame (for alignment) |
-| 4 | `[7:0]` lane_mask · `[15:8]` decim_R · `[23:16]` num_taps · `[24]` overrun | self-describing config |
-| 5 | 32-bit frame sequence number | LFP-stream drop detection |
-| 6… | payload: per enabled stream, 32 decimated samples, **offset binary** 16-bit, 2 per word | `popcount(lane_mask) × 32` samples = `popcount × 16` words |
+| 2–3 | 64-bit master **timestamp** | the master count of the **LAST (most-recent) broadband sample** that contributed to this frame — the *same* counter the broadband header stamps (header word 1), latched on the engine's decimation tick. An **absolute master timestamp**, not a frame index. |
+| 4 | `[7:0]` lane_mask · `[15:8]` decim_R · `[23:16]` num_taps · `[31:24]` overrun | self-describing config; `lane_mask` = the broadband `channel_enable` mask |
+| 5 | 32-bit frame sequence number | PL-maintained (++ per emitted frame); LFP-stream drop detection |
+| 6… | payload: per enabled lane, 32 decimated samples, **offset binary** 16-bit, 2 per word | `popcount(lane_mask) × 32` samples = `popcount × 16` words |
 
-**Samples are offset binary** (mid-scale `0x8000` = 0 µV), same as broadband — subtract
-`0x8000` for signed. Streams appear in ascending lane order; within each, the 32 amplifier
-channels in order. The host knows the frame size from `lane_mask` (no per-packet size
-field beyond the mask). Reference receiver: `net.py` `receive_lfp()`.
+**Lane mask = broadband mask.** The LFP `lane_mask` is driven from the broadband
+`channel_enable` mask in the PL (single source of truth) — the LFP filters exactly the
+broadband-enabled lanes. **Samples are offset binary** (mid-scale `0x8000` = 0 µV), same as
+broadband — subtract `0x8000` for signed. Lanes appear in ascending order; within each, the 32
+amplifier channels in order. The host knows the frame size from `lane_mask`. Reference
+receiver: `net.py` `receive_lfp()`.
 
 ## Register map (the source of truth is `firmware/include/main.h`)
 
@@ -162,7 +173,7 @@ field beyond the mask). Reference receiver: `net.py` `receive_lfp()`.
 | AXI-Lite control regs | `0x40000000` | 28 control regs (PS→PL): 0..21 legacy, 22..24 aux, **25..27 LFP** (cfg/coef/strobe) |
 | AXI-Lite status regs | `0x40000000 + 28*4` | status regs (PL→PS): write pointer, fifo count, aux, **13 = LFP wr-ptr/overrun** (base = `PL_N_CTRL_REGS*4`) |
 | Capture BRAM | `0x80000000` | 16384 × 32-bit words (64 KB) |
-| **LFP output BRAM** | `0x84000000` | 16384 × 32-bit ring; decimated samples 2×16-bit/word |
+| **LFP output BRAM** | `0x84000000` | 16384 × 32-bit ring; PL builds the **whole wire packet** here (6-word header + samples 2×16-bit/word). In `axi_cdma_0/Data` space so the PS CDMAs each frame straight into a pbuf. |
 
 `CTRL_REG_2` packs the four cable phases: `[3:0]` phase0 (A/cipo0), `[7:4]` phase1 (A/cipo1),
 `[19:16]` phase2 (B/cipo0), `[23:20]` phase3 (B/cipo1).
@@ -210,6 +221,8 @@ in order:
   | 14–21 | per-channel amplifier power-up (8 bits each → 64 channels) |
 
 - **LFP engine config + status (12 bytes)** — `lfp_enable`, `lfp_lane_mask`, `lfp_decim_R`,
-  `lfp_num_taps` (host-set, mirrored from `CTRL_REG_LFP_CFG`), `lfp_packets_sent` (UDP frames
-  emitted), and `lfp_overrun` (sticky compute-overrun from `STATUS_REG_13`). So the host can
-  read back the full LFP configuration — per the "report everything configurable" rule.
+  `lfp_num_taps`, `lfp_packets_sent` (UDP frames emitted), and `lfp_overrun` (sticky
+  compute-overrun from `STATUS_REG_13`). `lfp_lane_mask` is reported as the **broadband
+  `channel_enable` mask** (the single source of truth — the PL drives the LFP lane mask from
+  `channel_enable_reg`), so the host can read back the full LFP configuration per the "report
+  everything configurable" rule.

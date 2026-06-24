@@ -58,7 +58,7 @@ PACKET_RATE_HZ     = 30000  # one phase update per broadband packet
 # LFP/DSP engine (Tier-1) -- configure while disabled, then enable
 CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
-CMD_LFP_SET_CHANNELS = 0x82 # param1 = 8-bit lane mask
+CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband channel_enable (firmware accepts-and-ignores)
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
 
@@ -1313,10 +1313,14 @@ def lfp_upload_coeffs(sock, coeffs):
             return False
     return True
 
-def configure_lfp(sock, lane_mask=0x0F, datapath="cic", num_taps=None,
-                  cutoff_hz=1250.0):
-    """Disable, set channels/params, design + upload the LP kernel. Call
-    lfp_enable(sock, True) afterwards to start streaming on UDP 5001.
+def configure_lfp(sock, datapath="cic", num_taps=None, cutoff_hz=1250.0):
+    """Disable, set params, design + upload the LP kernel. Call lfp_enable(sock,
+    True) afterwards to start streaming on UDP 5001.
+
+    The LFP lane mask is NO LONGER set here -- it MIRRORS the broadband
+    channel-enable mask in the PL (single source of truth). Choose which streams
+    to filter with `set_channels` (the broadband mask); the LFP filters exactly
+    the broadband-enabled lanes.
 
     datapath="cic" (default, matches the USE_CIC=1 build): uploads the 43-tap
       droop-compensated comp-FIR halfband; the engine's CIC^4(/5)+halfband(/2)=/10
@@ -1327,21 +1331,20 @@ def configure_lfp(sock, lane_mask=0x0F, datapath="cic", num_taps=None,
     Either way R=10 -> 3 kHz; the LFP packet's self-describing R field is set
     accordingly so the host/plugin auto-tracks the rate."""
     send_binary_command(sock, CMD_LFP_ENABLE, 0)
-    send_binary_command(sock, CMD_LFP_SET_CHANNELS, lane_mask & 0xFF)
     if datapath == "cic":
         nt = num_taps if num_taps else 43
         send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
         coeffs = design_cic_comp_fir(nt)
         lfp_upload_coeffs(sock, coeffs)
-        print(f"[LFP] configured CIC^4(/5)+halfband(/2)=/10: mask=0x{lane_mask:02X} "
-              f"comp_taps={nt} -> 3000 sps out (flat to ~1 kHz)")
+        print(f"[LFP] configured CIC^4(/5)+halfband(/2)=/10: lane mask = broadband "
+              f"channel_enable; comp_taps={nt} -> 3000 sps out (flat to ~1 kHz)")
     else:
         nt = num_taps if num_taps else 131
         send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
         coeffs = design_lfp_lowpass(nt, cutoff_hz)
         lfp_upload_coeffs(sock, coeffs)
-        print(f"[LFP] configured single-stage FIR /10: mask=0x{lane_mask:02X} "
-              f"taps={nt} cutoff={cutoff_hz:.0f}Hz -> 3000 sps out")
+        print(f"[LFP] configured single-stage FIR /10: lane mask = broadband "
+              f"channel_enable; taps={nt} cutoff={cutoff_hz:.0f}Hz -> 3000 sps out")
     return coeffs
 
 def fs_out_str(decim_R):
@@ -1353,7 +1356,21 @@ def lfp_enable(sock, on=True):
 
 def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
     """Bind the LFP UDP port and parse frames -- a reference receiver for the
-    plugin. Payload samples are offset-binary 16-bit (subtract 0x8000 for signed)."""
+    plugin. Payload samples are offset-binary 16-bit (subtract 0x8000 for signed).
+
+    The 6-word header is now built BY THE PL (not the PS): the PL writes the
+    complete wire packet (header + samples) into its output BRAM and the PS just
+    CDMAs it into a pbuf and sends it. Header layout:
+      w0 = LFP_MAGIC_LOW (0x1F1FBEEF), w1 = 0xCAFEBABE
+      w2/w3 = 64-bit master timestamp = the master count of the LAST (most-recent)
+              broadband sample that contributed to this decimated frame -- the
+              SAME counter the broadband packet header stamps, latched on the
+              decimation tick. (Frames are spaced ~decim_R*decimation_stages
+              broadband packets apart; this is an absolute master timestamp, not a
+              frame index.)
+      w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24); lane_mask =
+           the broadband channel_enable mask (single source of truth).
+      w5 = PL-maintained LFP frame sequence number (++ per emitted frame)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('', bind_port))
@@ -1428,7 +1445,10 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
               f"v1.3 BOOT.bin. Aborting.")
         return
     send_binary_command(sock, CMD_STOP)
-    configure_lfp(sock, lane_mask, datapath="cic")          # upload CIC comp-FIR
+    # The LFP lane mask mirrors the broadband channel_enable, so select the lanes
+    # via set_channels; the LFP engine then filters exactly those lanes.
+    send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, lane_mask & 0xFF)
+    configure_lfp(sock, datapath="cic")                     # upload CIC comp-FIR
     configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
     lfp_enable(sock, True)
     send_binary_command(sock, CMD_START)
@@ -1845,7 +1865,8 @@ def print_status(status):
     R = status['lfp_decim_R'] or 1
     print(f"\n--- LFP/DSP engine (Tier-1, UDP {LFP_UDP_PORT}) ---")
     print(f"  {'ENABLED' if status['lfp_enable'] else 'disabled'}  "
-          f"lane_mask=0x{status['lfp_lane_mask']:02X}  decim_R={status['lfp_decim_R']} "
+          f"lane_mask=0x{status['lfp_lane_mask']:02X} (= broadband channel_enable)  "
+          f"decim_R={status['lfp_decim_R']} "
           f"(-> {30000.0/R:.0f} sps)  num_taps={status['lfp_num_taps']}")
     print(f"  packets sent: {status['lfp_packets_sent']}   "
           f"overrun: {'YES' if status['lfp_overrun'] else 'no'}")
@@ -2060,7 +2081,7 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
-        print(f"  LFP (Tier-1): lfp_config [mask] [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n]")
+        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n]  (mask = broadband set_channels)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2181,13 +2202,14 @@ def tcp_control():
                 elif cmd == "bench_sweep":
                     udp_bench_sweep(sock)
                 elif cmd == "lfp_config" or cmd.startswith("lfp_config "):
-                    # lfp_config [mask] [datapath=cic|fir] [taps]  (configure while off)
+                    # lfp_config [datapath=cic|fir] [taps]  (configure while off)
                     # default = CIC^4(/5)+halfband(/2)=/10 -> 3 kHz, 43 comp taps.
+                    # The LFP lane mask mirrors the broadband channel_enable mask
+                    # (single source of truth) -- pick lanes with set_channels.
                     parts = cmd.split()
-                    mask = int(parts[1], 0) if len(parts) > 1 else 0x0F
-                    dp   = parts[2] if len(parts) > 2 else "cic"
-                    taps = int(parts[3]) if len(parts) > 3 else None
-                    configure_lfp(sock, mask, datapath=dp, num_taps=taps)
+                    dp   = parts[1] if len(parts) > 1 else "cic"
+                    taps = int(parts[2]) if len(parts) > 2 else None
+                    configure_lfp(sock, datapath=dp, num_taps=taps)
                 elif cmd == "chirp" or cmd.startswith("chirp "):
                     # chirp [f_max_hz] [period_s] [stride]  (analytic swept-sine debug)
                     parts = cmd.split()
@@ -2207,9 +2229,10 @@ def tcp_control():
                     npd = int(parts[3])   if len(parts) > 3 else 2
                     measure_lfp_response(sock, f_max=fmx, period=per, n_periods=npd)
                 elif cmd == "lfp_on":
-                    st = get_status(sock)        # quietly read back the configured mask
+                    st = get_status(sock)        # quietly read back the (broadband) lane mask
                     if st and st.get('lfp_lane_mask', 0) == 0:
-                        print("[LFP] lane_mask is 0 -- run lfp_config first, or no data will stream.")
+                        print("[LFP] lane_mask is 0 (no broadband streams enabled) -- run "
+                              "set_channels first, or no data will stream.")
                     lfp_enable(sock, True)
                 elif cmd == "lfp_off":
                     lfp_enable(sock, False)
@@ -2287,10 +2310,11 @@ def tcp_control():
                     print("  bench [bytes] [n]   - one size (default 1472 B x 50000)")
                     print("  bench_sweep         - sweep 256..8800 B")
                     print("LFP / Tier-1 (UDP 5001):")
-                    print("  lfp_config [mask] [R] [taps] [cutoff] - set mask/decim/taps + upload LP kernel")
+                    print("  lfp_config [cic|fir] [taps] - set datapath/taps + upload LP kernel")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
                     print("  lfp_recv [n]        - capture + print decoded LFP frames")
-                    print("  (run lfp_config BEFORE lfp_on -- default mask is 0 = no streams)")
+                    print("  (LFP lane mask = the broadband channel_enable mask -- pick lanes")
+                    print("   with set_channels; run lfp_config + set_channels BEFORE lfp_on)")
                     print("Aux sequencer (bank-programmable aux commands):")
                     print("  aux_demo            - load default slot programs + enable")
                     print("  aux_en <0|1>        - enable/disable the sequencer")

@@ -22,6 +22,10 @@
 extern uint8_t pl_dma_staging[];
 #define DMA_BUF_ADDR   ((uintptr_t)pl_dma_staging)
 
+// Separate non-cacheable staging buffer for the LFP stream (see pl_dma.c).
+extern uint8_t pl_dma_lfp_staging[];
+#define LFP_DMA_BUF_ADDR  ((uintptr_t)pl_dma_lfp_staging)
+
 // Initialize the AXI CDMA (polled mode) and mark the staging buffer
 // non-cacheable. Returns 0 on success, negative on failure.
 int pl_dma_init(void);
@@ -31,5 +35,11 @@ int pl_dma_init(void);
 // Blocks until the transfer completes. Returns 0 on success, negative on
 // error/timeout.
 int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words);
+
+// Generic CDMA read from an ARBITRARY PL/BRAM source byte address (e.g. the LFP
+// output BRAM at 0x84000000) to dst (must be inside DMA_BUF_ADDR). Same blocking
+// semantics/return codes as pl_dma_read_bram. The source must be in the
+// axi_cdma_0/Data address space (see design_1_bd.tcl).
+int pl_dma_read_addr(uint32_t *dst, uintptr_t src_addr, uint32_t n_words);
 
 #endif // PL_DMA_H

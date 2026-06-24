@@ -489,7 +489,11 @@ void stop_udp_stream(void);
 // LFP/DSP ENGINE (Tier-1) -- control + streaming
 // ============================================================================
 // Control (pl_control.c): config latches while streaming is stopped.
-void pl_lfp_set_config(uint8_t enable, uint8_t lane_mask, uint8_t decim_R, uint8_t num_taps);
+// NOTE: the LFP lane mask is NO LONGER a separate parameter -- it MIRRORS the
+// broadband channel-enable mask in the PL (single source of truth). The PL
+// builds the complete LFP wire packet (header + samples) in its output BRAM, so
+// the PS just CDMAs it into a pbuf and sends it.
+void pl_lfp_set_config(uint8_t enable, uint8_t decim_R, uint8_t num_taps);
 void pl_lfp_coef_begin(void);                             // clear the coef write pointer
 void pl_lfp_coef_push(int32_t coef);                      // write one 18-bit Q1.17 tap
 void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
@@ -499,8 +503,9 @@ uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 void lfp_stream_init(void);
 void lfp_stream_service(void);   // call from the core-0 maintenance loop
 
-// Tracked config / counters (mirrored into status_response_t).
-extern uint8_t  lfp_cfg_enable, lfp_cfg_lane_mask, lfp_cfg_decim_R, lfp_cfg_num_taps;
+// Tracked config / counters (mirrored into status_response_t). The lane mask is
+// the broadband channel_enable (reported via pl_get_current_channel_enable()).
+extern uint8_t  lfp_cfg_enable, lfp_cfg_decim_R, lfp_cfg_num_taps;
 extern uint32_t lfp_udp_packets_sent;
 
 #endif // MAIN_H

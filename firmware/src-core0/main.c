@@ -169,8 +169,8 @@ static int process_packet_from_bram(void) {
   uint32_t magic_high_offset = (ps_read_address + 1) % BRAM_SIZE_WORDS;
 
   // Read packet header from BRAM
-  uint32_t magic_low = Xil_In32(BRAM_BASE_ADDR + (magic_low_offset * 4));
-  uint32_t magic_high = Xil_In32(BRAM_BASE_ADDR + (magic_high_offset * 4));
+  uint32_t magic_low = Xil_In32(BRAM_BASE_ADDR + (magic_low_offset * 4));   // DMA-EXEMPT: 2-word magic peek (clean 1-beat reads; bulk payload moves by CDMA below)
+  uint32_t magic_high = Xil_In32(BRAM_BASE_ADDR + (magic_high_offset * 4)); // DMA-EXEMPT: 2-word magic peek (clean 1-beat reads; bulk payload moves by CDMA below)
 
   // Reconstruct 64-bit magic number
   uint64_t magic = ((uint64_t)magic_high << 32) | magic_low;
@@ -216,7 +216,7 @@ static int process_packet_from_bram(void) {
   pkt_buf = udp_packet_buffer;
   for (uint32_t i = 0; i < current_packet_size; i++) {
     uint32_t src = (ps_read_address + i) % BRAM_SIZE_WORDS;
-    pkt_buf[i] = Xil_In32(BRAM_BASE_ADDR + src * 4);
+    pkt_buf[i] = Xil_In32(BRAM_BASE_ADDR + src * 4);  // DMA-EXEMPT: BRAM_READ_SINGLE reference reader (compile-time fallback, not the default DMA path)
   }
 #endif
 
@@ -301,8 +301,8 @@ void handle_enable_streaming(void) {
   for (uint32_t back = 0; back < 2 * current_packet_size + 16; back++) {
     uint32_t a = (wp + BRAM_SIZE_WORDS - back) % BRAM_SIZE_WORDS;
     uint32_t b = (a + 1) % BRAM_SIZE_WORDS;
-    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == 0xDEADBEEF &&     // magic low
-        Xil_In32(BRAM_BASE_ADDR + b * 4) == 0xCAFEBABE) {     // magic high
+    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == 0xDEADBEEF &&     // magic low  // DMA-EXEMPT: 2-word resync magic peek (clean 1-beat reads while re-aligning ps_read)
+        Xil_In32(BRAM_BASE_ADDR + b * 4) == 0xCAFEBABE) {     // magic high // DMA-EXEMPT: 2-word resync magic peek (clean 1-beat reads while re-aligning ps_read)
       ps_read_address = a;
       synced = 1;
       break;

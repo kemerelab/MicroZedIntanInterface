@@ -265,7 +265,7 @@ void pl_dump_bram_data(uint32_t start_addr, uint32_t word_count) {
     uint32_t diffs = 0;
     for (uint32_t i = 0; i < word_count; i++) {
         uint32_t addr = (start_addr + i) % BRAM_SIZE_WORDS;
-        uint32_t single = Xil_In32(BRAM_BASE_ADDR + addr * 4);
+        uint32_t single = Xil_In32(BRAM_BASE_ADDR + addr * 4);  // DMA-EXEMPT: dump_bram debug -- single-beat reference reader compared against the burst memcpy; not a hot-path bulk transfer
         if (i < cap) {
             uint32_t burst = dump_burst_buf[i];
             if (burst != single) diffs++;
@@ -659,15 +659,17 @@ void pl_run_full_cable_test(void) {
 // LFP/DSP engine control (CTRL_REG_LFP_*; see lfp_dsp_block.sv)
 // ============================================================================
 // Phase A default decimation: 30 kHz / 10 = 3 kHz LFP (was R=15 -> 2 kHz).
-uint8_t  lfp_cfg_enable = 0, lfp_cfg_lane_mask = 0, lfp_cfg_decim_R = 10, lfp_cfg_num_taps = 0;
+uint8_t  lfp_cfg_enable = 0, lfp_cfg_decim_R = 10, lfp_cfg_num_taps = 0;
 
-void pl_lfp_set_config(uint8_t enable, uint8_t lane_mask, uint8_t decim_R, uint8_t num_taps) {
+// The LFP lane mask MIRRORS the broadband channel-enable mask in the PL (single
+// source of truth -- driven by data_generator_core's channel_enable_reg). The
+// lfp_cfg[15:8] lane_mask field is left at 0 on the wire: the PL ignores it.
+void pl_lfp_set_config(uint8_t enable, uint8_t decim_R, uint8_t num_taps) {
     uint32_t cfg = ((uint32_t)enable & 0x1)
-                 | ((uint32_t)lane_mask << 8)
                  | ((uint32_t)decim_R   << 16)
                  | ((uint32_t)num_taps  << 24);
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_LFP_CFG_OFFSET, cfg);
-    lfp_cfg_enable = enable; lfp_cfg_lane_mask = lane_mask;
+    lfp_cfg_enable = enable;
     lfp_cfg_decim_R = decim_R; lfp_cfg_num_taps = num_taps;
 }
 

@@ -132,6 +132,8 @@ module data_generator #(
     wire [127:0] dsp_sample_data;
     wire [5:0]   dsp_sample_slot;
     wire         dsp_packet_tick;
+    wire [63:0]  dsp_master_timestamp;   // live master sample count (LFP frame stamp)
+    wire [7:0]   dsp_channel_enable;     // broadband mask -> LFP lane_mask (single source)
     wire [15:0]  lfp_wr_addr;
     wire         lfp_overrun;
 
@@ -174,7 +176,9 @@ module data_generator #(
         .dsp_sample_valid(dsp_sample_valid),
         .dsp_sample_data(dsp_sample_data),
         .dsp_sample_slot(dsp_sample_slot),
-        .dsp_packet_tick(dsp_packet_tick)
+        .dsp_packet_tick(dsp_packet_tick),
+        .dsp_master_timestamp(dsp_master_timestamp),
+        .dsp_channel_enable(dsp_channel_enable)
     );
 
     // Instantiate the on-PL LFP/DSP engine (control regs 25..27; writes its own
@@ -188,6 +192,9 @@ module data_generator #(
         .dsp_sample_data(dsp_sample_data),
         .dsp_sample_slot(dsp_sample_slot),
         .dsp_packet_tick(dsp_packet_tick),
+        // Master timestamp tap (frame stamp) + broadband mask (LFP lane_mask source).
+        .dsp_master_timestamp(dsp_master_timestamp),
+        .dsp_channel_enable(dsp_channel_enable),
         .lfp_cfg(ctrl_regs_pl[25*32 +: 32]),
         .lfp_coef(ctrl_regs_pl[26*32 +: 32]),
         .lfp_strobe(ctrl_regs_pl[27*32 +: 32]),
