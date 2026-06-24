@@ -60,19 +60,23 @@ int pl_dma_init(void) {
     return 0;
 }
 
-int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words) {
+int pl_dma_read_addr(uint32_t *dst, uintptr_t src_addr, uint32_t n_words) {
     if (!cdma_ready) return -1;
 
     int     nbytes = (int)(n_words * 4U);
-    UINTPTR src    = (UINTPTR)(BRAM_BASE_ADDR + bram_word_addr * 4U);
+    UINTPTR src    = (UINTPTR)src_addr;
 
-    // BRAM is a PL slave (uncached) and dst is non-cacheable -> no cache ops.
+    // Source (capture/wavelet BRAM) is a PL slave (uncached) and dst is
+    // non-cacheable -> no cache ops.
     if (XAxiCdma_SimpleTransfer(&cdma, src, (UINTPTR)dst, nbytes, NULL, NULL)
             != XST_SUCCESS) {
         return -2;
     }
 
-    // Poll for completion (600-byte transfer is microseconds; guard bounds it).
+    // Poll for completion (a few-KB transfer is microseconds; guard bounds it).
+    // NOTE: if src_addr is not covered by a segment in axi_cdma_0/Data, the AXI
+    // read never completes and IsBusy would spin forever -- the guard below is
+    // the only thing that breaks out of that case.
     uint32_t guard = 0;
     while (XAxiCdma_IsBusy(&cdma)) {
         if (++guard > 100000000U) return -3;   // timeout
@@ -84,4 +88,9 @@ int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words) {
         return -4;
     }
     return 0;
+}
+
+int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words) {
+    return pl_dma_read_addr(dst, (uintptr_t)(BRAM_BASE_ADDR + bram_word_addr * 4U),
+                            n_words);
 }

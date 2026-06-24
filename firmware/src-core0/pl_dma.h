@@ -26,10 +26,21 @@ extern uint8_t pl_dma_staging[];
 // non-cacheable. Returns 0 on success, negative on failure.
 int pl_dma_init(void);
 
+// Copy n_words 32-bit words from an arbitrary BRAM/PL source ADDRESS
+// (src_addr, an absolute AXI address in the CDMA's address space) to dst (must
+// be inside the non-cacheable DMA_BUF_ADDR section) via the CDMA. Blocks until
+// the transfer completes. Returns 0 on success, negative on error/timeout.
+//
+// The CDMA's address space (axi_cdma_0/Data in design_1_bd.tcl) must contain a
+// segment covering src_addr, or the read decodes to nothing and the transfer
+// never completes (XAxiCdma_IsBusy hangs). Currently mapped: the capture BRAM
+// (0x80000000), the wavelet results BRAM (0x90000000), and DDR via S_AXI_HP0.
+int pl_dma_read_addr(uint32_t *dst, uintptr_t src_addr, uint32_t n_words);
+
 // Copy n_words 32-bit words from the capture BRAM (word offset bram_word_addr)
 // to dst (must be inside the non-cacheable DMA_BUF_ADDR section) via the CDMA.
-// Blocks until the transfer completes. Returns 0 on success, negative on
-// error/timeout.
+// Thin wrapper over pl_dma_read_addr for the broadband capture path. Returns 0
+// on success, negative on error/timeout.
 int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words);
 
 #endif // PL_DMA_H

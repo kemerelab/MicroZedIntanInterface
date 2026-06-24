@@ -528,9 +528,11 @@ void pl_wav_hb_begin(void);                   // clear ptr, target = halfband RA
 void pl_wav_hb_push(int32_t coef);            // write one halfband Q1.17 tap
 uint32_t pl_wav_read_status(void);            // STATUS_REG_14
 
-// Streaming (network.c): rate-limited single-beat read of the results BRAM ->
-// UDP on WAV_UDP_PORT. (CDMA-from-results-BRAM is avoided -- the STFT branch
-// found it HANGS on real HW; the full DDR-resident path is v2.)
+// Streaming (network.c): on each column advance, AXI-CDMA the full results
+// surface (0x90000000) into a non-cacheable DDR staging buffer, then ship one
+// UDP packet on WAV_UDP_PORT. (Same CDMA path the broadband capture uses; the
+// STFT-branch "hang" was a missing axi_cdma_0/Data segment for 0x90000000, now
+// assigned in design_1_bd.tcl.)
 void wav_stream_init(void);
 void wav_stream_service(void);   // call from the core-0 maintenance loop
 
@@ -538,5 +540,6 @@ void wav_stream_service(void);   // call from the core-0 maintenance loop
 extern uint8_t  wav_cfg_enable, wav_cfg_n_octaves, wav_cfg_n_voices, wav_cfg_n_taps;
 extern uint32_t wav_cfg_gain;
 extern uint32_t wav_udp_packets_sent;
+extern uint32_t wav_dma_errors;    // diagnostic: CDMA read failures (not on the wire)
 
 #endif // MAIN_H

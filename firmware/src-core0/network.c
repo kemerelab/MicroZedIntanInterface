@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include "xil_io.h"
 #include "shared_print.h"
+#include "pl_dma.h"
 
 /*
 Binary Command Protocol:
@@ -812,21 +813,40 @@ void lfp_stream_service(void) {
 // overwrites each (lane,scale) bin on the octave that advanced, so we read the
 // whole current surface.
 //
-// IMPORTANT: the read is a rate-limited single-beat Xil_In32 loop, NOT CDMA.
-// The STFT branch found that a CDMA read from a results BRAM HANGS on real
-// hardware; until the DDR-resident path is built (v2) we read directly and
-// cap the work per call so the broadband loop is never starved.
+// READ PATH: AXI CDMA, the same way the broadband capture path reads the
+// capture BRAM. One CDMA transfer copies the full results surface
+// (WAV_K * WAV_N_SCALES complex int32 = 8 KB) from WAV_BRAM_BASE_ADDR into a
+// non-cacheable DDR staging region, then we repack the active sub-region into
+// the UDP packet from staging. (The old single-beat Xil_In32 loop is gone.)
+//
+// The earlier STFT branch "CDMA hang" was NOT a CDMA-from-BRAM limitation: the
+// results BRAM was reachable through the smartconnect_1 crossbar but its
+// address (0x90000000) was never assigned into the CDMA's address space
+// (axi_cdma_0/Data), so the read decoded to nothing and XAxiCdma_IsBusy spun
+// forever. design_1_bd.tcl now assigns 0x90000000 into axi_cdma_0/Data.
 // ============================================================================
 static struct udp_pcb *wav_pcb = NULL;
 static uint32_t wav_last_seq = 0xFFFFFFFF;
 uint32_t wav_udp_packets_sent = 0;
+uint32_t wav_dma_errors = 0;
 // 8-word header + K*N_SCALES complex int32 (re,im) = 32*32*2 = 2048 words.
 static uint32_t wav_pktbuf[8 + WAV_K * WAV_N_SCALES * 2] __attribute__((aligned(8)));
+
+// Full results surface in 32-bit words (DMA'd whole, repacked after).
+#define WAV_SURFACE_WORDS  ((uint32_t)WAV_K * WAV_N_SCALES * 2)
+// DDR staging for the CDMA: a sub-region of the non-cacheable pl_dma_staging
+// 1 MB section (see pl_dma.h). Placed 512 KB in, disjoint from the broadband
+// packet region at the front of the buffer (max 150 words), so the two paths
+// never alias even with an in-flight broadband pbuf.
+#define WAV_DMA_STAGING_OFFSET  0x80000U
+static uint32_t *const wav_dma_staging =
+    (uint32_t *)(DMA_BUF_ADDR + WAV_DMA_STAGING_OFFSET);
 
 void wav_stream_init(void) {
     wav_pcb = udp_new();
     wav_last_seq = 0xFFFFFFFF;
     wav_udp_packets_sent = 0;
+    wav_dma_errors = 0;
     if (wav_pcb == NULL) send_message("ERROR: Could not create wavelet UDP PCB\r\n");
 }
 
@@ -842,6 +862,15 @@ void wav_stream_service(void) {
     uint32_t pwords  = (uint32_t)WAV_K * nscales * 2;   // complex int32 (re,im)
     if (pwords > (uint32_t)WAV_K * WAV_N_SCALES * 2) return;  // config guard
 
+    // DMA the whole results surface (8 KB) BRAM -> non-cacheable DDR staging in
+    // one CDMA transfer, then repack from staging. On DMA error, skip this
+    // column (wav_last_seq unchanged so we retry next advance).
+    if (pl_dma_read_addr(wav_dma_staging, (uintptr_t)WAV_BRAM_BASE_ADDR,
+                         WAV_SURFACE_WORDS) != 0) {
+        wav_dma_errors++;
+        return;
+    }
+
     wav_pktbuf[0] = 0x5CA70900;                     // wavelet magic (low)  "SCALOG"
     wav_pktbuf[1] = 0xCAFEBABE;                     // magic (high)
     wav_pktbuf[2] = seq;                            // column index (== timestamp surrogate)
@@ -854,17 +883,18 @@ void wav_stream_service(void) {
     wav_pktbuf[6] = nscales | ((uint32_t)wav_cfg_n_taps << 16);
     wav_pktbuf[7] = wav_cfg_gain;
     // results layout: word(lane,scale) = (lane*WAV_N_SCALES + scale)*2; +0=re, +1=im.
-    // We read the active (lane, scale<nscales) sub-region, packed contiguously.
+    // We emit the active (lane, scale<nscales) sub-region, packed contiguously,
+    // reading the DMA'd staging copy instead of the BRAM directly.
     uint32_t o = 8;
     for (uint32_t lane = 0; lane < WAV_K; lane++) {
         uint32_t base = (lane * WAV_N_SCALES) * 2;
         for (uint32_t s = 0; s < nscales; s++) {
             uint32_t w = base + s * 2;
-            wav_pktbuf[o++] = Xil_In32(WAV_BRAM_BASE_ADDR + (w       << 2));  // re
-            wav_pktbuf[o++] = Xil_In32(WAV_BRAM_BASE_ADDR + ((w + 1) << 2));  // im
+            wav_pktbuf[o++] = wav_dma_staging[w];       // re
+            wav_pktbuf[o++] = wav_dma_staging[w + 1];   // im
         }
     }
-    // re-read the counter: if it advanced mid-read the surface is torn -> skip
+    // re-read the counter: if it advanced during the DMA the surface is torn -> skip
     if ((pl_wav_read_status() & 0x3FFFFFFF) != seq) return;
     wav_last_seq = seq;
 

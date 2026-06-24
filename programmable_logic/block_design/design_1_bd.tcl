@@ -854,6 +854,13 @@ proc create_root_design { parentCell } {
   assign_bd_address -offset 0x44A00000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_cdma_0/S_AXI_LITE/Reg] -force
   # CDMA master view: it must reach the capture BRAM (read src) and DDR via HP0 (write dst)
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
+  # Tier-3 wavelet results BRAM (0x90000000) into the CDMA master address space too.
+  # The crossbar path already exists (axi_cdma_0/M_AXI -> smartconnect_1/S01 -> M03 ->
+  # axi_bram_ctrl_2), but without this segment a CDMA read of 0x90000000 decodes to
+  # nothing, the AXI transaction never completes, and XAxiCdma_IsBusy hangs forever
+  # (the STFT-branch symptom). This assignment is what makes wav_stream_service's
+  # CDMA read of WAV_BRAM_BASE_ADDR reach the results BRAM.
+  assign_bd_address -offset 0x90000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
   assign_bd_address -offset 0x00000000 -range 0x40000000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
   # The PS GP masters can reach HP0 through the smartconnect_1 crossbar but never
   # address DDR that way -- exclude it so processing_system7_0/Data is clean.
