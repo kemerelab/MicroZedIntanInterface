@@ -190,6 +190,19 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 - `net.py` runs on macOS and Linux. Some socket options are platform-specific (e.g.
   `TCP_KEEPIDLE` is Linux-only, `TCP_KEEPALIVE` is the macOS equivalent) — guard new ones
   with `hasattr(socket, ...)`. See `configure_tcp_keepalive()`.
+- **A TCP command *burst* (e.g. the LFP coefficient upload in `lfp_config`/`lfp_sweep`, ~43
+  back-to-back commands) can hang the board on the *first* interaction after (re)connecting,
+  intermittently — but sending a single `get_status` (any one command→response) first
+  "primes" it and the burst then goes through; a clean/long power-cycle also clears it.
+  Likely cause: **DDR data remanence** — a Zynq power cycle reloads the bitstream and resets
+  the PS, but does **not** zero DRAM (only `.bss`/`.sbss` are zeroed by the C startup), so
+  stale DDR-resident state (most likely the lwIP pbuf pool / GEM Ethernet BD rings) leaves
+  the send/ack path flaky until a single round-trip drains it; a longer power-off lets DRAM
+  decay so "it goes away." The coef-write path itself does **not** busy-wait and the command
+  parser resyncs on `accept`, so it's not a firmware spin. Workaround: do one `get_status`
+  right after connecting before any burst (`lfp_sweep` already preflights with one). Proper
+  fix (TODO): explicitly zero / re-init the GEM descriptor rings + lwIP pools at boot rather
+  than relying on implicit zero, and confirm `_start` zeroes the `NOLOAD` `.sbss`.
 - Git: remote `origin` uses the `github.com-microzed` SSH host alias. **Push feature
   branches to `origin` by default** — after committing work, `git push -u origin <branch>`
   (the maintainer debugs on a separate machine and needs branches available remotely). Do
