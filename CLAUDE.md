@@ -157,6 +157,16 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 
 ## Conventions & gotchas
 
+- **PL-first: ask "can the fabric solve this?" before changing the protocol or PS software.**
+  The PS is a single, bare-metal, **fully-polled, run-to-completion** core (no interrupts —
+  `platform.c` sets up only caches+UART, the CDMA runs `XAxiCdma_IntrDisable`). So PS-software
+  fixes (e.g. batching UDP packets) are band-aids that still load that one core; the PL can
+  usually restructure the data so the bottleneck disappears, deterministically. Example: the
+  per-packet timing jitter and the LFP/wavelet contention come from doing **3 separate polled
+  CDMA transfers** (broadband/LFP/DWT BRAMs) + 3 sends per cycle — the PL fix is to assemble
+  **all PL→PS data into one shared BRAM stream** so the PS does a *single* DMA + demux-by-magic
+  to the right UDP port (LFP adds ~10% data, DWT a little at the LFP rate — negligible vs the
+  3-way poll contention). Reach for protocol/software changes only after ruling out a PL one.
 - `vivado_project/` and `vitis_workspace/` are **generated and gitignored** — never commit
   them. Regenerate from the `scripts/` tcl/py files.
 - The PL crosses two clock domains (131.25 MHz AXI fabric ↔ 84 MHz PL data path) via
