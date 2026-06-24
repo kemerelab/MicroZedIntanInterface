@@ -10,9 +10,9 @@ module lfp_dsp_block_tb;
     localparam int FIRST_AMP = 2;
     localparam int N_CYCLES  = 35;
     localparam int COEF_W    = 18;
-    localparam int NUM_TAPS  = 25;
-    localparam int DECIM_R   = 15;
-    localparam int K_PACKETS = 165;
+    localparam int NUM_TAPS  = 131;   // Phase A 3 kHz anti-alias (odd -> partial group)
+    localparam int DECIM_R   = 10;    // Phase A: 30 kHz / 10 = 3 kHz
+    localparam int K_PACKETS = 160;
     localparam logic [7:0] LANE_MASK = 8'b0010_0101;
     localparam int LFP_BRAM_AW = 14;
     localparam int MAXW = 8192;
@@ -32,7 +32,12 @@ module lfp_dsp_block_tb;
     logic [LFP_BRAM_AW-1:0] lfp_wr_addr;
     logic                   lfp_overrun;
 
-    lfp_dsp_block #(.LFP_BRAM_AW(LFP_BRAM_AW)) dut (
+    // This TB checks the integration *plumbing* (amplifier-slot gate, offset-
+    // binary<->signed, 2x16 BRAM packing) against the FIR reference, so force the
+    // FIR datapath (USE_CIC=0). The CIC datapath's math is verified end-to-end by
+    // cic_chain_tb (CIC->glue->halfband, bit-exact); the wrapper plumbing is
+    // identical for both since only the engine in the middle changes.
+    lfp_dsp_block #(.LFP_BRAM_AW(LFP_BRAM_AW), .USE_CIC(0)) dut (
         .clk(clk), .rstn(rstn),
         .dsp_sample_valid(dsp_sample_valid), .dsp_sample_data(dsp_sample_data),
         .dsp_sample_slot(dsp_sample_slot), .dsp_packet_tick(dsp_packet_tick),
@@ -93,9 +98,11 @@ module lfp_dsp_block_tb;
             end
             @(negedge clk); dsp_packet_tick = 1;
             @(negedge clk); dsp_packet_tick = 0;
-            repeat (3) @(negedge clk);
+            // Pad the inter-packet gap to cover the worst-case compute pass
+            // (real HW has ~2800 clk/packet*R; this TB streams far faster).
+            repeat (1200) @(negedge clk);
         end
-        repeat (4000) @(posedge clk);
+        repeat (12000) @(posedge clk);
 
         // ---- compare ----
         if (n_got != n_exp) begin

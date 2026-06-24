@@ -75,14 +75,42 @@ logic [7:0] channel_enable_reg;  // [3:0] = port 0 streams, [7:4] = port 1 strea
 // Protected COPI message words (36 x 16-bit words) - only updated when transmission inactive
 logic [15:0] copi_words_reg [0:35];
 
-// Reserved control registers for future use
-wire [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // Reserved for future control
+// Reserved control register, repurposed as the analytic-chirp config (CTRL_REG_3).
+// Compact single-register encoding (kept clear of STFT regs 28-30 / playback 31):
+//   [0]     chirp_mode  (1 = emit a memory-free swept-sine instead of the
+//                        fixed-frequency debug sine; independent of debug_mode_reg
+//                        which must also be set for any synthetic data)
+//   [1]     reserved    (future: log/exp sweep select)
+//   [7:2]   phase_stride (per-channel phase offset stride, 6-bit; applied as
+//                        channel_offset * (stride << CHIRP_STRIDE_SHIFT) so
+//                        channels are visibly distinguishable)
+//   [19:8]  f_span      (12-bit; f_max = f_span << CHIRP_FSPAN_SHIFT in 32-bit
+//                        phase-accumulator units -> ~0.46 Hz/step, full = ~1.9 kHz)
+//   [31:20] sweep_rate  (12-bit; freq_acc increment per packet =
+//                        sweep_rate << CHIRP_RATE_SHIFT; sets sweep speed/period)
+// See data_generator_core.sv chirp NCO block + docs/lfp-dsp-engine-design.md.
+wire [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // chirp config
+localparam int CHIRP_PHW          = 32;  // phase/freq accumulator width
+localparam int CHIRP_LUT_IDX_HI   = CHIRP_PHW - 1;          // top 9 bits = LUT idx
+localparam int CHIRP_LUT_IDX_LO   = CHIRP_PHW - 9;          // -> [31:23]
+localparam int CHIRP_FSPAN_SHIFT  = 16;  // f_span (12b) -> f_max in phase units
+localparam int CHIRP_RATE_SHIFT   = 9;   // sweep_rate (12b) -> freq_acc incr/packet
+localparam int CHIRP_STRIDE_SHIFT = 24;  // per-channel phase stride placement
+
+logic        chirp_mode_reg;
+logic [5:0]  chirp_stride_reg;
+logic [11:0] chirp_fspan_reg;
+logic [11:0] chirp_rate_reg;
 
 // Safe control register updates - only when transmission is not active
 always_ff @(posedge clk) begin
     if (!rstn) begin
         reset_timestamp_reg <= 1'b0;
         debug_mode_reg <= 1'b0;
+        chirp_mode_reg <= 1'b0;
+        chirp_stride_reg <= 6'd0;
+        chirp_fspan_reg <= 12'd0;
+        chirp_rate_reg <= 12'd0;
         loop_count_reg <= 32'd0;
         phase0_reg <= 4'd0;
         phase1_reg <= 4'd0;
@@ -99,6 +127,11 @@ always_ff @(posedge clk) begin
         if (!transmission_active) begin
             reset_timestamp_reg <= ctrl_regs_pl[0*32 + 1];
             debug_mode_reg <= ctrl_regs_pl[0*32 + 3];
+            // Chirp config (CTRL_REG_3); latched while inactive like debug_mode.
+            chirp_mode_reg   <= ctrl_regs_pl[3*32 + 0];
+            chirp_stride_reg <= ctrl_regs_pl[3*32 + 2  +: 6];
+            chirp_fspan_reg  <= ctrl_regs_pl[3*32 + 8  +: 12];
+            chirp_rate_reg   <= ctrl_regs_pl[3*32 + 20 +: 12];
             loop_count_reg <= ctrl_regs_pl[1*32 +: 32];
             // CTRL_REG_2 layout (widened for the second port; low bits unchanged
             // so a host that only writes the original 4-bit channel_enable at
@@ -177,6 +210,36 @@ logic [31:0] loop_counter;
 logic [8:0] dummy_data_index;
 // Debug mode 512-entry sine lookup table (unsigned 16-bit values)
 logic [15:0] sine_lut [0:511];
+
+// ---- Analytic chirp NCO (memory-free; reuses the sine LUT) ----------------
+// Dual accumulator updated once per packet:
+//   freq_acc  triangles between 0 and f_max (= fspan << CHIRP_FSPAN_SHIFT),
+//             stepping by (rate << CHIRP_RATE_SHIFT) each packet,
+//   phase_acc += freq_acc each packet.
+// The per-channel LUT index = (phase_acc + channel_offset*stride)[31:23].
+logic [CHIRP_PHW-1:0] chirp_freq_acc;   // current sweep frequency (phase units)
+logic [CHIRP_PHW-1:0] chirp_phase_acc;  // running phase
+logic                 chirp_sweep_up;   // triangle direction
+wire  [CHIRP_PHW-1:0] chirp_fmax  = {chirp_fspan_reg, {CHIRP_FSPAN_SHIFT{1'b0}}};
+wire  [CHIRP_PHW-1:0] chirp_rstep = {{(CHIRP_PHW-12-CHIRP_RATE_SHIFT){1'b0}},
+                                     chirp_rate_reg, {CHIRP_RATE_SHIFT{1'b0}}};
+
+// Per-slot chirp phase, REGISTERED off the current cycle_counter. The
+// channel_offset*stride multiply lives here in its own pipeline stage so it
+// stays OFF the cycle_counter->fifo_write_data critical path (which fails 84 MHz
+// otherwise). cycle_counter is stable across a cycle's 80 states and the per-
+// packet chirp_phase_acc only advances at the packet boundary, so the registered
+// ch_phase is the correct value for the current slot well before it is consumed
+// at state 77. The 8 lane LUT reads + output mux (short) stay at state 77.
+logic [CHIRP_PHW-1:0] chirp_ch_phase;
+always_ff @(posedge clk) begin : chirp_phase_precompute
+    logic [5:0]  c_off;
+    logic [10:0] s_prod;
+    c_off  = (cycle_counter >= 6'd2) ? (cycle_counter - 6'd2) : 6'd0;
+    s_prod = c_off[4:0] * chirp_stride_reg;     // 5b*6b, isolated stage
+    chirp_ch_phase <= chirp_phase_acc +
+                      ({{(CHIRP_PHW-11){1'b0}}, s_prod} <<< CHIRP_STRIDE_SHIFT);
+end
 
 // Initialize sine lookup table
 initial begin
@@ -579,6 +642,9 @@ always_ff @(posedge clk) begin
         fifo_packet_end_flag <= 1'b0;
 
         dummy_data_index <= 9'd0;
+        chirp_freq_acc   <= '0;
+        chirp_phase_acc  <= '0;
+        chirp_sweep_up   <= 1'b1;
         dsp_sample_valid <= 1'b0;
         dsp_sample_slot  <= 6'd0;
         dsp_packet_tick  <= 1'b0;
@@ -643,6 +709,26 @@ always_ff @(posedge clk) begin
                     // Real CIPO data, both ports.
                     fifo_write_data <= {cipo3_data[cycle_counter], cipo2_data[cycle_counter],
                                         cipo1_data[cycle_counter], cipo0_data[cycle_counter]};
+                end else if (chirp_mode_reg) begin
+                    // ---- Analytic chirp: one swept sinusoid (same frequency on
+                    // every channel) with a host-configurable per-channel phase
+                    // stride so all 8 lanes x 32 slots are visibly distinguishable.
+                    // The phase comes from the dual-accumulator NCO (advanced once
+                    // per packet); the top 9 bits of (phase_acc + per-channel
+                    // offset) index the existing 512-entry sine LUT. No BRAM.
+                    logic [15:0]           cv [0:7];         // 8 lane sine values
+                    // ch_phase (= phase_acc + slot*stride) is the REGISTERED
+                    // chirp_ch_phase (the multiply is pipelined off this path).
+                    for (int l = 0; l < 8; l++) begin
+                        logic [CHIRP_PHW-1:0] lane_phase;
+                        // fan the 8 lanes out by 1/8-period steps so a single
+                        // packet shows 8 distinct phases too.
+                        lane_phase = chirp_ch_phase +
+                                     ({{(CHIRP_PHW-3){1'b0}}, l[2:0]} <<< (CHIRP_PHW-3));
+                        cv[l] = sine_lut[lane_phase[CHIRP_LUT_IDX_HI:CHIRP_LUT_IDX_LO]];
+                    end
+                    fifo_write_data <= {cv[7], cv[6], cv[5], cv[4],
+                                        cv[3], cv[2], cv[1], cv[0]};
                 end else begin
                     // Debug synthetic sine. Phase 1 bandwidth test: port 1 is
                     // filled too (phase-offset from port 0 so it is visibly
@@ -681,6 +767,24 @@ always_ff @(posedge clk) begin
                     packets_sent <= packets_sent + 1;
                     // Increment dummy data index for continuous sine wave across packets
                     dummy_data_index <= dummy_data_index + 9'd1;
+
+                    // Analytic chirp NCO advance (once per packet). freq_acc
+                    // triangles 0<->f_max; phase_acc integrates it. Clamp at the
+                    // turning points so the sweep reverses cleanly.
+                    if (chirp_sweep_up) begin
+                        if (chirp_freq_acc + chirp_rstep >= chirp_fmax) begin
+                            chirp_freq_acc <= chirp_fmax;
+                            chirp_sweep_up <= 1'b0;
+                        end else
+                            chirp_freq_acc <= chirp_freq_acc + chirp_rstep;
+                    end else begin
+                        if (chirp_freq_acc <= chirp_rstep) begin
+                            chirp_freq_acc <= '0;
+                            chirp_sweep_up <= 1'b1;
+                        end else
+                            chirp_freq_acc <= chirp_freq_acc - chirp_rstep;
+                    end
+                    chirp_phase_acc <= chirp_phase_acc + chirp_freq_acc;
                     // DSP tap: the packet is complete -> advance the engine's ring
                     // (one tick per packet, after all 35 slot samples are ingested).
                     dsp_packet_tick <= 1'b1;

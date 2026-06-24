@@ -62,7 +62,19 @@
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
 #define CTRL_REG_1_OFFSET   (1 * 4)   // Loop count
 #define CTRL_REG_2_OFFSET   (2 * 4)   // Phase select, channel enable
+#define CTRL_REG_3_OFFSET   (3 * 4)   // Analytic chirp NCO config (see data_generator_core.sv)
 #define CTRL_REG_MOSI_START_OFFSET  (CTRL_REG_0_OFFSET + (4 * 4)) // Offset for MOSI control words
+
+// CTRL_REG_3 analytic-chirp config packing:
+//   [0] chirp_mode, [1] reserved, [7:2] phase_stride (6b),
+//   [19:8] f_span (12b -> f_max), [31:20] sweep_rate (12b -> freq_acc step/pkt)
+#define CTRL_CHIRP_MODE          (1u << 0)
+#define CTRL_CHIRP_STRIDE_SHIFT  2
+#define CTRL_CHIRP_STRIDE_MASK   (0x3Fu << 2)
+#define CTRL_CHIRP_FSPAN_SHIFT   8
+#define CTRL_CHIRP_FSPAN_MASK    (0xFFFu << 8)
+#define CTRL_CHIRP_RATE_SHIFT    20
+#define CTRL_CHIRP_RATE_MASK     (0xFFFu << 20)
 
 // Aux command sequencer / override layer control registers (PL regs 22..24)
 #define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // enable, bank select, fast settle/digout/dsp config
@@ -203,9 +215,12 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         2   // 1.2: AXI-CDMA read path; get_status config tracking
+#define FIRMWARE_VERSION_MINOR         3   // 1.3: LFP default R=10 (3 kHz) + dual-MAC engine;
+                                           //      analytic chirp NCO (CTRL_REG_3). get_status adds
+                                           //      chirp config. Status wire = 168 bytes.
+                                           // 1.2: AXI-CDMA read path; get_status config tracking
                                            //      (aux_ctrl + RHD register mirror); fast-settle/DSP/
-                                           //      digout via TTL/GPIO. Status wire = 148 bytes.
+                                           //      digout via TTL/GPIO.
 #define FIRMWARE_VERSION_PATCH         0
 #define FIRMWARE_VERSION_BUILD         0
 #define FIRMWARE_VERSION_WORD          ((FIRMWARE_VERSION_MAJOR << 24) | \
@@ -294,6 +309,14 @@ typedef struct __attribute__((packed)) {
     uint8_t  lfp_overrun;       // sticky compute-overrun flag
     uint8_t  lfp_reserved[3];
 
+    // Analytic chirp NCO config (CTRL_REG_3 read-back). Per the "get_status
+    // reports everything configurable" rule. 8 bytes.
+    uint8_t  chirp_mode;        // 1 = chirp debug signal enabled
+    uint8_t  chirp_stride;      // per-channel phase stride (6-bit)
+    uint16_t chirp_fspan;       // f_max field (12-bit)
+    uint16_t chirp_rate;        // sweep_rate field (12-bit)
+    uint8_t  chirp_reserved[2];
+
 } status_response_t;
 
 // Flag definitions
@@ -373,6 +396,12 @@ void pl_set_phase_select(int phase0, int phase1);
 void pl_set_phase_select_b(int phase2, int phase3);  // port B (second cable)
 void pl_set_debug_mode(int enable);
 void pl_set_channel_enable(int channel_enable);
+void pl_set_chirp(uint8_t mode, uint8_t stride, uint16_t fspan, uint16_t rate);  // CTRL_REG_3
+uint32_t pl_get_chirp_cfg(void);  // raw CTRL_REG_3 read-back
+
+// Tracked chirp config (mirrored into status_response_t)
+extern uint8_t  chirp_cfg_mode, chirp_cfg_stride;
+extern uint16_t chirp_cfg_fspan, chirp_cfg_rate;
 
 // Status reading
 uint64_t pl_get_timestamp(void);
