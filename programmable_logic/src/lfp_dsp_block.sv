@@ -19,9 +19,13 @@
 // Header (matches remote/net.py receive_lfp + the firmware wire format):
 //   w0 = LFP_MAGIC_LOW (0x1F1FBEEF)
 //   w1 = 0xCAFEBABE
-//   w2/w3 = 64-bit master timestamp of the LAST broadband sample that fed this
-//           decimated frame (the same master count the broadband header stamps,
-//           latched on the decimation tick = the newest contributing sample).
+//   w2/w3 = 64-bit master timestamp = the master count of the NEWEST broadband
+//           sample in this output's decimation window (these are FIR filters, so
+//           one real, already-acquired broadband sample is the newest input in
+//           the output's support). For frame m at total decimation R this is
+//           broadband packet R*m+(R-1) (R=10 -> 10m+9); the same master count the
+//           broadband header stamps, latched on the decimation tick. NB: newest
+//           *input*, not the represented instant (host subtracts the group delay).
 //   w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24)
 //   w5 = PL-maintained LFP frame sequence number (++ per emitted frame)
 //
@@ -248,11 +252,14 @@ module lfp_dsp_block #(
     // engine just consumed has master count (dsp_master_timestamp - 1) -- exactly
     // the value the broadband header stamps for that packet. We latch that.
     //
-    // On frame_tick (the engine's decimation tick = the newest contributing
-    // broadband sample) we snapshot ts_ingest into the frame header. Between
-    // frame_tick and the frame's first out_valid no new packet_tick arrives (the
-    // next decimation tick is R packets away, the frame emits within ~num_taps
-    // clk), so ts_ingest is stable across the frame.
+    // On frame_tick (the engine's decimation tick) we snapshot ts_ingest into the
+    // header: it is the master count of the NEWEST broadband sample in this
+    // output's decimation window (frame m at total decimation R -> packet
+    // R*m+(R-1); the /5 CIC + /2 halfband make that 10m+9). The cascade latency
+    // from that packet closing the window to frame_tick (CIC comb + glue replay,
+    // a few hundred clk) is far less than one ~2800-clk packet, so no new
+    // packet_tick arrives in between and ts_ingest is exactly that count; it also
+    // stays stable through the frame's first out_valid (~num_taps clk later).
     // -----------------------------------------------------------------
     logic [63:0] ts_ingest;     // master count of the last fully-ingested packet
     logic [63:0] ts_frame;      // snapshot for the in-flight frame's header

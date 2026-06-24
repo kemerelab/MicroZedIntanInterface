@@ -31,17 +31,36 @@ a full `[header|samples]` frame, so the PS never reads a torn frame.
 
 ## Timestamp semantics
 
-**`ts` = the 64-bit master count of the LAST (most-recent) broadband sample that contributed
-to this decimated frame** — the *same* counter the broadband packet header stamps (header
-word 1), latched on the decimation tick. It is an **absolute master timestamp**, not a frame
-index.
+The decimating filters are just FIR: when one emits an output there is exactly one real,
+already-acquired broadband sample that is the **newest input in that output's support window**,
+and the stamp is that sample's master count.
 
-`data_generator_core.sv` exposes the live master `timestamp` as `dsp_master_timestamp`. The
-master counter increments on the same clock edge `dsp_packet_tick` rises, so the packet whose
-samples the engine just consumed has master count `dsp_master_timestamp - 1`; `lfp_dsp_block`
-latches that into `ts_ingest` on each `dsp_packet_tick`, and snapshots `ts_ingest` into the
-frame header on `frame_tick`. Between `frame_tick` and the frame's first output no new
-`packet_tick` arrives (next decimation tick is R packets away), so the value is stable.
+**`ts` = the master count of the newest broadband sample in this output's decimation window**
+— i.e. the most recent broadband packet clocked into the filter bank for this output, the
+*same* counter the broadband header stamps (word 1). For frame `m` at total decimation `R` it
+is broadband packet `R·m + (R−1)`. Causal, monotonic, `R` apart; an absolute master timestamp,
+not a frame index.
+
+Accounting through the CIC(/5)→halfband(/2)=/10 cascade:
+- CIC emits on every 5th broadband `packet_tick` → CIC output `k` ↔ newest broadband packet `5k+4`.
+- halfband emits on every 2nd CIC output → halfband output `m` ↔ CIC output `2m+1` ↔ newest
+  broadband packet `5·(2m+1)+4 = 10m+9`.
+
+Implementation: `data_generator_core.sv` exposes the live master `timestamp` as
+`dsp_master_timestamp` (it has already incremented to "just-finished packet + 1" on the edge
+`dsp_packet_tick` rises, so the finished packet's count is `dsp_master_timestamp − 1`).
+`lfp_dsp_block` updates `ts_ingest` to that on **every** `dsp_packet_tick`, and snapshots it
+into the header on `frame_tick` (the halfband decimation tick). The cascade latency (CIC comb
+pass + glue replay, a few hundred clk) is far less than one ~2800-clk broadband packet, so no
+new `packet_tick` arrives in between and the snapshot is exactly `10m+9`. (A frame-behind slip
+under load would set `compute_overrun` → header word 4 bit 24.)
+
+**This marks the newest *input* sample, not the instant the LFP value represents** — a
+linear-phase anti-alias filter's output is centered earlier by the chain's group delay (a
+fixed, known number of broadband samples). Subtract the group delay to align an LFP sample
+with the broadband stream's *content*; use the stamp directly to know which input data has
+been folded in. No RTL change for correctness — the stamp is the causal window-edge count by
+design.
 
 ## LFP lane mask = broadband mask (single source of truth)
 

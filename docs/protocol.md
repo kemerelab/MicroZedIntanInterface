@@ -154,7 +154,7 @@ little-endian:
 | words | field | notes |
 |------:|-------|-------|
 | 0–1 | magic `0xCAFEBABE_1F1FBEEF` | word0 = `0x1F1FBEEF`, word1 = `0xCAFEBABE` (distinct from broadband) |
-| 2–3 | 64-bit master **timestamp** | the master count of the **LAST (most-recent) broadband sample** that contributed to this frame — the *same* counter the broadband header stamps (header word 1), latched on the engine's decimation tick. An **absolute master timestamp**, not a frame index. |
+| 2–3 | 64-bit master **timestamp** | the master count of the **newest broadband sample in this output's decimation window** — the most recent broadband packet clocked into the (FIR) filter bank for this output. For frame `m` at total decimation `R` it is broadband packet `R·m + (R−1)` (R=10 → `10m+9`); the *same* counter the broadband header stamps (word 1). Causal, monotonic, `R` apart — an **absolute master timestamp**, not a frame index. NB: this is the newest *input* sample, not the instant the LFP value represents — subtract the filter group delay to align with broadband *content*. |
 | 4 | `[7:0]` lane_mask · `[15:8]` decim_R · `[23:16]` num_taps · `[31:24]` overrun | self-describing config; `lane_mask` = the broadband `channel_enable` mask |
 | 5 | 32-bit frame sequence number | PL-maintained (++ per emitted frame); LFP-stream drop detection |
 | 6… | payload: per enabled lane, 32 decimated samples, **offset binary** 16-bit, 2 per word | `popcount(lane_mask) × 32` samples = `popcount × 16` words |

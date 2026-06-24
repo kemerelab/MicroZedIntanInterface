@@ -152,7 +152,7 @@ gone). Implemented layout (one frame = one wire packet):
 |------:|-------|-------|
 | 0 | magic low `0x1F1FBEEF` | distinct low word vs broadband's `0xDEADBEEF` |
 | 1 | magic high `0xCAFEBABE` | |
-| 2–3 | 64-bit master **timestamp** | the master count of the **LAST (most-recent) broadband sample** that contributed to this decimated frame — the *same* counter the broadband header stamps (header word 1), latched in `lfp_dsp_block` on the engine's decimation tick (`frame_tick`/`start_pass`). It is an **absolute master timestamp**, not a frame index. |
+| 2–3 | 64-bit master **timestamp** | the master count of the **newest broadband sample in this output's decimation window** — i.e. the most recent broadband packet that was clocked into the filter bank for this output. The decimating filters are just FIR: when one emits an output, exactly one real, already-acquired broadband sample is the newest input in that output's support, and this is its master count (the *same* counter the broadband header stamps, word 1). For frame `m` at total decimation `R` it is broadband packet `R·m + (R−1)` (e.g. R=10 → `10m+9`). Causal, monotonic, `R` apart — an **absolute master timestamp**, not a frame index. (See "timestamp accounting" below for the CIC→halfband bookkeeping.) |
 | 4 | `[7:0]` lane_mask · `[15:8]` decim_R · `[23:16]` num_taps · `[31:24]` overrun | `lane_mask` = the **broadband `channel_enable` mask** (single source of truth; see below) |
 | 5 | 32-bit sequence number | PL-maintained LFP frame counter (++ per emitted frame), for drop detection |
 | 6… | payload: enabled lanes × 32 ch × 16-bit, offset-binary (2 per word) | `0xFF` → 256 ch = 128 words |
@@ -162,9 +162,31 @@ gone). Implemented layout (one frame = one wire packet):
 from `lfp_cfg[15:8]`. The LFP filters exactly the broadband-enabled lanes — one place to pick
 streams (`set_channels`). `CMD_LFP_SET_CHANNELS` is deprecated (firmware accepts-and-ignores).
 
-Host alignment: an LFP sample stamped `T` ↔ broadband sample `T`; the filter group delay is a
-fixed documented offset. The plugin exposes this as a second ~3 kHz DataStream
-(`A_LFP1…`, `B_LFP1…`), alongside the 30 kHz broadband stream.
+**Timestamp accounting (CIC→halfband).** The chain is CIC(/5) → halfband(/2) = /10, each a
+decimating FIR. Trace one output's *newest input* through the cascade:
+- The CIC emits an output frame on every 5th broadband `packet_tick` (`run_comb` when
+  `decim_cnt` wraps at R=5), so CIC output `k` has newest broadband packet `5k+4`.
+- The halfband ingests one sample per CIC output and emits on every 2nd one (`decim_phase`),
+  so halfband output `m` has newest CIC input = CIC output `2m+1`, i.e. newest broadband
+  packet `5·(2m+1)+4 = 10m+9`.
+
+`lfp_dsp_block` keeps a single register `ts_ingest`, updated to `(master_timestamp − 1)` on
+**every** broadband `packet_tick` (the live counter has already incremented to "just-finished
+packet + 1" on that edge, so `−1` is the count the broadband header carries for that packet).
+On `frame_tick` (the halfband's decimation tick / `start_pass`) it snapshots `ts_ingest` into
+the header. The cascade latency from "packet `10m+9` closes the window" to "`frame_tick` fires"
+(CIC comb pass + glue replay) is a few hundred clk — far less than the ~2800-clk broadband
+packet period — so **no new `packet_tick` arrives in between**, and the snapshot is exactly
+`10m+9`. (If the engine ever fell a frame behind under load, `compute_overrun` latches and is
+reported in header word 4 bit 24.)
+
+**Host alignment.** The stamp marks *which broadband sample is the newest one folded into this
+LFP value* — it is **not** the instant the LFP value represents. A linear-phase anti-alias
+filter's output is centered earlier than its newest input by the chain's **group delay** (a
+fixed, known number of broadband samples). To align an LFP sample with the broadband stream's
+*content*, subtract that group delay; to align with *which input data has been seen*, use the
+stamp directly. The plugin exposes this as a second ~3 kHz DataStream (`A_LFP1…`, `B_LFP1…`),
+alongside the 30 kHz broadband stream.
 
 ## 5. PL plumbing summary
 

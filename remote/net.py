@@ -1362,12 +1362,18 @@ def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
     complete wire packet (header + samples) into its output BRAM and the PS just
     CDMAs it into a pbuf and sends it. Header layout:
       w0 = LFP_MAGIC_LOW (0x1F1FBEEF), w1 = 0xCAFEBABE
-      w2/w3 = 64-bit master timestamp = the master count of the LAST (most-recent)
-              broadband sample that contributed to this decimated frame -- the
-              SAME counter the broadband packet header stamps, latched on the
-              decimation tick. (Frames are spaced ~decim_R*decimation_stages
-              broadband packets apart; this is an absolute master timestamp, not a
-              frame index.)
+      w2/w3 = 64-bit master timestamp = the master count of the NEWEST broadband
+              sample in this output's decimation window -- i.e. the most recent
+              broadband packet that was clocked into the (FIR) filter bank for
+              this output. The decimating filters are just FIR: when one emits a
+              sample there is exactly one real, already-acquired broadband sample
+              that is the newest input in that output's support, and this is its
+              master count (the SAME counter the broadband header stamps). For
+              frame m at total decimation R it is broadband packet R*m + (R-1)
+              (R=10 -> 10m+9). Causal, monotonic, R apart -- an absolute master
+              timestamp, not a frame index. NB: this marks the newest *input*
+              sample, not the instant the LFP value represents; subtract the
+              filter group delay to align with broadband *content*.
       w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24); lane_mask =
            the broadband channel_enable mask (single source of truth).
       w5 = PL-maintained LFP frame sequence number (++ per emitted frame)."""
