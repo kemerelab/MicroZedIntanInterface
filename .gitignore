@@ -52,3 +52,7 @@ programmable_logic/sim/wav_*.hex
 programmable_logic/sim/wav_meta.txt
 programmable_logic/sim/__pycache__/
 remote/ripple_envelope.csv
+
+# Python bytecode cache
+__pycache__/
+*.pyc

@@ -14,9 +14,9 @@ N_CYCLES  = 35             # cycle_counter range 0..34
 COEF_W    = 18
 COEF_FRAC = 17
 OUT_W     = 16
-NUM_TAPS  = 25
-DECIM_R   = 15
-K_PACKETS = 165            # > ring-fill; 11 decimation frames
+NUM_TAPS  = 131            # Phase A 3 kHz anti-alias length (odd -> partial last group)
+DECIM_R   = 10             # Phase A: 30 kHz / 10 = 3 kHz
+K_PACKETS = 160            # > ring-fill; 16 decimation frames
 LANE_MASK = 0b0010_0101    # lanes 0, 2, 5
 OFFSET    = 0x8000
 JUNK      = 0xDEAD         # aux-slot filler that must never reach the output

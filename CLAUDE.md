@@ -126,6 +126,13 @@ core 1 at `0x20000000`.
 - The firmware ELFs and FSBL don't depend on the PL clocks, so a PL-only change needs only
   a bitstream re-stage + `bootgen` (below), not a firmware rebuild.
 - A clean PL build is ~13–16 min (longer if it congests).
+- **Incremental PL rebuilds can use a STALE netlist.** `scripts/build_bitstream.tcl` runs
+  `reset_run synth_1` (the *top* run only). The `data_generator` is an **out-of-context (OOC)
+  module run** (`design_1_data_generator_0_synth_1`) that it does **not** reset — so after
+  editing `data_generator` or its submodules, an incremental `build_bitstream.tcl`
+  re-implements the *old* OOC netlist and your RTL change silently doesn't take. Either
+  `reset_run design_1_data_generator_0_synth_1` first, or rebuild from scratch via
+  `create_vivado_project.tcl` → `build_bitstream.tcl`.
 
 **Bootable SD card:**
 ```bash
@@ -160,6 +167,17 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 - The PL data path (`data_generator`, 84 MHz) must be reset from the **84 MHz**
   `proc_sys_reset_0_84M`, **not** the AXI/175-domain reset — a cross-domain reset fails
   timing on ~20k endpoints. (Root-caused in `docs/routing_report.md`.)
+- **PS↔BRAM bulk reads are a three-way tension — validate any new result-BRAM read path on
+  hardware.** The CPU's `M_AXI_GP` long burst reads corrupt the 0xFF broadband stream;
+  single-beat `Xil_In32` reads are **slow** and starve the core-0 loop (~2100 reads ≈ 0.5 ms
+  for one STFT spectrum); **CDMA (BRAM→DDR over HP0)** is the fast path for the capture BRAM —
+  but a CDMA read of the STFT *result* BRAM **hung on real hardware**, forcing a rate-limited
+  single-beat fallback. So CDMA-from-BRAM is **not** a guaranteed drop-in for a new
+  analysis-result BRAM; prove the read path on HW before relying on it.
+- **A compute pass that spans multiple acquisition packets must snapshot its inputs.** The
+  next 30 kHz packet's data arrives *during* a long pass, so a single-buffered input gets
+  overwritten mid-pass (this bit the CIC LFP path; the FIR decimator avoids it with a ring +
+  `head_snap`). Snapshot or double-buffer the pass inputs.
 - `write_fifo` in `fifo_bram_interface.sv` must **not** be reset element-by-element — that
   forces ~18k flip-flops + a 256:1 read mux and a routing-congestion hotspot. Leaving the
   array unreset makes it infer LUTRAM (safe: entries are only read after being written).
@@ -172,8 +190,24 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 - `net.py` runs on macOS and Linux. Some socket options are platform-specific (e.g.
   `TCP_KEEPIDLE` is Linux-only, `TCP_KEEPALIVE` is the macOS equivalent) — guard new ones
   with `hasattr(socket, ...)`. See `configure_tcp_keepalive()`.
-- Git: remote `origin` uses the `github.com-microzed` SSH host alias. Commit/push only
-  when asked.
+- **A TCP command *burst* (e.g. the LFP coefficient upload in `lfp_config`/`lfp_sweep`, ~43
+  back-to-back commands) can hang the board on the *first* interaction after (re)connecting,
+  intermittently — but sending a single `get_status` (any one command→response) first
+  "primes" it and the burst then goes through; a clean/long power-cycle also clears it.
+  Likely cause: **DDR data remanence** — a Zynq power cycle reloads the bitstream and resets
+  the PS, but does **not** zero DRAM (only `.bss`/`.sbss` are zeroed by the C startup), so
+  stale DDR-resident state (most likely the lwIP pbuf pool / GEM Ethernet BD rings) leaves
+  the send/ack path flaky until a single round-trip drains it; a longer power-off lets DRAM
+  decay so "it goes away." The coef-write path itself does **not** busy-wait and the command
+  parser resyncs on `accept`, so it's not a firmware spin. Workaround: do one `get_status`
+  right after connecting before any burst (`lfp_sweep` already preflights with one). Proper
+  fix (TODO): explicitly zero / re-init the GEM descriptor rings + lwIP pools at boot rather
+  than relying on implicit zero, and confirm `_start` zeroes the `NOLOAD` `.sbss`.
+- Git: remote `origin` uses the `github.com-microzed` SSH host alias. **Push feature
+  branches to `origin` by default** — after committing work, `git push -u origin <branch>`
+  (the maintainer debugs on a separate machine and needs branches available remotely). Do
+  **not** commit or push directly to `main`, and never `merge` to `main`, without being
+  asked — open a PR (or push the branch and let the maintainer merge) instead.
 
 ## Working autonomously / overnight
 

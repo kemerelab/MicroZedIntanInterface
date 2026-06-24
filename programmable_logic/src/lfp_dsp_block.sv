@@ -26,10 +26,22 @@ module lfp_dsp_block #(
     parameter int DATA_W         = 16,
     parameter int COEF_W         = 18,
     parameter int COEF_FRAC      = 17,
-    parameter int RING_DEPTH     = 256,
+    parameter int RING_DEPTH     = 256,     // FIR delay-line depth (USE_CIC=0 path)
     parameter int OUT_W          = 16,
     parameter int FIRST_AMP_SLOT = 2,       // cycle_counter of amplifier channel 0
-    parameter int LFP_BRAM_AW    = 14       // LFP output BRAM byte-address width (16 KB)
+    parameter int LFP_BRAM_AW    = 14,      // LFP output BRAM byte-address width (16 KB)
+    // ---- datapath select ----
+    // USE_CIC=1 (default): CIC^4(/5) -> comp-FIR halfband(/2) = /10 LFP @ 3 kHz.
+    //   ~5x less delay-line BRAM than the single-stage FIR; the coef window loads
+    //   the HB_TAPS comp-FIR taps; the engine's decimation is hardwired /10.
+    // USE_CIC=0: the dual-MAC single-stage FIR (fallback; coef window loads the
+    //   full FIR, decim_R/num_taps from lfp_cfg).
+    parameter int USE_CIC        = 1,
+    parameter int CIC_R          = 5,
+    parameter int CIC_ORDER      = 4,
+    parameter int CIC_ACC_W      = 32,
+    parameter int CIC_GAIN_SHIFT = 10,
+    parameter int HB_RING        = 64       // halfband delay-line depth (USE_CIC=1)
 ) (
     input  logic         clk,
     input  logic         rstn,
@@ -134,24 +146,75 @@ module lfp_dsp_block #(
     end
 
     // -----------------------------------------------------------------
-    // The decimating FIR engine.
+    // The decimating engine: CIC(/5)->halfband(/2) (default) or single FIR.
     // -----------------------------------------------------------------
+    localparam int HB_TAPN_W = $clog2(HB_RING + 1);
+    localparam int HB_RING_AW = $clog2(HB_RING);
     logic               out_valid, out_frame_start, busy;
     logic [CH_W-1:0]    out_channel;
     logic [OUT_W-1:0]   out_data;
 
-    lfp_fir_decimator #(
-        .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .COEF_W(COEF_W),
-        .COEF_FRAC(COEF_FRAC), .RING_DEPTH(RING_DEPTH), .OUT_W(OUT_W)
-    ) u_fir (
-        .clk(clk), .rstn(rstn),
-        .sample_valid(eng_valid), .sample_data(eng_data),
-        .sample_slot(eng_slot), .packet_tick(dsp_packet_tick),
-        .lfp_en(lfp_en), .lane_mask(lane_mask), .decim_R(decim_R), .num_taps(num_taps),
-        .coef_wr_en(coef_wr_en), .coef_wr_addr(coef_wr_addr), .coef_wr_data(coef_wr_data),
-        .out_valid(out_valid), .out_channel(out_channel), .out_data(out_data),
-        .out_frame_start(out_frame_start), .busy(busy), .compute_overrun(lfp_overrun)
-    );
+    generate
+    if (USE_CIC) begin : g_cic_chain
+        // ---- CIC^4 /5 ----
+        logic               cic_valid, cic_fs, cic_busy, cic_ov;
+        logic [CH_W-1:0]    cic_ch;
+        logic [OUT_W-1:0]   cic_d;
+        cic_decimator #(
+            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .R(CIC_R),
+            .N_ORDER(CIC_ORDER), .ACC_W(CIC_ACC_W), .OUT_W(OUT_W),
+            .GAIN_SHIFT(CIC_GAIN_SHIFT)
+        ) u_cic (
+            .clk(clk), .rstn(rstn),
+            .sample_valid(eng_valid), .sample_data(eng_data),
+            .sample_slot(eng_slot), .packet_tick(dsp_packet_tick),
+            .en(lfp_en), .lane_mask(lane_mask),
+            .out_valid(cic_valid), .out_channel(cic_ch), .out_data(cic_d),
+            .out_frame_start(cic_fs), .busy(cic_busy), .compute_overrun(cic_ov)
+        );
+        // ---- glue: CIC frame -> per-slot 8-lane stream ----
+        logic                      hb_v, hb_t;
+        logic [N_LANES*DATA_W-1:0] hb_d;
+        logic [SLOT_W-1:0]         hb_s;
+        cic_to_halfband #(
+            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W)
+        ) u_glue (
+            .clk(clk), .rstn(rstn), .lane_mask(lane_mask),
+            .cic_valid(cic_valid), .cic_channel(cic_ch), .cic_data(cic_d),
+            .cic_frame_start(cic_fs),
+            .hb_valid(hb_v), .hb_data(hb_d), .hb_slot(hb_s), .hb_tick(hb_t)
+        );
+        // ---- comp-FIR halfband /2 (loads the coef window) ----
+        logic hb_ov;
+        lfp_halfband #(
+            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .COEF_W(COEF_W),
+            .COEF_FRAC(COEF_FRAC), .RING_DEPTH(HB_RING), .OUT_W(OUT_W)
+        ) u_hb (
+            .clk(clk), .rstn(rstn),
+            .sample_valid(hb_v), .sample_data(hb_d), .sample_slot(hb_s),
+            .packet_tick(hb_t), .en(lfp_en), .lane_mask(lane_mask),
+            .num_taps(num_taps[HB_TAPN_W-1:0]),
+            .coef_wr_en(coef_wr_en), .coef_wr_addr(coef_wr_addr[HB_RING_AW-1:0]),
+            .coef_wr_data(coef_wr_data),
+            .out_valid(out_valid), .out_channel(out_channel), .out_data(out_data),
+            .out_frame_start(out_frame_start), .busy(busy), .compute_overrun(hb_ov)
+        );
+        assign lfp_overrun = cic_ov | hb_ov;
+    end else begin : g_fir
+        lfp_fir_decimator #(
+            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .COEF_W(COEF_W),
+            .COEF_FRAC(COEF_FRAC), .RING_DEPTH(RING_DEPTH), .OUT_W(OUT_W)
+        ) u_fir (
+            .clk(clk), .rstn(rstn),
+            .sample_valid(eng_valid), .sample_data(eng_data),
+            .sample_slot(eng_slot), .packet_tick(dsp_packet_tick),
+            .lfp_en(lfp_en), .lane_mask(lane_mask), .decim_R(decim_R), .num_taps(num_taps),
+            .coef_wr_en(coef_wr_en), .coef_wr_addr(coef_wr_addr), .coef_wr_data(coef_wr_data),
+            .out_valid(out_valid), .out_channel(out_channel), .out_data(out_data),
+            .out_frame_start(out_frame_start), .busy(busy), .compute_overrun(lfp_overrun)
+        );
+    end
+    endgenerate
 
     // -----------------------------------------------------------------
     // Output: signed -> offset-binary, pack 2x16-bit per 32-bit word, write

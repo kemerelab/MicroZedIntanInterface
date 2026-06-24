@@ -80,6 +80,29 @@ void pl_set_debug_mode(int enable) {
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_0_OFFSET, ctrl_reg_0);
 }
 
+// Analytic chirp NCO config (CTRL_REG_3). Latched while transmission inactive
+// (like debug_mode); chirp_mode also requires debug_mode to be set.
+uint8_t  chirp_cfg_mode = 0, chirp_cfg_stride = 0;
+uint16_t chirp_cfg_fspan = 0, chirp_cfg_rate = 0;
+
+void pl_set_chirp(uint8_t mode, uint8_t stride, uint16_t fspan, uint16_t rate) {
+    uint32_t cfg = (mode ? CTRL_CHIRP_MODE : 0u)
+                 | (((uint32_t)stride << CTRL_CHIRP_STRIDE_SHIFT) & CTRL_CHIRP_STRIDE_MASK)
+                 | (((uint32_t)fspan  << CTRL_CHIRP_FSPAN_SHIFT)  & CTRL_CHIRP_FSPAN_MASK)
+                 | (((uint32_t)rate   << CTRL_CHIRP_RATE_SHIFT)   & CTRL_CHIRP_RATE_MASK);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_3_OFFSET, cfg);
+    chirp_cfg_mode = mode ? 1 : 0;
+    chirp_cfg_stride = stride & 0x3F;
+    chirp_cfg_fspan = fspan & 0xFFF;
+    chirp_cfg_rate = rate & 0xFFF;
+    send_message("PL chirp: mode=%u stride=%u fspan=%u rate=%u\r\n",
+                 chirp_cfg_mode, chirp_cfg_stride, chirp_cfg_fspan, chirp_cfg_rate);
+}
+
+uint32_t pl_get_chirp_cfg(void) {
+    return Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_3_OFFSET);
+}
+
 void pl_set_channel_enable(int channel_enable) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
 
@@ -635,7 +658,8 @@ void pl_run_full_cable_test(void) {
 // ============================================================================
 // LFP/DSP engine control (CTRL_REG_LFP_*; see lfp_dsp_block.sv)
 // ============================================================================
-uint8_t  lfp_cfg_enable = 0, lfp_cfg_lane_mask = 0, lfp_cfg_decim_R = 15, lfp_cfg_num_taps = 0;
+// Phase A default decimation: 30 kHz / 10 = 3 kHz LFP (was R=15 -> 2 kHz).
+uint8_t  lfp_cfg_enable = 0, lfp_cfg_lane_mask = 0, lfp_cfg_decim_R = 10, lfp_cfg_num_taps = 0;
 
 void pl_lfp_set_config(uint8_t enable, uint8_t lane_mask, uint8_t decim_R, uint8_t num_taps) {
     uint32_t cfg = ((uint32_t)enable & 0x1)

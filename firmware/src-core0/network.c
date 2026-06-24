@@ -62,6 +62,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_WRITE_REGISTER  0x74   // param1 = reg; param2 = value; responds 4-byte echo
 #define CMD_SET_FAST_SETTLE 0x75   // param1 = amp: sw | gpio_en<<1 | pin<<4; param2 = dsp: same layout
 #define CMD_SET_DIGOUT      0x76   // param1 = sw | gpio_en<<1 | pin<<4; param2 = reg3_static byte
+#define CMD_SET_CHIRP       0x77   // param1 = mode | stride<<8; param2 = fspan | rate<<16 (CTRL_REG_3)
 
 // LFP/DSP engine (Tier-1). Set params + lane mask + coefficients while disabled,
 // then enable. Coefficients stream one tap per CMD_LFP_WRITE_COEF.
@@ -277,6 +278,12 @@ void collect_status_data(status_response_t* status) {
     status->lfp_packets_sent = lfp_udp_packets_sent;
     status->lfp_overrun      = (pl_lfp_read_status() >> 16) & 1;
 
+    // Analytic chirp NCO config (host-set, mirrored from CTRL_REG_3 tracking)
+    status->chirp_mode   = chirp_cfg_mode;
+    status->chirp_stride = chirp_cfg_stride;
+    status->chirp_fspan  = chirp_cfg_fspan;
+    status->chirp_rate   = chirp_cfg_rate;
+
     // Wavelet (Tier-3) scalogram engine config (host-set) + live status
     uint32_t wav_st          = pl_wav_read_status();
     status->wav_enable       = wav_cfg_enable;
@@ -372,7 +379,16 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             pl_set_debug_mode(cmd->param1 ? 1 : 0);
             send_message("Binary Command: SET_DEBUG_MODE %u\r\n", cmd->param1 ? 1 : 0);
             break;
-            
+
+        case CMD_SET_CHIRP:
+            // param1 = mode(bit0) | stride<<8 ; param2 = fspan | rate<<16
+            pl_set_chirp((uint8_t)(cmd->param1 & 0x1),
+                         (uint8_t)((cmd->param1 >> 8) & 0x3F),
+                         (uint16_t)(cmd->param2 & 0xFFF),
+                         (uint16_t)((cmd->param2 >> 16) & 0xFFF));
+            send_message("Binary Command: SET_CHIRP\r\n");
+            break;
+
         case CMD_LOAD_CONVERT:
             pl_set_convert_sequence();
             send_message("Binary Command: LOAD_CONVERT\r\n");

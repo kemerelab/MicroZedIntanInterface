@@ -12,9 +12,9 @@ module lfp_fir_decimator_tb;
     localparam int COEF_FRAC = 17;
     localparam int RING_DEPTH = 256;
     localparam int OUT_W     = 16;
-    localparam int NUM_TAPS  = 25;
-    localparam int DECIM_R   = 15;
-    localparam int K_PACKETS = 300;
+    localparam int NUM_TAPS  = 131;   // odd -> exercises the N_MAC=2 partial last group
+    localparam int DECIM_R   = 10;    // Phase A: 30 kHz / 10 = 3 kHz
+    localparam int K_PACKETS = 320;
     localparam logic [7:0] LANE_MASK = 8'b1010_0101;
 
     localparam int TAPN_W = $clog2(RING_DEPTH + 1);
@@ -98,9 +98,13 @@ module lfp_fir_decimator_tb;
             end
             @(negedge clk); packet_tick = 1;
             @(negedge clk); packet_tick = 0;
-            repeat (3) @(negedge clk);
+            // Give the compute pass room to finish before the next decimation
+            // tick. Real HW has ~2800 clk/packet * R; this TB streams samples
+            // far faster than real time, so pad the inter-packet gap to cover
+            // the worst-case compute (n_lanes*N_SLOTS*ceil(taps/N_MAC)).
+            repeat (1200) @(negedge clk);
         end
-        repeat (4000) @(posedge clk);                // let the last frame drain
+        repeat (12000) @(posedge clk);               // let the last frame drain
 
         // ---- compare ----
         if (n_got != n_expected) begin

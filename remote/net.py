@@ -48,6 +48,13 @@ CMD_READ_REGISTER = 0x73    # param1 = reg -> 4-byte {cipo1, cipo0} response
 CMD_WRITE_REGISTER = 0x74   # param1 = reg; param2 = value -> 4-byte echo response
 CMD_SET_FAST_SETTLE = 0x75  # param1 = amp: sw|gpio_en<<1|pin<<4; param2 = dsp: same layout
 CMD_SET_DIGOUT = 0x76       # param1 = sw|gpio_en<<1|pin<<4; param2 = reg3_static byte
+CMD_SET_CHIRP = 0x77        # param1 = mode | stride<<8; param2 = fspan | rate<<16 (CTRL_REG_3)
+
+# Analytic chirp NCO scaling (must match data_generator_core.sv CTRL_REG_3)
+CHIRP_PHW          = 32
+CHIRP_FSPAN_SHIFT  = 16     # f_max = fspan << 16 (phase-accumulator units)
+CHIRP_RATE_SHIFT   = 9      # freq_acc step/packet = rate << 9
+PACKET_RATE_HZ     = 30000  # one phase update per broadband packet
 # LFP/DSP engine (Tier-1) -- configure while disabled, then enable
 CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
@@ -1194,21 +1201,119 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
 # ============================================================================
 # LFP/DSP engine (Tier-1) host control + receive
 # ============================================================================
-def design_lfp_lowpass(num_taps, cutoff_hz=600.0, fs=30000.0):
-    """Windowed-sinc (Hamming) low-pass FIR, unity DC gain, quantized to Q1.17
-    (18-bit signed). The decimation anti-alias filter; cutoff < fs/(2*R)."""
+# ============================================================================
+# Analytic chirp NCO (memory-free swept sine in the PL; reuses the sine LUT)
+# ============================================================================
+def chirp_fmax_to_fspan(f_max_hz):
+    """Map a desired sweep top frequency (Hz) to the 12-bit f_span field.
+    f_max = (fspan << 16) / 2^32 * 30000  ->  fspan = f_max/30000 * 2^16."""
+    f_max_acc = f_max_hz / PACKET_RATE_HZ * (1 << CHIRP_PHW)
+    fspan = round(f_max_acc) >> CHIRP_FSPAN_SHIFT
+    return max(0, min(0xFFF, fspan))
+
+def chirp_sweep_to_rate(f_max_hz, period_s):
+    """Pick the 12-bit sweep_rate so one ramp (0->f_max) takes ~period_s/2
+    (a full triangle period is `period_s`). freq_acc step/packet = rate<<9."""
+    fmax_acc = (chirp_fmax_to_fspan(f_max_hz) << CHIRP_FSPAN_SHIFT)
+    half_packets = max(1, PACKET_RATE_HZ * period_s / 2.0)
+    rate = round((fmax_acc / half_packets)) >> CHIRP_RATE_SHIFT
+    return max(1, min(0xFFF, rate))
+
+def configure_chirp(sock, f_max_hz=1400.0, period_s=2.0, stride=4, enable=True):
+    """Enable the analytic chirp debug signal: a swept sine 0->f_max->0 with a
+    full triangle period of `period_s`, per-channel phase `stride`. Requires
+    debug mode (set it too). Disable with enable=False (or CMD_SET_DEBUG_MODE 0).
+    Default sweep ~1 Hz -> ~1.4 kHz covers the new 3 kHz LFP passband + transition."""
+    fspan = chirp_fmax_to_fspan(f_max_hz)
+    rate  = chirp_sweep_to_rate(f_max_hz, period_s)
+    p1 = (1 if enable else 0) | ((stride & 0x3F) << 8)
+    p2 = (fspan & 0xFFF) | ((rate & 0xFFF) << 16)
+    if enable:
+        send_binary_command(sock, CMD_SET_DEBUG_MODE, 1)
+    send_binary_command(sock, CMD_SET_CHIRP, p1, p2)
+    f_lo = 0.0
+    f_hi = (fspan << CHIRP_FSPAN_SHIFT) / (1 << CHIRP_PHW) * PACKET_RATE_HZ
+    print(f"[CHIRP] {'ENABLED' if enable else 'disabled'}: sweep {f_lo:.0f}->{f_hi:.0f} Hz, "
+          f"period~{period_s:.1f}s, stride={stride} (fspan={fspan} rate={rate})")
+    return fspan, rate
+
+def _kaiser_window(num_taps, beta):
+    """Kaiser window via the I0 Bessel series (no numpy dependency)."""
+    import math
+    def i0(x):
+        s, t, k = 1.0, 1.0, 0
+        while True:
+            k += 1
+            t *= (x * x) / (4 * k * k)
+            s += t
+            if t < 1e-12 * s:
+                return s
+    a = (num_taps - 1) / 2.0
+    return [i0(beta * math.sqrt(1 - ((n - a) / a) ** 2)) / i0(beta)
+            for n in range(num_taps)]
+
+def design_lfp_lowpass(num_taps, cutoff_hz=1250.0, fs=30000.0, window="kaiser",
+                       beta=6.5):
+    """Windowed-sinc low-pass FIR, unity DC gain, quantized to Q1.17 (18-bit
+    signed). The decimation anti-alias; place cutoff (-6 dB) inside the
+    transition band fs/(2*R_pass) .. fs/(2*R). For R=10 (3 kHz, Nyquist 1.5 kHz)
+    the default ~131-tap Kaiser(beta=6.5) gives <1 dB ripple to 1 kHz, ~21 dB at
+    1.5 kHz, and >46 dB rejection of any band that folds onto the 0-1 kHz
+    passband. 'hamming' reproduces the legacy 2 kHz designer."""
     import math
     fc = cutoff_hz / fs                       # normalized cutoff (cycles/sample)
     M = num_taps - 1
+    if window == "kaiser":
+        win = _kaiser_window(num_taps, beta)
+    else:  # legacy Hamming
+        win = [0.54 - 0.46 * math.cos(2 * math.pi * n / M) for n in range(num_taps)]
     h = []
     for n in range(num_taps):
         x = n - M / 2.0
         s = 2 * fc if abs(x) < 1e-9 else math.sin(2 * math.pi * fc * x) / (math.pi * x)
-        w = 0.54 - 0.46 * math.cos(2 * math.pi * n / M)   # Hamming
-        h.append(s * w)
+        h.append(s * win[n])
     g = sum(h) or 1.0
     scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
     return [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
+
+def design_cic_comp_fir(num_taps=43, fc=1300.0, beta=6.0,
+                        R_cic=5, n_order=4, gain_shift=10, fs_in=30000.0):
+    """Droop-compensated comp-FIR / halfband (/2) for the CIC^4(/5)+FIR(/2) = /10
+    LFP datapath (USE_CIC=1, the default build). Designed at the CIC output rate
+    fs_in/R_cic (6 kHz) via frequency sampling: the target passband response is
+    1/CIC-droop so the COMBINED /10 chain is flat to ~1 kHz (<=0.02 dB), with
+    ~ -54 dB worst alias-into-passband and unity DC gain. Quantized Q1.17.
+    MUST match programmable_logic/sim/gen_cic_chain_vectors.py exactly."""
+    import math
+    fs1 = fs_in / R_cic                       # comp-FIR input rate (6 kHz)
+    def cic_mag(f):
+        w = math.pi * f / fs_in
+        if abs(w) < 1e-12: return 1.0
+        d = R_cic * math.sin(w)
+        return (math.sin(R_cic * w) / d) ** n_order if abs(d) > 1e-15 else 1.0
+    cic_dc = (R_cic ** n_order) / (1 << gain_shift)
+    win = _kaiser_window(num_taps, beta)
+    M = num_taps - 1
+    a = M / 2.0
+    def desired(f):
+        if f > fc: return 0.0
+        dr = cic_mag(f)
+        return (1.0 / dr) if dr > 1e-6 else 1.0
+    L = 2048
+    fs_grid = [fs1 / 2 * k / L for k in range(L + 1)]
+    Hd = [desired(f) for f in fs_grid]
+    df = fs_grid[1] - fs_grid[0]
+    h = [0.0] * num_taps
+    for n in range(num_taps):
+        acc = 0.0
+        for k in range(L + 1):
+            wgt = 0.5 if (k == 0 or k == L) else 1.0
+            acc += wgt * Hd[k] * math.cos(2 * math.pi * fs_grid[k] * (n - a) / fs1)
+        h[n] = acc * df * 2.0 / (fs1 / 2) * win[n]
+    dc = sum(h) or 1.0
+    h = [c * (1.0 / cic_dc) / dc for c in h]   # combined DC gain -> unity
+    scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
+    return [max(-lim, min(lim - 1, int(round(c * scale)))) for c in h]
 
 def lfp_upload_coeffs(sock, coeffs):
     """Stream taps through the indirect window (first write clears the pointer).
@@ -1225,16 +1330,35 @@ def lfp_upload_coeffs(sock, coeffs):
             return False
     return True
 
-def configure_lfp(sock, lane_mask=0x0F, decim_R=15, num_taps=128, cutoff_hz=600.0):
+def configure_lfp(sock, lane_mask=0x0F, datapath="cic", num_taps=None,
+                  cutoff_hz=1250.0):
     """Disable, set channels/params, design + upload the LP kernel. Call
-    lfp_enable(sock, True) afterwards to start streaming on UDP 5001."""
+    lfp_enable(sock, True) afterwards to start streaming on UDP 5001.
+
+    datapath="cic" (default, matches the USE_CIC=1 build): uploads the 43-tap
+      droop-compensated comp-FIR halfband; the engine's CIC^4(/5)+halfband(/2)=/10
+      decimation is hardwired -> 3 kHz LFP. num_taps defaults to 43.
+    datapath="fir" (USE_CIC=0 fallback build): uploads a 131-tap single-stage
+      Kaiser 3 kHz anti-alias; decim_R=10. num_taps defaults to 131.
+
+    Either way R=10 -> 3 kHz; the LFP packet's self-describing R field is set
+    accordingly so the host/plugin auto-tracks the rate."""
     send_binary_command(sock, CMD_LFP_ENABLE, 0)
     send_binary_command(sock, CMD_LFP_SET_CHANNELS, lane_mask & 0xFF)
-    send_binary_command(sock, CMD_LFP_SET_PARAMS, decim_R & 0xFF, num_taps & 0xFF)
-    coeffs = design_lfp_lowpass(num_taps, cutoff_hz)
-    lfp_upload_coeffs(sock, coeffs)
-    print(f"[LFP] configured: mask=0x{lane_mask:02X} R={decim_R} taps={num_taps} "
-          f"cutoff={cutoff_hz:.0f}Hz -> {fs_out_str(decim_R)}")
+    if datapath == "cic":
+        nt = num_taps if num_taps else 43
+        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
+        coeffs = design_cic_comp_fir(nt)
+        lfp_upload_coeffs(sock, coeffs)
+        print(f"[LFP] configured CIC^4(/5)+halfband(/2)=/10: mask=0x{lane_mask:02X} "
+              f"comp_taps={nt} -> 3000 sps out (flat to ~1 kHz)")
+    else:
+        nt = num_taps if num_taps else 131
+        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
+        coeffs = design_lfp_lowpass(nt, cutoff_hz)
+        lfp_upload_coeffs(sock, coeffs)
+        print(f"[LFP] configured single-stage FIR /10: mask=0x{lane_mask:02X} "
+              f"taps={nt} cutoff={cutoff_hz:.0f}Hz -> 3000 sps out")
     return coeffs
 
 def fs_out_str(decim_R):
@@ -1280,6 +1404,98 @@ def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
         s.close()
     print(f"[LFP] received {got} frames, {bad} non-LFP/short datagrams")
     return got
+
+def _goertzel_power(x, f, fs):
+    """Power of x at frequency f (Hz), sample rate fs (Goertzel; pure Python)."""
+    import math
+    cw = 2.0 * math.cos(2.0 * math.pi * (f / fs))
+    s1 = s2 = 0.0
+    for v in x:
+        s0 = v + cw * s1 - s2
+        s2 = s1; s1 = s0
+    return s1*s1 + s2*s2 - cw*s1*s2
+
+def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
+                         channel=0, lane_mask=0x0F, fmin=25, fstep=25):
+    """Drive the analytic chirp across [0, f_max] and MEASURE the LFP anti-alias
+    magnitude response |H(f)| from the host. Method: capture one LFP channel for a
+    few chirp triangle periods; in each short window find the dominant frequency
+    (Goertzel peak over a grid) and its amplitude; bin amplitude vs frequency.
+    Self-calibrating -- does NOT assume a flat chirp spectrum. f_max defaults just
+    under the 1500 Hz LFP Nyquist so nothing folds. Prints a dB table + ASCII plot.
+    The chirp/debug/coef configs latch only while stopped, so this stops, arms, and
+    restarts the stream itself."""
+    import math
+    fs = 3000.0   # LFP rate (30 kHz / decim_R=10)
+    send_binary_command(sock, CMD_STOP)
+    configure_lfp(sock, lane_mask, datapath="cic")          # upload CIC comp-FIR
+    configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
+    lfp_enable(sock, True)
+    send_binary_command(sock, CMD_START)
+    # ---- capture one channel's time series off UDP 5001 ----
+    settle = int(0.3 * fs)
+    n_want = int(n_periods * period * fs) + settle
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('', LFP_UDP_PORT)); s.settimeout(3.0)
+    series = []
+    try:
+        while len(series) < n_want:
+            data, _ = s.recvfrom(4096)
+            if len(data) < 24: continue
+            mlo, mhi = struct.unpack('<II', data[:8])
+            if mlo != LFP_MAGIC_LOW or mhi != LFP_MAGIC_HIGH: continue
+            usamp = struct.unpack(f'<{(len(data)-24)//2}H', data[24:])
+            if channel < len(usamp):
+                series.append(usamp[channel] - 0x8000)      # offset-binary -> signed
+    except socket.timeout:
+        print("[SWEEP] capture timed out -- is the chirp+LFP streaming?")
+    finally:
+        s.close()
+    series = series[settle:]
+    if len(series) < int(period * fs):
+        print(f"[SWEEP] too few LFP samples ({len(series)}) -- aborting."); return
+    # ---- short-time dominant-freq + amplitude -> response ----
+    grid = list(range(int(fmin), int(min(f_max, fs/2.0)) + 1, int(fstep)))
+    win, hop = 256, 64    # hop small enough that the swept tone hits every grid bin
+    acc = {f: [0.0, 0] for f in grid}
+    i, n = 0, len(series)
+    while i + win <= n:
+        w = series[i:i+win]
+        m = sum(w) / win
+        w = [v - m for v in w]
+        bf, bp = grid[0], -1.0
+        for f in grid:
+            p = _goertzel_power(w, f, fs)
+            if p > bp: bp, bf = p, f
+        acc[bf][0] += math.sqrt(max(bp, 0.0)) * 2.0 / win   # dominant-tone amplitude
+        acc[bf][1] += 1
+        i += hop
+    resp = [(f, (acc[f][0]/acc[f][1] if acc[f][1] else 0.0), acc[f][1]) for f in grid]
+    pb = sorted(a for (f, a, c) in resp if 100 <= f <= 800 and c)   # passband ref
+    ref = pb[len(pb)//2] if pb else (max((a for _, a, _ in resp), default=1.0) or 1.0)
+    print(f"\n[SWEEP] LFP anti-alias |H(f)|  (chirp 0->{f_max:.0f} Hz, "
+          f"{n_periods}x{period:.1f}s, ch{channel}, {len(series)} samp @ {fs:.0f} Hz)")
+    print("  f(Hz)  |H| dB  hits  |" + "-"*42)
+    crossings, pf, pdb = {}, None, None
+    for f, a, c in resp:
+        if c == 0:
+            print(f"  {f:5d}     --     0  |")     # no window peaked here
+            continue
+        db = 20*math.log10(a/ref) if (a > 0 and ref > 0) else -99.0
+        bar = "#" * int(max(0, min(42, (db + 60.0) / 60.0 * 42)))
+        print(f"  {f:5d}  {db:6.1f}  {c:4d}  |{bar}")
+        for thr in (-3.0, -6.0, -20.0):
+            if thr not in crossings and pdb is not None and pdb >= thr > db:
+                crossings[thr] = pf + (thr - pdb) * (f - pf) / (db - pdb)
+        pf, pdb = f, db
+    for thr in (-3.0, -6.0, -20.0):
+        if thr in crossings:
+            print(f"  measured {thr:+.0f} dB at ~{crossings[thr]:.0f} Hz")
+    print("  predicted (shipped CIC+comp): flat to ~1.0 kHz, -3 dB ~1.25 kHz, "
+          "-6 dB ~1.30 kHz, -32 dB @ 1.50 kHz Nyquist")
+    print("  (chirp left running; 'chirp_off' to stop, or raise f_max for more transition)")
+    return resp
 
 # ============================================================================
 # Wavelet/Tier-3 scalogram engine -- design the Morse voice bank, configure,
@@ -1602,8 +1818,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 180:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 180)")
+    if len(data) != 188:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 188)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1645,11 +1861,16 @@ def get_status(sock):
     (lfp_enable, lfp_lane_mask, lfp_decim_R, lfp_num_taps) = struct.unpack('<4B', data[148:152])
     (lfp_packets_sent,) = struct.unpack('<I', data[152:156])
     (lfp_overrun,) = struct.unpack('<B', data[156:157])
+    # data[157:160] = lfp_reserved[3]
+    # Analytic chirp NCO config (8 bytes): mode, stride, fspan(u16), rate(u16), 2 rsvd
+    # (from main / Phase A) -- comes first in the merged struct.
+    (chirp_mode, chirp_stride, chirp_fspan, chirp_rate) = \
+        struct.unpack('<BBHH2x', data[160:168])
 
-    # Wavelet (Tier-3) scalogram engine config + status (20 bytes)
+    # Wavelet (Tier-3) scalogram engine config + status (20 bytes) -- follows chirp.
     (wav_enable, wav_n_octaves, wav_n_voices, wav_n_taps,
-     wav_K, wav_overrun, wav_busy, _wav_rsv) = struct.unpack('<8B', data[160:168])
-    (wav_gain, wav_frame_seq, wav_packets_sent) = struct.unpack('<III', data[168:180])
+     wav_K, wav_overrun, wav_busy, _wav_rsv) = struct.unpack('<8B', data[168:176])
+    (wav_gain, wav_frame_seq, wav_packets_sent) = struct.unpack('<III', data[176:188])
 
     status = {
         'version': version,
@@ -1711,6 +1932,11 @@ def get_status(sock):
         'lfp_num_taps': lfp_num_taps,
         'lfp_packets_sent': lfp_packets_sent,
         'lfp_overrun': lfp_overrun,
+        # Analytic chirp NCO (from main / Phase A)
+        'chirp_mode': chirp_mode,
+        'chirp_stride': chirp_stride,
+        'chirp_fspan': chirp_fspan,
+        'chirp_rate': chirp_rate,
         # Wavelet (Tier-3) scalogram engine
         'wav_enable': wav_enable,
         'wav_n_octaves': wav_n_octaves,
@@ -1810,6 +2036,13 @@ def print_status(status):
           f"(-> {30000.0/R:.0f} sps)  num_taps={status['lfp_num_taps']}")
     print(f"  packets sent: {status['lfp_packets_sent']}   "
           f"overrun: {'YES' if status['lfp_overrun'] else 'no'}")
+
+    # Analytic chirp NCO config (from main / Phase A)
+    f_hi = (status['chirp_fspan'] << CHIRP_FSPAN_SHIFT) / (1 << CHIRP_PHW) * PACKET_RATE_HZ
+    print(f"\n--- Analytic chirp NCO (CTRL_REG_3) ---")
+    print(f"  {'ENABLED' if status['chirp_mode'] else 'disabled'}  "
+          f"sweep 0->{f_hi:.0f} Hz  stride={status['chirp_stride']}  "
+          f"(fspan={status['chirp_fspan']} rate={status['chirp_rate']})")
 
     print(f"\n--- Wavelet scalogram engine (Tier-3, UDP {WAV_UDP_PORT}) ---")
     print(f"  {'ENABLED' if status['wav_enable'] else 'disabled'}  "
@@ -2024,9 +2257,11 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
-        print(f"  LFP (Tier-1): lfp_config [mask] [R] [taps] [cutoff], lfp_on, lfp_off, lfp_recv [n]")
+        print(f"  LFP (Tier-1): lfp_config [mask] [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n]")
         print(f"  Wavelet (Tier-3): wav_config [oct] [V] [taps], wav_on, wav_off, wav_recv [n]")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
+        print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
+        print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
         print(f"       read_reg <r>, write_reg <r> <v>")
@@ -2144,13 +2379,31 @@ def tcp_control():
                 elif cmd == "bench_sweep":
                     udp_bench_sweep(sock)
                 elif cmd == "lfp_config" or cmd.startswith("lfp_config "):
-                    # lfp_config [mask] [decimR] [taps] [cutoff_hz]  (configure while off)
+                    # lfp_config [mask] [datapath=cic|fir] [taps]  (configure while off)
+                    # default = CIC^4(/5)+halfband(/2)=/10 -> 3 kHz, 43 comp taps.
                     parts = cmd.split()
                     mask = int(parts[1], 0) if len(parts) > 1 else 0x0F
-                    R    = int(parts[2])    if len(parts) > 2 else 15
-                    taps = int(parts[3])    if len(parts) > 3 else 128
-                    cut  = float(parts[4])  if len(parts) > 4 else 600.0
-                    configure_lfp(sock, mask, R, taps, cut)
+                    dp   = parts[2] if len(parts) > 2 else "cic"
+                    taps = int(parts[3]) if len(parts) > 3 else None
+                    configure_lfp(sock, mask, datapath=dp, num_taps=taps)
+                elif cmd == "chirp" or cmd.startswith("chirp "):
+                    # chirp [f_max_hz] [period_s] [stride]  (analytic swept-sine debug)
+                    parts = cmd.split()
+                    fmx = float(parts[1]) if len(parts) > 1 else 1400.0
+                    per = float(parts[2]) if len(parts) > 2 else 2.0
+                    std = int(parts[3])   if len(parts) > 3 else 4
+                    configure_chirp(sock, fmx, per, std, enable=True)
+                elif cmd == "chirp_off":
+                    configure_chirp(sock, enable=False)
+                    send_binary_command(sock, CMD_SET_DEBUG_MODE, 0)
+                elif cmd == "lfp_sweep" or cmd.startswith("lfp_sweep "):
+                    # lfp_sweep [f_max=1490] [period=3.0] [n_periods=2]
+                    # chirp across the band + measure the LFP anti-alias |H(f)|
+                    parts = cmd.split()
+                    fmx = float(parts[1]) if len(parts) > 1 else 1490.0
+                    per = float(parts[2]) if len(parts) > 2 else 3.0
+                    npd = int(parts[3])   if len(parts) > 3 else 2
+                    measure_lfp_response(sock, f_max=fmx, period=per, n_periods=npd)
                 elif cmd == "lfp_on":
                     st = get_status(sock)        # quietly read back the configured mask
                     if st and st.get('lfp_lane_mask', 0) == 0:
@@ -2248,7 +2501,7 @@ def tcp_control():
                     print("  bench [bytes] [n]   - one size (default 1472 B x 50000)")
                     print("  bench_sweep         - sweep 256..8800 B")
                     print("LFP / Tier-1 (UDP 5001):")
-                    print("  lfp_config [mask] [R] [taps] [cutoff] - set mask/decim/taps + upload LP kernel")
+                    print("  lfp_config [mask] [cic|fir] [taps] - set mask/datapath/taps + upload LP kernel")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
                     print("  lfp_recv [n]        - capture + print decoded LFP frames")
                     print("  (run lfp_config BEFORE lfp_on -- default mask is 0 = no streams)")
