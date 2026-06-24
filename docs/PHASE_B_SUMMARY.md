@@ -123,16 +123,25 @@ No Xilinx IP in the engine (pure fixed-point).
 > `vivado -mode batch -source scripts/build_bitstream.tcl`. Timing summary at
 > `vivado_project/klab_project.runs/impl_1/design_1_wrapper_timing_summary_routed.rpt`.
 
-## 5. Monitor read path — important caveat (carried from the STFT branch)
+## 5. Monitor read path — now AXI CDMA (the STFT "hang" was a BD bug, root-caused)
 
-`wav_stream_service` reads the results BRAM with **rate-limited single-beat `Xil_In32`**, NOT
-CDMA. The `claude/tier2-stft` branch found that a **CDMA read from a results BRAM HANGS on
-real hardware** (it reverted to single-beat). The wavelet monitor therefore polls the column
-counter (STATUS_REG_14), single-beat-reads the active surface, guards against a torn surface
-(re-read the counter), and ships a self-describing packet on UDP 5004. The full DDR-resident
-path (CDMA → DDR ring → soft-core) is **v2** and was deliberately not attempted here.
-(Consistent with this, the wavelet results BRAM is intentionally *not* added to the CDMA
-address map — the two BD critical-warnings about that are expected, matching the LFP BRAM.)
+> **UPDATE (branch `claude/tier3-wavelet`, AXI-CDMA switch):** the read path below has been
+> replaced by AXI CDMA. See `docs/WAVELET_DMA_SUMMARY.md` for the full change. The original
+> text is kept for history.
+
+`wav_stream_service` now AXI-CDMAs the full results surface (0x90000000) into a non-cacheable
+DDR staging buffer, then repacks the active sub-region into the UDP packet — the same CDMA path
+the broadband capture uses. The earlier "CDMA read from a results BRAM HANGS" finding was **not**
+a CDMA limitation: the results BRAM (`axi_bram_ctrl_2`) was reachable through the `smartconnect_1`
+crossbar but its address (0x90000000) was never assigned into the CDMA's address space
+(`axi_cdma_0/Data`), so the read decoded to nothing and `XAxiCdma_IsBusy` spun forever.
+`design_1_bd.tcl` now assigns 0x90000000 into `axi_cdma_0/Data`. (HW-unvalidated — no board.)
+
+_Original text:_ `wav_stream_service` reads the results BRAM with rate-limited single-beat
+`Xil_In32`, NOT CDMA. The `claude/tier2-stft` branch found that a CDMA read from a results BRAM
+hangs on real hardware (it reverted to single-beat). The wavelet monitor polls the column counter
+(STATUS_REG_14), single-beat-reads the active surface, guards against a torn surface (re-read the
+counter), and ships a self-describing packet on UDP 5004.
 
 ## 6. Phase-A reconciliation needed (developed independently)
 

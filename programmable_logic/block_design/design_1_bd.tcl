@@ -865,6 +865,11 @@ proc create_root_design { parentCell } {
   # The PS GP masters can reach HP0 through the smartconnect_1 crossbar but never
   # address DDR that way -- exclude it so processing_system7_0/Data is clean.
   exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM]
+  # The CDMA can physically reach the LFP output BRAM (axi_bram_ctrl_1 @0x84000000)
+  # through the same smartconnect_1 crossbar, but the LFP path uses PS GP single-beat
+  # reads, not the CDMA. Explicitly exclude it from axi_cdma_0/Data so that space is
+  # clean (silences the BD 41-1356 unassigned-segment critical warning).
+  exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0]
 
 
   # Restore current instance
