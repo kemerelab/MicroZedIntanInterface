@@ -95,7 +95,7 @@
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
 // Wavelet (Tier-3) scalogram engine control registers (PL regs 28..31;
-// see wavelet_dsp_block.sv). Build params: K=32, N_OCTAVES=8, V=4, N_TAPS=24.
+// see wavelet_dsp_block.sv). Build params: K=8, N_OCTAVES=8, V=4, N_TAPS=24.
 #define CTRL_REG_WAV_CFG_OFFSET     (28 * 4)  // [0]en [7:4]n_oct [11:8]n_voices [19:12]n_taps
 #define CTRL_REG_WAV_GAIN_OFFSET    (29 * 4)  // 4 bits/octave: gain[4*o +: 4] = left-shift
 #define CTRL_REG_WAV_DATA_OFFSET    (30 * 4)  // upload payload (target-dependent, [17:0] coef / [7:0] chan)
@@ -106,7 +106,7 @@
 #define WAV_TARGET_HALFBAND         (1u << 2)
 #define WAV_TARGET_SELECTOR         (2u << 2)
 // Wavelet build dimensions (must match wavelet_dsp_block.sv instantiation)
-#define WAV_K                       32
+#define WAV_K                       8
 #define WAV_N_OCTAVES               8
 #define WAV_V                       4
 #define WAV_N_TAPS                  24

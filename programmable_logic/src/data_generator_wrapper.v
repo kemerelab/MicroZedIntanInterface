@@ -243,9 +243,9 @@ module data_generator #(
 
     // Instantiate the Tier-3 on-PL wavelet scalogram engine (control regs
     // 28..31; writes its own results BRAM read by the PS via a 3rd
-    // axi_bram_ctrl mapped at 0x90000000). K=32 first build, single MAC.
+    // axi_bram_ctrl mapped at 0x90000000). K=8 standard build, single MAC.
     wavelet_dsp_block #(
-        .N_CH(256), .K(32), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
+        .N_CH(256), .K(8), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
         .RES_AW(BRAM_ADDR_WIDTH)
     ) wav_dsp_inst (
         .clk(clk),
