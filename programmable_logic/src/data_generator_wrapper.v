@@ -250,7 +250,7 @@ module data_generator #(
     // ring BRAM (K*N_OCTAVES*RING_DEPTH) is independent of V/N_TAPS, and
     // RING_DEPTH=64 still >= N_TAPS=40, so the dominant BRAM is unchanged.
     wavelet_dsp_block #(
-        .N_CH(256), .K(32), .N_OCTAVES(8), .V(6), .N_TAPS(40), .HB_TAPS(7),
+        .N_CH(256), .K(6), .N_OCTAVES(8), .V(6), .N_TAPS(40), .HB_TAPS(7),
         .RES_AW(BRAM_ADDR_WIDTH)
     ) wav_dsp_inst (
         .clk(clk),

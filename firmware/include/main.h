@@ -107,7 +107,7 @@
 #define WAV_TARGET_HALFBAND         (1u << 2)
 #define WAV_TARGET_SELECTOR         (2u << 2)
 // Wavelet build dimensions (must match wavelet_dsp_block.sv instantiation)
-#define WAV_K                       32
+#define WAV_K                       6
 #define WAV_N_OCTAVES               8
 #define WAV_V                       6
 #define WAV_N_TAPS                  40
