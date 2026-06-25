@@ -2261,14 +2261,6 @@ def tcp_control():
             print(f"[TCP] Failed to configure UDP destination")
             print(f"[TCP] Device may still be sending to default: 192.168.18.100:{UDP_PORT}")
         
-        # Keep the LFP UDP port (5001) drained for the whole session: an
-        # unconsumed UDP port makes the host reply ICMP port-unreachable per
-        # datagram -> a ~3 kHz RX-interrupt storm on the board (seen only with
-        # lfp_on). The sink owns 5001; lfp_recv / lfp_sweep read from it.
-        global LFP_SINK
-        LFP_SINK = LfpSink()
-        LFP_SINK.start()
-
         # Get and display initial status
         print("\n[TCP] Getting initial device status...")
         status = get_status(sock)
@@ -2569,7 +2561,15 @@ if __name__ == "__main__":
     
     udp_thread = threading.Thread(target=udp_listener, daemon=True)
     udp_thread.start()
-    
+
+    # Drain the LFP UDP port (5001) for the whole session (daemon thread, like the
+    # broadband listener above) so the host never replies ICMP port-unreachable to
+    # the board while LFP streams: an unconsumed UDP port => ~1 ICMP/packet => a
+    # ~3 kHz RX-interrupt storm that preempts the board's polled loop. Started here
+    # (not in tcp_control) so it drains regardless of the TCP control state.
+    LFP_SINK = LfpSink()
+    LFP_SINK.start()
+
     tcp_control()
     
     time.sleep(0.5)
