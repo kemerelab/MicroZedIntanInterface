@@ -61,7 +61,14 @@ module data_generator_core (
     output logic [63:0] dsp_master_timestamp,
     // Broadband channel-enable mask (single source of truth for the LFP lane
     // mask -- the LFP filters exactly the broadband-enabled lanes).
-    output logic [7:0]  dsp_channel_enable
+    output logic [7:0]  dsp_channel_enable,
+
+    // Accel tap for the movement extractor: the rotating slot-1 accel CONVERT
+    // echo (echo_slot2_prev) that labels the accel result at data word 0, plus a
+    // valid bit (aux sequencer on AND echo established). accel_extract_block uses
+    // this to de-interleave the 3 axes -- the SAME echo the host/plugin decode.
+    output logic [15:0] dsp_accel_cmd,
+    output logic        dsp_accel_cmd_valid
 );
 
 // Extract control bits
@@ -812,6 +819,13 @@ assign dsp_sample_data = fifo_write_data;
 // its lane_mask from dsp_channel_enable (mirror of the broadband mask).
 assign dsp_master_timestamp = timestamp;
 assign dsp_channel_enable   = channel_enable_reg;
+
+// Accel tap: echo_slot2_prev is the rotating slot-1 (cycle 33) accel CONVERT whose
+// result lands at data word 0; valid only when the aux sequencer is on (per packet)
+// and the echo has been established (echo_valid). The movement extractor decodes the
+// axis from this and reads the accel sample at dsp_sample_slot==0.
+assign dsp_accel_cmd       = echo_slot2_prev;
+assign dsp_accel_cmd_valid = aux_seq_en_pkt & echo_valid;
 
 // Pack status signals
 // Status Register 0: Dynamic status and counters (locally generated)

@@ -17,12 +17,13 @@ module data_generator #(
     input  wire        rstn,
     
     // Control and status interfaces
-    // Widths must match axi_lite_registers (N_CTRL=28, N_STATUS=13). Control
+    // Widths must match axi_lite_registers (N_CTRL=29, N_STATUS=15). Control
     // regs 0..21 are the legacy map; 22..24 configure the aux command
-    // sequencer / override layer; 25..27 configure the LFP/DSP engine. Status
-    // 11 = aux status, 12 = read result.
-    input  wire [32*28-1:0] ctrl_regs_pl,
-    output wire [32*14-1:0]  status_regs_pl,
+    // sequencer / override layer; 25..27 configure the LFP/DSP engine; 28 =
+    // movement accel-extract config. Status 11 = aux status, 12 = read result,
+    // 13 = LFP block status, 14 = accel block status.
+    input  wire [32*29-1:0] ctrl_regs_pl,
+    output wire [32*15-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
     input  wire [7:0]  digital_in,
@@ -59,6 +60,23 @@ module data_generator #(
     output wire            lfp_bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM WE" *)
     output wire [3:0]      lfp_bram_we,
+
+    // Accel output BRAM Port A (PL writes the decimated [x,y,z] movement blocks;
+    // PS reads via a 3rd axi_bram_ctrl mapped at 0x88000000, in axi_cdma_0/Data).
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 ACCEL_BRAM CLK" *)
+    output wire            accel_bram_clk,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 ACCEL_BRAM RST" *)
+    output wire            accel_bram_rst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 ACCEL_BRAM ADDR" *)
+    output wire [BRAM_ADDR_WIDTH-1:0] accel_bram_addr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 ACCEL_BRAM DIN" *)
+    output wire [BRAM_DATA_WIDTH-1:0] accel_bram_din,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 ACCEL_BRAM DOUT" *)
+    input  wire [BRAM_DATA_WIDTH-1:0] accel_bram_dout,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 ACCEL_BRAM EN" *)
+    output wire            accel_bram_en,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 ACCEL_BRAM WE" *)
+    output wire [3:0]      accel_bram_we,
 
     // Serial interface signals
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
@@ -137,6 +155,12 @@ module data_generator #(
     wire [15:0]  lfp_wr_addr;
     wire         lfp_overrun;
 
+    // Accel tap (movement extractor) + its status
+    wire [15:0]  dsp_accel_cmd;          // rotating slot-1 accel CONVERT echo
+    wire         dsp_accel_cmd_valid;    // aux seq on & echo established
+    wire [BRAM_ADDR_WIDTH-1:0] accel_wr_addr;
+    wire         accel_overrun;
+
     // Data generator status (only 10 registers - wrapper adds 11th..13th)
     wire [32*10-1:0] data_gen_status;
     wire [31:0] aux_status;
@@ -178,7 +202,35 @@ module data_generator #(
         .dsp_sample_slot(dsp_sample_slot),
         .dsp_packet_tick(dsp_packet_tick),
         .dsp_master_timestamp(dsp_master_timestamp),
-        .dsp_channel_enable(dsp_channel_enable)
+        .dsp_channel_enable(dsp_channel_enable),
+        .dsp_accel_cmd(dsp_accel_cmd),
+        .dsp_accel_cmd_valid(dsp_accel_cmd_valid)
+    );
+
+    // Instantiate the on-PL movement accel-extract engine (control reg 28; writes
+    // its own output BRAM read by the PS via a 3rd axi_bram_ctrl @0x88000000).
+    accel_extract_block #(
+        .BRAM_AW(BRAM_ADDR_WIDTH)
+    ) accel_extract_inst (
+        .clk(clk),
+        .rstn(rstn),
+        .dsp_sample_valid(dsp_sample_valid),
+        .dsp_sample_data(dsp_sample_data),
+        .dsp_sample_slot(dsp_sample_slot),
+        .dsp_packet_tick(dsp_packet_tick),
+        .dsp_master_timestamp(dsp_master_timestamp),
+        .dsp_accel_cmd(dsp_accel_cmd),
+        .dsp_accel_cmd_valid(dsp_accel_cmd_valid),
+        .accel_cfg(ctrl_regs_pl[28*32 +: 32]),
+        .bram_clk(accel_bram_clk),
+        .bram_rst(accel_bram_rst),
+        .bram_addr(accel_bram_addr),
+        .bram_din(accel_bram_din),
+        .bram_dout(accel_bram_dout),
+        .bram_en(accel_bram_en),
+        .bram_we(accel_bram_we),
+        .accel_wr_addr(accel_wr_addr),
+        .accel_overrun(accel_overrun)
     );
 
     // Instantiate the on-PL LFP/DSP engine (control regs 25..27; writes its own
@@ -259,6 +311,10 @@ module data_generator #(
     // LFP engine status: [15:0] output-BRAM write byte-address (PS read pointer),
     // [16] sticky compute-overrun flag.
     assign status_regs_pl[13*32 +: 32] = {15'd0, lfp_overrun, lfp_wr_addr};
+
+    // Accel engine status: [15:0] output-BRAM write byte-address (PS read pointer,
+    // = byte addr just past the last complete block), [16] sticky overrun.
+    assign status_regs_pl[14*32 +: 32] = {15'd0, accel_overrun, accel_wr_addr};
 
     // Port-B master outputs are the same broadcast commands as port A.
     assign csn_b  = csn;

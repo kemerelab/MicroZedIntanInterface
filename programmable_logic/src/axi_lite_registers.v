@@ -1,6 +1,6 @@
 module axi_lite_registers #(
-    parameter integer N_CTRL = 28,     // 22 legacy + 3 aux-seq + 3 LFP/DSP control regs
-    parameter integer N_STATUS = 14    // 11 legacy + aux status + read result + LFP status
+    parameter integer N_CTRL = 29,     // 22 legacy + 3 aux-seq + 3 LFP/DSP + 1 movement (accel) reg
+    parameter integer N_STATUS = 15    // 11 legacy + aux status + read result + LFP status + accel status
 )(
     input  wire                     s_axi_aclk,
     input  wire                     s_axi_aresetn,

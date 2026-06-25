@@ -56,7 +56,7 @@
 
 // Number of PL control registers (must match axi_lite_registers N_CTRL --
 // the status registers are read back starting right after the control block)
-#define PL_N_CTRL_REGS      28
+#define PL_N_CTRL_REGS      29
 
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
@@ -93,6 +93,28 @@
 #define LFP_UDP_PORT                5001       // separate UDP stream for the LFP band
 #define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
+
+// Movement accel-extract engine control register (PL reg 28; see accel_extract_block.sv)
+#define CTRL_REG_ACCEL_CFG_OFFSET   (28 * 4)
+// accel_cfg packing: [0] enable, [2:1] headstage (regular stream 0/2/4/6),
+//   [6:3] ema_shift (per-axis EMA leak K), [22:8] decim_M (packets per [x,y,z] triplet, min 1)
+#define ACCEL_CFG_EN                (1u << 0)
+#define ACCEL_CFG_HEADSTAGE_SHIFT   1
+#define ACCEL_CFG_HEADSTAGE_MASK    (0x3u << 1)
+#define ACCEL_CFG_EMA_SHIFT_SHIFT   3
+#define ACCEL_CFG_EMA_SHIFT_MASK    (0xFu << 3)
+#define ACCEL_CFG_DECIM_M_SHIFT     8
+#define ACCEL_CFG_DECIM_M_MASK      (0x7FFFu << 8)
+// Accel output BRAM (PL-built movement blocks: 6-word header + 2 words/triplet),
+// PS read via 3rd axi_bram_ctrl, in axi_cdma_0/Data -> CDMA whole blocks.
+#define ACCEL_BRAM_BASE_ADDR        0x88000000
+#define ACCEL_BRAM_SIZE_WORDS       16384      // 64 KB ring of 32-bit words
+#define ACCEL_UDP_PORT              5005       // separate UDP stream for decimated accel/movement
+// Movement block format (keep in sync with accel_extract_block.sv + net.py)
+#define ACCEL_MAGIC_LOW             0x1F1FACE1u
+#define ACCEL_MAGIC_HIGH            0xCAFEBABEu
+#define ACCEL_BLOCK_HDR_WORDS       6
+#define ACCEL_DEFAULT_N_TRIPLETS    100        // accel_extract_block N_TRIPLETS param
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
@@ -149,6 +171,7 @@
 #define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 #define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
+#define STATUS_REG_14_OFFSET (STATUS_REG_BASE + 14 * 4)  // Accel: [15:0] BRAM wr byte-addr (past last block), [16] overrun
 
 // STATUS_REG_11 bit fields
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
