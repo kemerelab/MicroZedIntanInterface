@@ -55,6 +55,21 @@ COEF_FRAC = 17
 OUT_W     = 18         # scalogram output width (signed); wider than 16 for headroom
 N_FRAMES  = 256        # base-rate frames fed to the engine
 
+# ---- RUNTIME active config (<= the build maxes above). The engine builds the
+# COMPLETE wire packet in its results BRAM using the COMPACTED lane stride
+# (nscales = ACT_OCTAVES*ACT_VOICES, only active scales, contiguous). Choosing
+# ACT < build max exercises the compaction path (the whole point of moving the
+# repack into the PL). ----
+ACT_OCTAVES = 3        # active octaves this run (< N_OCTAVES build max -> compaction)
+ACT_VOICES  = 3        # active voices/octave (< V build max -> compaction)
+ACT_TAPS    = N_TAPS   # active taps (engine caps at N_TAPS; keep full here)
+N_SCALES    = ACT_OCTAVES * ACT_VOICES   # compacted lane stride on the wire
+
+# ---- wire-packet header (matches the RTL wavelet_cqt_engine + net.py) ----
+WAV_MAGIC_LOW  = 0x5CA70900
+WAV_MAGIC_HIGH = 0xCAFEBABE
+HDR_WORDS      = 8
+
 # Generalized Morse wavelet parameters (gamma=3 is the locked default).
 GAMMA = 3.0
 BETA  = 3.0            # beta sets the time-bandwidth product / Q; Q ~ sqrt(beta*gamma)
@@ -245,13 +260,14 @@ def halfband_decimate(x, hb):
 # =====================================================================
 def voice_mac(stream, voices, octave):
     """stream: int list (this octave's samples). voices: V x N_TAPS complex.
-    Returns last_col[v] = (re_out, im_out) using the last N_TAPS samples."""
+    Returns last_col[v] = (re_out, im_out) using the last ACT_TAPS samples, for
+    the ACT_VOICES active voices (matches the engine's runtime n_voices/n_taps)."""
     sh = COEF_FRAC - OUT_GAIN_SHIFT[octave]
     n = len(stream)
     out = []
-    for v in range(V):
+    for v in range(ACT_VOICES):
         acc_re = acc_im = 0
-        for j in range(N_TAPS):
+        for j in range(ACT_TAPS):
             idx = (n - 1) - j         # newest sample at j=0
             xv = stream[idx] if 0 <= idx < n else 0
             cre, cim = voices[v][j]
@@ -296,22 +312,44 @@ def main():
                 f.write(format(samp[l][fr] & 0xFFFF, '08x') + "\n")
 
     # ---- reference scalogram: per lane, build the octave cascade, take the
-    #      most-recent column of every (octave, voice). ----
-    exp = []   # signed ints, interleaved re,im, ordered lane / octave / voice
+    #      most-recent column of every active (octave, voice). COMPACTED:
+    #      only ACT_OCTAVES octaves x ACT_VOICES voices = N_SCALES scales,
+    #      ordered scale = octave*ACT_VOICES + voice (octave-major). ----
+    payload = []   # signed ints, interleaved re,im, ordered lane / octave / voice
     for l in range(K):
         stream = samp[l][:]                 # octave 0 stream
         streams = [stream]
-        for o in range(1, N_OCTAVES):
+        for o in range(1, ACT_OCTAVES):
             stream = halfband_decimate(stream, hb)
             streams.append(stream)
-        for o in range(N_OCTAVES):
-            col = voice_mac(streams[o], voices, o)
+        for o in range(ACT_OCTAVES):
+            col = voice_mac(streams[o], voices, o)   # ACT_VOICES complex bins
             for (re, im) in col:
-                exp.append(re)
-                exp.append(im)
+                payload.append(re)
+                payload.append(im)
+
+    # ---- build the COMPLETE wire packet the PL now writes into the results
+    #      BRAM (8-word header + compacted payload). The TB snapshots the BRAM
+    #      and compares it word-for-word against this. The engine runs ONE pass
+    #      per kicking frame-start that had staged data: frames 1..N_FRAMES
+    #      (frame f's pass is kicked by frame f+1's frame-start; the trailing
+    #      trigger frame N_FRAMES flushes the last real frame). So N_FRAMES
+    #      passes complete and frame_seq -> N_FRAMES; the header (written at pass
+    #      start as frame_seq+1) of the LAST pass carries N_FRAMES, which is what
+    #      remains in the BRAM. ----
+    SEQ = N_FRAMES
+    gain_word = 0
+    for o in range(N_OCTAVES):                       # 4 bits/octave, build-width
+        g = OUT_GAIN_SHIFT[o] if o < len(OUT_GAIN_SHIFT) else 0
+        gain_word |= (g & 0xF) << (4 * o)
+    w4 = (ACT_OCTAVES & 0xFF) | ((ACT_VOICES & 0xFF) << 8) \
+       | ((K & 0xFF) << 16) | ((0 & 1) << 24)        # overrun must be 0 (PASS)
+    w6 = (N_SCALES & 0xFFFF) | ((ACT_TAPS & 0xFFFF) << 16)
+    header = [WAV_MAGIC_LOW, WAV_MAGIC_HIGH, SEQ, 0, w4, SEQ, w6, gain_word]
+    wire = header + payload
 
     with open(f"{OUT}/wav_exp.hex", "w") as f:
-        for v in exp:
+        for v in wire:
             f.write(format(v & 0xFFFFFFFF, '08x') + "\n")
 
     with open(f"{OUT}/wav_meta.txt", "w") as f:
@@ -319,6 +357,8 @@ def main():
                 f"HB_TAPS={HB_TAPS} DATA_W={DATA_W} COEF_W={COEF_W} "
                 f"COEF_FRAC={COEF_FRAC} OUT_W={OUT_W} N_FRAMES={N_FRAMES}\n")
         f.write(f"GAMMA={GAMMA} BETA={BETA} OUT_GAIN_SHIFT={OUT_GAIN_SHIFT}\n")
+        f.write(f"ACTIVE: oct={ACT_OCTAVES} V={ACT_VOICES} taps={ACT_TAPS} "
+                f"nscales={N_SCALES} (compacted wire stride)\n")
         # center frequencies per (octave, voice), in Hz
         fc_top = 0.34
         f.write("center frequencies (Hz):\n")
@@ -330,9 +370,11 @@ def main():
                 line += "%.1f " % fc
             f.write(line + "\n")
 
-    print(f"K={K} octaves={N_OCTAVES} V={V} taps={N_TAPS} hb={HB_TAPS} "
-          f"frames={N_FRAMES} -> scales={N_OCTAVES*V} "
-          f"expected_words={len(exp)} (re,im interleaved)")
+    print(f"K={K} build(oct={N_OCTAVES},V={V},taps={N_TAPS}) "
+          f"active(oct={ACT_OCTAVES},V={ACT_VOICES},taps={ACT_TAPS}) hb={HB_TAPS} "
+          f"frames={N_FRAMES} -> nscales={N_SCALES} (compacted) "
+          f"wire_words={len(wire)} = {HDR_WORDS} hdr + {len(payload)} payload "
+          f"(re,im interleaved)")
 
 
 if __name__ == "__main__":

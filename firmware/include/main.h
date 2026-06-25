@@ -111,9 +111,13 @@
 #define WAV_V                       4
 #define WAV_N_TAPS                  24
 #define WAV_HB_TAPS                 7
-#define WAV_N_SCALES                (WAV_N_OCTAVES * WAV_V)   // 32 scales
-// Wavelet results BRAM (PS read via 3rd axi_bram_ctrl). Layout: per lane,
-// WAV_N_SCALES complex bins (re,im); word(lane,scale)=(lane*N_SCALES+scale)*2.
+#define WAV_N_SCALES                (WAV_N_OCTAVES * WAV_V)   // 32 scales (build max)
+// Wavelet results BRAM (PS read via 3rd axi_bram_ctrl). The PL builds the
+// COMPLETE wire packet here: an 8-word header then the COMPACTED payload --
+// per lane, nscales (= n_octaves*n_voices, runtime <= WAV_N_SCALES) complex
+// bins (re,im), word(lane,scale) = WAV_HDR_WORDS + (lane*nscales + scale)*2.
+// The PS just CDMAs the whole frame into a pbuf and sends it (no repack).
+#define WAV_HDR_WORDS               8
 #define WAV_BRAM_BASE_ADDR          0x90000000
 #define WAV_BRAM_SIZE_WORDS         16384      // 64 KB
 #define WAV_UDP_PORT                5004       // decimated scalogram monitor stream

@@ -869,37 +869,35 @@ void lfp_stream_service(void) {
 
 // ============================================================================
 // WAVELET (Tier-3) STREAM: poll the column counter (STATUS_REG_14); when it
-// advances, read the wavelet results BRAM (at 0x90000000) -- per lane,
-// WAV_N_SCALES complex int (re,im) -- and ship ONE self-describing UDP packet
-// on WAV_UDP_PORT. The results BRAM is a SNAPSHOT (not a ring): the engine
-// overwrites each (lane,scale) bin on the octave that advanced, so we read the
-// whole current surface.
+// advances, read the wavelet results BRAM (at 0x90000000) and ship ONE
+// self-describing UDP packet on WAV_UDP_PORT. The results BRAM is a SNAPSHOT
+// (not a ring): the engine overwrites each (lane,scale) bin on the octave that
+// advanced, so we read the whole current frame.
 //
-// READ PATH: AXI CDMA, the same way the broadband capture path reads the
-// capture BRAM. One CDMA transfer copies the full results surface
-// (WAV_K * WAV_N_SCALES complex int32 = 8 KB) from WAV_BRAM_BASE_ADDR into a
-// non-cacheable DDR staging region, then we repack the active sub-region into
-// the UDP packet from staging. (The old single-beat Xil_In32 loop is gone.)
+// THE PL NOW BUILDS THE COMPLETE WIRE PACKET in the results BRAM -- an 8-word
+// header (magic/seq/cfg/gain) followed by the COMPACTED (lane,scale<nscales)
+// re/im payload (lane stride = nscales, the active scale count) -- exactly the
+// format the host (net.py receive_wavelet) expects and the PS used to repack.
+// So the PS does what lfp_stream_service does: CDMA the whole frame BRAM ->
+// non-cacheable staging in ONE transfer, PBUF_REF it, and send. No CPU repack
+// of the staging buffer (the hard PL->PS DMA rule -- a 2048-word uncached
+// repack used to cost ~2.6 ms and starve the core-0 loop).
 //
-// The earlier STFT branch "CDMA hang" was NOT a CDMA-from-BRAM limitation: the
-// results BRAM was reachable through the smartconnect_1 crossbar but its
-// address (0x90000000) was never assigned into the CDMA's address space
-// (axi_cdma_0/Data), so the read decoded to nothing and XAxiCdma_IsBusy spun
-// forever. design_1_bd.tcl now assigns 0x90000000 into axi_cdma_0/Data.
+// READ PATH: AXI CDMA, the same way the broadband/LFP paths read their BRAMs.
+// (The earlier STFT-branch "CDMA hang" was a missing axi_cdma_0/Data segment
+// for 0x90000000, now assigned in design_1_bd.tcl -- not a CDMA limitation.)
 // ============================================================================
 static struct udp_pcb *wav_pcb = NULL;
 static uint32_t wav_last_seq = 0xFFFFFFFF;
 uint32_t wav_udp_packets_sent = 0;
 uint32_t wav_dma_errors = 0;
-// 8-word header + K*N_SCALES complex int32 (re,im) = 32*32*2 = 2048 words.
-static uint32_t wav_pktbuf[8 + WAV_K * WAV_N_SCALES * 2] __attribute__((aligned(8)));
 
-// Full results surface in 32-bit words (DMA'd whole, repacked after).
-#define WAV_SURFACE_WORDS  ((uint32_t)WAV_K * WAV_N_SCALES * 2)
 // DDR staging for the CDMA: a sub-region of the non-cacheable pl_dma_staging
 // 1 MB section (see pl_dma.h). Placed 512 KB in, disjoint from the broadband
 // packet region at the front of the buffer (max 150 words), so the two paths
-// never alias even with an in-flight broadband pbuf.
+// never alias even with an in-flight broadband pbuf. Holds the full PL-built
+// wire packet (header + compacted payload), DMA'd straight from the BRAM; the
+// pbuf references it directly (PBUF_REF) -- no intermediate repack buffer.
 #define WAV_DMA_STAGING_OFFSET  0x80000U
 static uint32_t *const wav_dma_staging =
     (uint32_t *)(DMA_BUF_ADDR + WAV_DMA_STAGING_OFFSET);
@@ -917,53 +915,37 @@ void wav_stream_service(void) {
     uint32_t st  = pl_wav_read_status();
     uint32_t seq = st & 0x3FFFFFFF;
     if (seq == wav_last_seq) return;                // no new scalogram column
-    uint8_t overrun = (st >> 31) & 1;
 
+    // Frame size = the full PL-built wire packet: 8-word header + the COMPACTED
+    // payload (K lanes x nscales complex int32). nscales is the runtime active
+    // scale count (n_octaves*n_voices); the PL writes the same compacted stride.
     uint32_t nscales = (uint32_t)wav_cfg_n_octaves * wav_cfg_n_voices;
     if (nscales > WAV_N_SCALES) nscales = WAV_N_SCALES;
-    uint32_t pwords  = (uint32_t)WAV_K * nscales * 2;   // complex int32 (re,im)
-    if (pwords > (uint32_t)WAV_K * WAV_N_SCALES * 2) return;  // config guard
+    uint32_t frame_words = WAV_HDR_WORDS + (uint32_t)WAV_K * nscales * 2;
+    if (frame_words > (WAV_HDR_WORDS + (uint32_t)WAV_K * WAV_N_SCALES * 2))
+        return;                                     // config guard
 
-    // DMA the whole results surface (8 KB) BRAM -> non-cacheable DDR staging in
-    // one CDMA transfer, then repack from staging. On DMA error, skip this
-    // column (wav_last_seq unchanged so we retry next advance).
+    // CDMA the whole wire packet (header + compacted payload) BRAM -> non-
+    // cacheable DDR staging in ONE transfer. On DMA error, skip this column
+    // (wav_last_seq unchanged so we retry on the next advance).
     if (pl_dma_read_addr(wav_dma_staging, (uintptr_t)WAV_BRAM_BASE_ADDR,
-                         WAV_SURFACE_WORDS) != 0) {
+                         frame_words) != 0) {
         wav_dma_errors++;
         return;
     }
 
-    wav_pktbuf[0] = 0x5CA70900;                     // wavelet magic (low)  "SCALOG"
-    wav_pktbuf[1] = 0xCAFEBABE;                     // magic (high)
-    wav_pktbuf[2] = seq;                            // column index (== timestamp surrogate)
-    wav_pktbuf[3] = 0;
-    wav_pktbuf[4] = (uint32_t)wav_cfg_n_octaves
-                  | ((uint32_t)wav_cfg_n_voices << 8)
-                  | ((uint32_t)WAV_K            << 16)
-                  | ((uint32_t)overrun          << 24);
-    wav_pktbuf[5] = seq;
-    wav_pktbuf[6] = nscales | ((uint32_t)wav_cfg_n_taps << 16);
-    wav_pktbuf[7] = wav_cfg_gain;
-    // results layout: word(lane,scale) = (lane*WAV_N_SCALES + scale)*2; +0=re, +1=im.
-    // We emit the active (lane, scale<nscales) sub-region, packed contiguously,
-    // reading the DMA'd staging copy instead of the BRAM directly.
-    uint32_t o = 8;
-    for (uint32_t lane = 0; lane < WAV_K; lane++) {
-        uint32_t base = (lane * WAV_N_SCALES) * 2;
-        for (uint32_t s = 0; s < nscales; s++) {
-            uint32_t w = base + s * 2;
-            wav_pktbuf[o++] = wav_dma_staging[w];       // re
-            wav_pktbuf[o++] = wav_dma_staging[w + 1];   // im
-        }
-    }
-    // re-read the counter: if it advanced during the DMA the surface is torn -> skip
+    // Torn-frame guard: re-read the column counter; if it advanced during the
+    // DMA the frame may be inconsistent -> skip (retry next advance). The PL
+    // stamps the same seq in the header (w2/w5), so the host can cross-check.
     if ((pl_wav_read_status() & 0x3FFFFFFF) != seq) return;
     wav_last_seq = seq;
 
-    uint32_t total = (8 + pwords) * 4;
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_REF);
+    // Zero-copy send: the pbuf references the staging buffer directly. The PL
+    // built the whole packet, so we send exactly what the PL wrote (no header
+    // math, no CPU repack of the staging buffer).
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_words * 4, PBUF_REF);
     if (p != NULL) {
-        p->payload = (void*)wav_pktbuf;
+        p->payload = (void*)wav_dma_staging;
         ip_addr_t dst; dst.addr = udp_dest_ip;
         udp_sendto(wav_pcb, p, &dst, WAV_UDP_PORT);
         pbuf_free(p);

@@ -26,6 +26,15 @@ module wavelet_engine_tb;
     localparam int RES_AW    = 14;
     localparam int N_FRAMES  = 256;
 
+    // RUNTIME active config (< build maxes -> exercises the engine's COMPACTED
+    // wire-packet build). MUST match gen_wavelet_vectors.py ACT_*.
+    localparam int ACT_OCTAVES = 3;
+    localparam int ACT_VOICES  = 3;
+    localparam int ACT_TAPS    = N_TAPS;
+    localparam int HDR_WORDS   = 8;
+    localparam int N_SCALES_ACT= ACT_OCTAVES*ACT_VOICES;        // compacted stride
+    localparam int WIRE_WORDS  = HDR_WORDS + K*N_SCALES_ACT*2;  // full packet words
+
     localparam int CH_W   = $clog2(N_CH);
     localparam int LANE_W = $clog2(K);
     localparam int OCT_W  = $clog2(N_OCTAVES);
@@ -34,8 +43,6 @@ module wavelet_engine_tb;
     localparam int HBTAP_W= $clog2(HB_TAPS);
     localparam int COEFN  = V*N_TAPS;
     localparam int COEF_AW= $clog2(2*COEFN);
-    localparam int N_SCALE = N_OCTAVES*V;
-    localparam int N_RES   = K*N_SCALE*2;   // re,im interleaved
 
     // selected source channels for lanes 0..K-1 (arbitrary, distinct)
     localparam int CHAN [0:3] = '{2, 50, 100, 200};
@@ -48,9 +55,9 @@ module wavelet_engine_tb;
     logic [CH_W-1:0]      lfp_out_channel=0;
     logic signed [DATA_W-1:0] lfp_out_data=0;
     logic                 wav_en=0;
-    logic [OCT_W:0]       n_octaves_cfg = N_OCTAVES;
-    logic [VOICE_W:0]     n_voices_cfg  = V;
-    logic [TAP_W:0]       n_taps_cfg    = N_TAPS;
+    logic [OCT_W:0]       n_octaves_cfg = ACT_OCTAVES;
+    logic [VOICE_W:0]     n_voices_cfg  = ACT_VOICES;
+    logic [TAP_W:0]       n_taps_cfg    = ACT_TAPS;
     logic [4*N_OCTAVES-1:0] gain_cfg;
     logic                 sel_wr_en=0;   logic [LANE_W-1:0] sel_wr_lane=0; logic [CH_W-1:0] sel_wr_ch=0;
     logic                 coef_wr_en=0;  logic [COEF_AW-1:0] coef_wr_addr=0; logic signed [COEF_W-1:0] coef_wr_data=0;
@@ -84,17 +91,19 @@ module wavelet_engine_tb;
     logic [COEF_W-1:0] coef_mem [0:2*COEFN-1];   // interleaved re,im
     logic [COEF_W-1:0] hb_mem   [0:HB_TAPS-1];
     logic [31:0]       samp_mem [0:N_FRAMES*K-1]; // one word/(frame,lane), int16 low
-    logic [31:0]       exp_mem  [0:N_RES-1];       // signed re,im interleaved
+    logic [31:0]       exp_mem  [0:WIRE_WORDS-1];  // the COMPLETE wire packet
 
-    // results capture: a shadow of the whole results region (last write wins)
-    logic [31:0] got_val [0:N_RES-1];
-    logic        got_vld [0:N_RES-1];
+    // results capture: a shadow of the whole wire-packet region in the results
+    // BRAM (header words 0..7 + compacted payload), last write wins. The engine
+    // now writes the FULL wire packet here, so we snapshot it and compare it
+    // word-for-word against the Python reference (header + compacted re,im).
+    logic [31:0] got_val [0:WIRE_WORDS-1];
+    logic        got_vld [0:WIRE_WORDS-1];
     always @(posedge clk) begin
         if (res_we != 0) begin
-            int unsigned word, idx;
-            word = res_addr >> 2;             // 32-bit word index
-            idx  = word;                      // results layout is exactly re,im interleaved
-            if (idx < N_RES) begin got_val[idx] = res_din; got_vld[idx] = 1; end
+            int unsigned word;
+            word = res_addr >> 2;             // 32-bit word index in the BRAM
+            if (word < WIRE_WORDS) begin got_val[word] = res_din; got_vld[word] = 1; end
         end
     end
 
@@ -107,7 +116,7 @@ module wavelet_engine_tb;
         $readmemh("wav_hb.hex",   hb_mem);
         $readmemh("wav_samp.hex", samp_mem);
         $readmemh("wav_exp.hex",  exp_mem);
-        for (i=0;i<N_RES;i++) got_vld[i]=0;
+        for (i=0;i<WIRE_WORDS;i++) got_vld[i]=0;
 
         rstn=0; repeat(5) neg(); rstn=1; neg();
 
@@ -150,25 +159,41 @@ module wavelet_engine_tb;
         // let the final pass drain
         repeat (200) neg();
 
-        // ---- compare the most-recent column (BIT-EXACT vs the Python ref) ----
+        // ---- compare the COMPLETE wire packet the PL built in the results
+        //      BRAM (8-word header + compacted re,im payload) word-for-word
+        //      against the Python reference (BIT-EXACT). This proves the PL now
+        //      emits exactly what the PS used to repack -- so the PS just DMAs
+        //      the BRAM frame and sends it (no CPU repack). ----
         errs=0; checked=0;
-        for (i=0;i<N_RES;i++) begin
-            got_s = $signed(got_vld[i] ? got_val[i] : 32'h0);
-            exp_s = $signed(exp_mem[i]);
-            d = (got_s > exp_s) ? (got_s-exp_s) : (exp_s-got_s);
+        for (i=0;i<WIRE_WORDS;i++) begin
             checked++;
-            // bit-exact: the Python reference uses the identical integer MAC,
-            // round-to-nearest, arithmetic shift, and saturation as the RTL.
-            if (!got_vld[i] || d != 0) begin
-                errs++;
-                if (errs<=20)
-                    $display("  MISMATCH idx=%0d (lane=%0d scale=%0d %s) got=%0d exp=%0d vld=%0b",
-                             i, i/(N_SCALE*2), (i/2)%N_SCALE, (i&1)?"IM":"RE", got_s, exp_s, got_vld[i]);
+            if (i < HDR_WORDS) begin
+                // header words compare as raw 32-bit (magic/seq/cfg/gain)
+                if (!got_vld[i] || got_val[i] !== exp_mem[i]) begin
+                    errs++;
+                    if (errs<=20)
+                        $display("  HDR MISMATCH word=%0d got=%08x exp=%08x vld=%0b",
+                                 i, got_val[i], exp_mem[i], got_vld[i]);
+                end
+            end else begin
+                int unsigned pi, lane, scale;
+                pi    = i - HDR_WORDS;            // payload word index
+                lane  = pi / (N_SCALES_ACT*2);
+                scale = (pi/2) % N_SCALES_ACT;
+                got_s = $signed(got_vld[i] ? got_val[i] : 32'h0);
+                exp_s = $signed(exp_mem[i]);
+                d = (got_s > exp_s) ? (got_s-exp_s) : (exp_s-got_s);
+                if (!got_vld[i] || d != 0) begin
+                    errs++;
+                    if (errs<=20)
+                        $display("  PAY MISMATCH word=%0d (lane=%0d scale=%0d %s) got=%0d exp=%0d vld=%0b",
+                                 i, lane, scale, (pi&1)?"IM":"RE", got_s, exp_s, got_vld[i]);
+                end
             end
         end
 
-        $display("WAVELET engine TB: checked=%0d errors=%0d overrun=%0b frame_seq=%0d",
-                 checked, errs, overrun, frame_seq);
+        $display("WAVELET engine TB: wire_words=%0d (hdr=%0d) checked=%0d errors=%0d overrun=%0b frame_seq=%0d",
+                 WIRE_WORDS, HDR_WORDS, checked, errs, overrun, frame_seq);
         if (errs==0 && !overrun) $display("RESULT: PASS");
         else                     $display("RESULT: FAIL");
         $finish;

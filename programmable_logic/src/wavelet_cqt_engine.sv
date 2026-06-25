@@ -36,10 +36,31 @@
 //   latches if a fresh frame arrives mid-pass (late frame dropped, never
 //   corrupted) -- exactly lfp_fir_decimator's guarantee.
 //
-// Results BRAM layout (32-bit words; byte addr = word<<2):
-//   word_addr(lane,scale) = (lane*N_OCTAVES*V + scale)*2 ; +0=re, +1=im.
-//   scale = octave*V + voice. Values signed OUT_W, sign-extended to 32.
-//   Octaves that did not advance this frame keep their previous column.
+// Results BRAM layout -- THE COMPLETE WIRE PACKET (32-bit words; byte addr =
+// word<<2), so the PS just DMAs the whole frame into a pbuf and sends it (no
+// PS-side header math or compaction loop), exactly as lfp_dsp_block does:
+//
+//   [ 8-word header | compacted (lane,scale) re/im payload ]
+//
+//   Header (matches remote/net.py receive_wavelet + the firmware wire format):
+//     w0 = WAV_MAGIC_LOW  (0x5CA70900)
+//     w1 = WAV_MAGIC_HIGH (0xCAFEBABE)
+//     w2 = seq           (== frame_seq, the completed-column count)
+//     w3 = 0
+//     w4 = n_octaves | (n_voices<<8) | (K<<16) | (overrun<<24)
+//     w5 = seq           (duplicate, torn-frame cross-check)
+//     w6 = nscales | (n_taps<<16)        nscales = n_octaves*n_voices (runtime)
+//     w7 = gain          (4 bits/octave left-shift, the host gain word)
+//   Payload (COMPACTED -- lane stride = nscales, NOT the padded build max):
+//     word_addr(lane,scale) = HDR_WORDS + (lane*nscales + scale)*2 ; +0=re,+1=im
+//     scale = octave*n_voices + voice. Values signed OUT_W, sign-extended to 32.
+//     Octaves that did not advance this frame keep their previous column (the
+//     per-(lane,scale) address is stable while the config is held, so the snap-
+//     shot semantics survive compaction).
+//
+//   nscales is RUNTIME (n_octaves*n_voices), <= the build max N_OCTAVES*V. The
+//   header + compacted layout are built in the PL so the PS does a single
+//   DMA+send (the hard PL->PS DMA rule -- no CPU repack of the staging buffer).
 //
 // Voice coef RAM: V*N_TAPS complex pairs interleaved -- word
 //   2*(v*N_TAPS+j)+0 = re, +1 = im.
@@ -116,6 +137,11 @@ module wavelet_cqt_engine #(
 );
     localparam int PROD_W  = DATA_W + COEF_W;
     localparam int RES_WAW = RES_AW - 2;
+
+    // Wire-packet header (matches remote/net.py receive_wavelet + the firmware).
+    localparam int          HDR_WORDS      = 8;
+    localparam logic [31:0] WAV_MAGIC_LOW  = 32'h5CA70900;
+    localparam logic [31:0] WAV_MAGIC_HIGH = 32'hCAFEBABE;
     localparam signed [OUT_W:0]  OUT_MAX =  (1 <<< (OUT_W-1)) - 1;
     localparam signed [OUT_W:0]  OUT_MIN = -(1 <<< (OUT_W-1));
     localparam signed [DATA_W:0] DAT_MAX =  (1 <<< (DATA_W-1)) - 1;
@@ -244,6 +270,35 @@ module wavelet_cqt_engine #(
     logic [TAP_W:0]     cur_tap;
     logic               cur_im;      // 0 = re coeff phase, 1 = im coeff phase
     logic [LANE_W-1:0]  commit_lane;
+
+    // -----------------------------------------------------------------
+    // Per-pass config snapshot for the wire-packet header + compacted payload
+    // addressing. n_oct/n_voc/n_tap are latched-while-disabled host config, so
+    // they are stable across a pass; we snapshot them at start_pass anyway so
+    // the header writer and the payload address generator use ONE consistent
+    // view (and nscales is a multiply we want to do once). nscales = the active
+    // scale count = n_oct*n_voc, the COMPACTED lane stride on the wire.
+    // -----------------------------------------------------------------
+    localparam int NSC_W = $clog2(N_OCTAVES*V + 1);
+    logic [NSC_W-1:0] nscales_snap;  // active scales this pass (lane stride)
+    logic [VOICE_W:0] nvoc_snap;     // voices/octave (scale = octave*nvoc + voice)
+    logic [3:0]       noct_snap;     // raw n_octaves for the header w4 field
+    logic [3:0]       nvoc4_snap;    // raw n_voices  for the header w4 field
+    logic [7:0]       ntap_snap;     // raw n_taps    for the header w6 field
+    logic [31:0]      hdr_seq;       // seq value stamped in this frame's header
+    logic             ov_snap;       // overrun snapshot for this frame's header
+    logic [31:0]      gain_snap;     // gain word for the header w7 field
+
+    // header-write micro-sequence (runs at pass start, before any v_emit)
+    logic [2:0]       hdr_idx;       // 0..7 while writing the 8-word header
+    logic             hdr_busy;
+    logic             hdr_kick;      // FSM->BRAM-writer: start the header now
+    // w4 = n_octaves | (n_voices<<8) | (K<<16) | (overrun<<24)
+    wire  [31:0]      hdr_w4 = {32'(noct_snap)} | ({32'(nvoc4_snap)} << 8)
+                             | ({32'(K)} << 16) | ({31'd0, ov_snap} << 24);
+    // w6 = nscales | (n_taps<<16)
+    wire  [31:0]      hdr_w6 = {16'd0, {(16-NSC_W){1'b0}}, nscales_snap}
+                             | ({32'(ntap_snap)} << 16);
 
     // halfband pass bookkeeping
     logic [LANE_W-1:0]  hb_lane;
@@ -453,11 +508,14 @@ module wavelet_cqt_engine #(
             ring_we<=0; drain<='0; oct_adv_snap<='0;
             ag_v<=0; ag_first<=0; ag_last<=0; ag_im<=0; ag_is_hb<=0; ag_gain<='0;
             ag_lane<='0; ag_oct<='0; ag_voice<='0;
+            nscales_snap<='0; nvoc_snap<='0; noct_snap<='0; nvoc4_snap<='0;
+            ntap_snap<='0; hdr_seq<='0; ov_snap<=0; gain_snap<='0; hdr_kick<=0;
             for (int i=0;i<K*N_OCTAVES;i++) head[i]<='0;
         end else begin
-            ring_we <= 1'b0;
-            ag_v    <= 1'b0;
-            ag_first<= 1'b0; ag_last<=1'b0; ag_im<=1'b0; ag_is_hb<=1'b0;
+            ring_we  <= 1'b0;
+            ag_v     <= 1'b0;
+            ag_first <= 1'b0; ag_last<=1'b0; ag_im<=1'b0; ag_is_hb<=1'b0;
+            hdr_kick <= 1'b0;
 
             if (start_pass && st != S_IDLE) overrun <= 1'b1;
 
@@ -470,6 +528,22 @@ module wavelet_cqt_engine #(
                     oct_adv_snap <= oct_adv;
                     commit_lane  <= '0;
                     busy <= 1'b1;
+                    // Snapshot the wire-packet header fields + the compacted
+                    // lane stride (nscales = n_oct*n_voc) for THIS pass, and
+                    // kick the header writer. n_oct/n_voc/n_tap are held while
+                    // disabled, so they are stable for the whole pass. seq is
+                    // the value frame_seq becomes after this pass completes
+                    // (S_DRAIN does frame_seq++), so the status reg the PS polls
+                    // and this header carry the same number for the same column.
+                    nscales_snap <= NSC_W'(n_oct * n_voc);
+                    nvoc_snap    <= n_voc;
+                    noct_snap    <= 4'(n_oct);   // zero-extend (n_oct may be <4 bits)
+                    nvoc4_snap   <= 4'(n_voc);
+                    ntap_snap    <= 8'(n_tap);
+                    gain_snap    <= 32'(gain_cfg);   // zero-extend the host gain word
+                    ov_snap      <= overrun;
+                    hdr_seq      <= frame_seq + 1'b1;
+                    hdr_kick     <= 1'b1;
                     st <= S_COMMIT0;
                 end
             end
@@ -593,7 +667,23 @@ module wavelet_cqt_engine #(
     end
 
     // =================================================================
-    // Results BRAM write: on v_emit, write re then im (2 cycles).
+    // Results BRAM write: BUILD THE FULL WIRE PACKET (header + compacted
+    // payload) in the results BRAM so the PS just DMAs+sends it (mirrors
+    // lfp_dsp_block). One write port, shared by:
+    //   (a) the 8-word HEADER micro-sequence (kicked at pass start by
+    //       hdr_kick, one word/clk into addresses 0..7), and
+    //   (b) the per-(lane,scale) PAYLOAD writes (on v_emit, re then im).
+    // These never race: the header completes 8 clocks after start_pass, while
+    // the first v_emit cannot fire until after the whole HB cascade + a voice
+    // MAC run (many tens of clocks later) -- exactly the LFP precedent where
+    // the 6-word header always lands before the first out_valid.
+    //
+    // COMPACTED payload addressing (lane stride = nscales, the active scale
+    // count, NOT the padded build max N_OCTAVES*V):
+    //   word_addr(lane,scale) = HDR_WORDS + (lane*nscales + scale)*2
+    //   scale = octave*n_voices + voice ; +0 = re, +1 = im.
+    // The address for a given (lane,octave,voice) is stable while the config is
+    // held, so octaves that did not advance keep their previous column.
     // =================================================================
     logic              we_r, em_phase;
     logic [RES_WAW-1:0] addr_r;
@@ -601,15 +691,41 @@ module wavelet_cqt_engine #(
     logic [31:0]       im_hold;
     logic [RES_WAW-1:0] base_word;
 
-    wire [RES_WAW-1:0] scale_word =
-        RES_WAW'(((v_emit_lane*N_OCTAVES*V) + (v_emit_oct*V + v_emit_voice)) << 1);
+    // compacted base word for the in-flight complex bin (re slot)
+    wire [RES_WAW-1:0] scale_word = RES_WAW'(HDR_WORDS +
+        (((v_emit_lane*nscales_snap) + (v_emit_oct*nvoc_snap + v_emit_voice)) << 1));
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
             we_r<=0; em_phase<=0; addr_r<='0; din_r<='0; im_hold<='0; base_word<='0;
+            hdr_idx<=3'd0; hdr_busy<=1'b0;
         end else begin
             we_r <= 1'b0;
-            if (!em_phase) begin
+
+            if (hdr_kick) begin
+                // start the header micro-sequence (takes priority; v_emit can't
+                // arrive this early in the pass).
+                hdr_busy <= 1'b1;
+                hdr_idx  <= 3'd0;
+            end
+
+            if (hdr_busy) begin
+                // emit one header word per clock into addresses 0..HDR_WORDS-1
+                we_r   <= 1'b1;
+                addr_r <= RES_WAW'(hdr_idx);
+                case (hdr_idx)
+                    3'd0: din_r <= WAV_MAGIC_LOW;
+                    3'd1: din_r <= WAV_MAGIC_HIGH;
+                    3'd2: din_r <= hdr_seq;
+                    3'd3: din_r <= 32'd0;
+                    3'd4: din_r <= hdr_w4;
+                    3'd5: din_r <= hdr_seq;
+                    3'd6: din_r <= hdr_w6;
+                    default: din_r <= gain_snap;   // 3'd7
+                endcase
+                if (hdr_idx == 3'(HDR_WORDS-1)) hdr_busy <= 1'b0;
+                else                            hdr_idx  <= hdr_idx + 1'b1;
+            end else if (!em_phase) begin
                 if (v_emit) begin
                     base_word <= scale_word;
                     addr_r    <= scale_word;
