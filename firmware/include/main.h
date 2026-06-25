@@ -215,7 +215,12 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         6   // 1.6: OCM staging REVERTED (back to DDR; OCM didn't help --
+#define FIRMWARE_VERSION_MINOR         7   // 1.7: lwIP TX headroom -- n_tx_descriptors 64->256, mem_size
+                                           //      128K->256K (BSP lwip220 config) to eliminate the rare
+                                           //      udp_sendto ERR_MEM drops under ISR-stall catch-up bursts.
+                                           //      NOT the pbuf pool (pbuf_alloc never failed). Firmware
+                                           //      sources + struct unchanged (still 288 B); BSP regen only.
+                                           // 1.6: OCM staging REVERTED (back to DDR; OCM didn't help --
                                            //      the recv->transmit tail is EMAC TX-done ISR preemption,
                                            //      not DDR contention). Adds TX-drop instrumentation: split
                                            //      udp_send_errors into bb/lfp pbuf-alloc-fail vs sendto-err
