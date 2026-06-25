@@ -46,8 +46,8 @@ OUT = os.path.dirname(os.path.abspath(__file__))
 FS        = 3000.0     # Tier-1 LFP rate (Phase B target; Phase A raises 2->3 kHz)
 K         = 4          # selected channels (lanes) -- small for a fast TB
 N_OCTAVES = 4          # octaves in the cascade (TB uses a few; HW uses 8)
-V         = 4          # voices per octave (constant-Q grid density)
-N_TAPS    = 24         # complex taps per voice (per the Morse support; even)
+V         = 6          # voices per octave (constant-Q grid density; FINE variant)
+N_TAPS    = 40         # complex taps per voice (FINE variant: longer/sharper voices)
 HB_TAPS   = 7          # halfband ÷2 FIR taps (odd, symmetric)
 DATA_W    = 16
 COEF_W    = 18
@@ -61,7 +61,7 @@ N_FRAMES  = 256        # base-rate frames fed to the engine
 # ACT < build max exercises the compaction path (the whole point of moving the
 # repack into the PL). ----
 ACT_OCTAVES = 3        # active octaves this run (< N_OCTAVES build max -> compaction)
-ACT_VOICES  = 3        # active voices/octave (< V build max -> compaction)
+ACT_VOICES  = 4        # active voices/octave (< V=6 build max -> compaction)
 ACT_TAPS    = N_TAPS   # active taps (engine caps at N_TAPS; keep full here)
 N_SCALES    = ACT_OCTAVES * ACT_VOICES   # compacted lane stride on the wire
 

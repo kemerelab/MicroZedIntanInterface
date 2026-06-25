@@ -15,8 +15,8 @@ module wavelet_engine_tb;
     localparam int N_CH      = 256;
     localparam int K         = 4;
     localparam int N_OCTAVES = 4;
-    localparam int V         = 4;
-    localparam int N_TAPS    = 24;
+    localparam int V         = 6;   // FINE variant: finer scale grid
+    localparam int N_TAPS    = 40;  // FINE variant: longer/sharper voices
     localparam int HB_TAPS   = 7;
     localparam int DATA_W    = 16;
     localparam int COEF_W    = 18;
@@ -29,7 +29,7 @@ module wavelet_engine_tb;
     // RUNTIME active config (< build maxes -> exercises the engine's COMPACTED
     // wire-packet build). MUST match gen_wavelet_vectors.py ACT_*.
     localparam int ACT_OCTAVES = 3;
-    localparam int ACT_VOICES  = 3;
+    localparam int ACT_VOICES  = 4;   // < V=6 build max -> exercises compaction
     localparam int ACT_TAPS    = N_TAPS;
     localparam int HDR_WORDS   = 8;
     localparam int N_SCALES_ACT= ACT_OCTAVES*ACT_VOICES;        // compacted stride

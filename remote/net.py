@@ -88,8 +88,8 @@ WAV_MAGIC_HIGH = 0xCAFEBABE
 WAV_COEF_FRAC = 17          # Q1.17 complex coefficient fixed-point
 WAV_K = 32                  # selected channels (build param)
 WAV_N_OCTAVES = 8           # octaves (build param)
-WAV_V = 4                   # voices/octave (build param)
-WAV_N_TAPS = 24             # complex taps/voice (build param)
+WAV_V = 6                   # voices/octave (build param; FINE variant: finer grid)
+WAV_N_TAPS = 40             # complex taps/voice (build param; FINE: longer/sharper voices)
 WAV_HB_TAPS = 7             # halfband ÷2 taps (build param)
 
 AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
