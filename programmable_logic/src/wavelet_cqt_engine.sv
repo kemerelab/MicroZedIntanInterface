@@ -1,9 +1,24 @@
 // =====================================================================
 // wavelet_cqt_engine.sv  --  Tier-3 multirate wavelet (constant-Q / Morse)
-// scalogram engine. ONE time-shared MAC computes both the octave-cascade
+// scalogram engine. A time-shared MAC computes both the octave-cascade
 // halfband ÷2 decimations and the V complex bandpass voices per octave,
 // producing a real-time scalogram of K selected channels over N_OCTAVES
 // octaves x V complex voices.
+//
+// v2 STEP 1 -- TWO MAC LANES. The voice MAC uses two real multipliers: lane A
+// multiplies the ring sample by the RE coefficient and lane B by the IM
+// coefficient of the SAME tap in the SAME cycle (both lanes share one ring read;
+// the voice coef RAM is replicated two ways with independent read addresses, the
+// lfp_fir_decimator N_MAC precedent). A voice tap therefore costs ONE MAC cycle
+// instead of the old re/im 2-phase pair -- this halves the worst-case
+// (all-octaves-coincide) pass from ~1758*K to ~990*K clocks. The scalogram
+// VALUES are bit-identical to the single-MAC engine (only the issue order
+// changed; re and im now accumulate in lockstep instead of alternating). The
+// halfband ÷2 still uses lane A only (lane B idle during HB). At the 3 kHz /
+// 84 MHz budget (~28000 clocks/frame) the real-time-clean ceiling is K=16
+// (worst-case busy 15847 clk; K=32 = 31687, 1.13x over). Reaching larger K
+// needs the STEP-2 per-octave work-spread scheduler (deferring slow octaves
+// across their 2^o-frame windows so the peak collapses toward the average).
 //
 // Generalizes lfp_fir_decimator.sv (time-shared MAC, shared coef RAM,
 // per-channel delay-line BRAM, compute-overrun guard) to:
@@ -16,14 +31,15 @@
 //   * a multirate à-trous octave cascade: octave o runs at fs/2^o, fed by a
 //     halfband ÷2 of octave o-1's stream. Per-(lane,octave) sample rings.
 //
-// SINGLE-MAC discipline: the engine owns one ring read port, one voice-coef
-// read port, one halfband-coef read port, and one MAC pipeline. The FSM
-// sequences (a) HALFBAND passes -- HB_TAPS real MACs producing one ÷2 sample
-// stored back into the next octave's ring, and (b) VOICE passes -- 2*n_taps
-// real MACs (re then im phase) producing one complex bin written to the
-// results BRAM. A standalone wavelet_halfband.sv exists as the reusable ÷2
-// primitive (+ its own unit TB); the engine integrates the same arithmetic
-// for clean single-bus scheduling.
+// MAC-bus discipline: the engine owns one ring read port (shared by both MAC
+// lanes), TWO voice-coef read ports (re on lane A, im on lane B), one halfband-
+// coef read port, and a 2-lane MAC pipeline. The FSM sequences (a) HALFBAND
+// passes -- HB_TAPS real MACs (lane A) producing one ÷2 sample stored back into
+// the next octave's ring, and (b) VOICE passes -- n_taps cycles, each producing
+// the re AND im product of one tap (lanes A+B), accumulating a complex bin
+// written to the results BRAM. A standalone wavelet_halfband.sv exists as the
+// reusable ÷2 primitive (+ its own unit TB); the engine integrates the same
+// arithmetic for clean single-bus scheduling.
 //
 // Scheduling (K=32 first build = single MAC, naive per-base-frame pass):
 //   On every base-rate LFP frame: stage each lane's new octave-0 sample,
@@ -167,14 +183,28 @@ module wavelet_cqt_engine #(
 
     // =================================================================
     // Coef RAMs (voice complex interleaved + halfband).
+    //
+    // v2 STEP 1 -- 2 MAC lanes. The voice coef RAM is REPLICATED two ways
+    // (identical contents, independent read addresses) so MAC lane A can read
+    // the RE coefficient and MAC lane B the IM coefficient of the SAME tap in
+    // the SAME cycle. This is the lfp_fir_decimator N_MAC precedent (replicate
+    // is cheaper than a true dual-port BRAM and keeps each read single-cycle).
+    // Both copies see every write, so they stay identical. Lane A's copy
+    // (coef_rd_a) also serves the halfband path is NOT needed -- HB has its own
+    // hb_ram -- so during HB only lane A's ring/coef are exercised.
     // =================================================================
-    logic signed [COEF_W-1:0] coef_ram [0:2*COEFN-1];
-    logic signed [COEF_W-1:0] coef_rd;
-    logic [COEF_AW-1:0]       coef_rd_addr;
-    initial for (int ii=0; ii<2*COEFN; ii++) coef_ram[ii]='0;
+    logic signed [COEF_W-1:0] coef_ram_a [0:2*COEFN-1];  // lane A (RE coef)
+    logic signed [COEF_W-1:0] coef_ram_b [0:2*COEFN-1];  // lane B (IM coef)
+    logic signed [COEF_W-1:0] coef_rd_a, coef_rd_b;
+    logic [COEF_AW-1:0]       coef_rd_addr_a, coef_rd_addr_b;
+    initial for (int ii=0; ii<2*COEFN; ii++) begin coef_ram_a[ii]='0; coef_ram_b[ii]='0; end
     always_ff @(posedge clk) begin
-        if (coef_wr_en) coef_ram[coef_wr_addr] <= coef_wr_data;
-        coef_rd <= coef_ram[coef_rd_addr];
+        if (coef_wr_en) begin
+            coef_ram_a[coef_wr_addr] <= coef_wr_data;
+            coef_ram_b[coef_wr_addr] <= coef_wr_data;
+        end
+        coef_rd_a <= coef_ram_a[coef_rd_addr_a];
+        coef_rd_b <= coef_ram_b[coef_rd_addr_b];
     end
 
     logic signed [COEF_W-1:0] hb_ram [0:HB_TAPS-1];
@@ -268,7 +298,6 @@ module wavelet_cqt_engine #(
     logic [OCT_W:0]     cur_oct;     // voice octave being computed
     logic [VOICE_W:0]   cur_voice;
     logic [TAP_W:0]     cur_tap;
-    logic               cur_im;      // 0 = re coeff phase, 1 = im coeff phase
     logic [LANE_W-1:0]  commit_lane;
 
     // -----------------------------------------------------------------
@@ -309,14 +338,17 @@ module wavelet_cqt_engine #(
     logic [2:0]         drain;
 
     // =================================================================
-    // MAC address generation (single ring + single coef read bus).
+    // MAC address generation (single shared ring read + TWO coef read buses).
     // The "mode" selects which read window the FSM drives.
     //   HB mode  : ring = octave (hb_oct-1) of hb_lane, newest..oldest;
-    //              coef = hb_ram[hb_tap]
-    //   VOICE mode: ring = octave cur_oct of cur_lane, newest..oldest;
-    //              coef = coef_ram[2*(voice*N_TAPS+tap)+cur_im]
-    // For VOICE the ring slot is read once (on the re phase) and reused for
-    // the im phase, so the ring address only changes on the re phase.
+    //              coef = hb_ram[hb_tap]   (lane A only; lane B idle)
+    //   VOICE mode: ring = octave cur_oct of cur_lane, newest..oldest (ONE
+    //               read, shared by both MAC lanes -- they consume the same
+    //               sample); coef A = coef_ram_a[2*(voice*N_TAPS+tap)+0] (RE),
+    //               coef B = coef_ram_b[2*(voice*N_TAPS+tap)+1] (IM). Both
+    //               coef reads + the shared ring read happen in ONE cycle, so a
+    //               tap now costs ONE MAC cycle instead of the old re/im 2-phase
+    //               pair. This is the v2 STEP-1 2x.
     // =================================================================
     wire in_hb    = (st == S_HB_RUN);
     wire in_voice = (st == S_V_RUN);
@@ -326,58 +358,60 @@ module wavelet_cqt_engine #(
 
     always_comb begin
         // defaults
-        ring_rd_addr = '0;
-        hb_rd_addr   = '0;
-        coef_rd_addr = '0;
+        ring_rd_addr   = '0;
+        hb_rd_addr     = '0;
+        coef_rd_addr_a = '0;
+        coef_rd_addr_b = '0;
         if (in_hb) begin
-            ring_rd_addr = ridx(hb_lane, hb_oct-1,
-                                (hb_head - RING_AW'(hb_tap)) & (RING_DEPTH-1));
-            hb_rd_addr   = hb_tap[HBTAP_W-1:0];
-        end else begin // voice
-            ring_rd_addr = ridx(cur_lane, cur_oct,
-                                (v_head - RING_AW'(cur_tap)) & (RING_DEPTH-1));
-            coef_rd_addr = COEF_AW'(2*(cur_voice*N_TAPS + cur_tap) + cur_im);
+            ring_rd_addr   = ridx(hb_lane, hb_oct-1,
+                                  (hb_head - RING_AW'(hb_tap)) & (RING_DEPTH-1));
+            hb_rd_addr     = hb_tap[HBTAP_W-1:0];
+        end else begin // voice -- both lanes read the SAME ring slot
+            ring_rd_addr   = ridx(cur_lane, cur_oct,
+                                  (v_head - RING_AW'(cur_tap)) & (RING_DEPTH-1));
+            coef_rd_addr_a = COEF_AW'(2*(cur_voice*N_TAPS + cur_tap) + 0); // RE
+            coef_rd_addr_b = COEF_AW'(2*(cur_voice*N_TAPS + cur_tap) + 1); // IM
         end
     end
 
     // =================================================================
     // MAC markers (s0 -> registered, valid alongside the 1-cyc RAM reads).
+    // v2 STEP 1: no more re/im phase -- each VOICE tap produces re AND im
+    // products in one cycle (lane A = re, lane B = im). ag_is_hb selects the
+    // halfband single-MAC path (lane A only).
     // =================================================================
-    logic        ag_v, ag_first, ag_last, ag_im, ag_is_hb;
+    logic        ag_v, ag_first, ag_last, ag_is_hb;
     logic [3:0]  ag_gain;
     // (output routing for VOICE: which lane/scale to write)
     logic [LANE_W-1:0] ag_lane;
     logic [OCT_W:0]    ag_oct;
     logic [VOICE_W:0]  ag_voice;
 
-    // s1: product + markers (the sample read is ring_rd; coef = coef_rd / hb_rd)
-    logic signed [PROD_W-1:0] prod1;
-    logic        v1, first1, last1, im1, is_hb1;
+    // s1: products + markers. Lane A product (prod1_a) uses coef_rd_a (RE) for
+    // VOICE, or hb_rd for the halfband; lane B product (prod1_b) uses coef_rd_b
+    // (IM) and is only meaningful for VOICE. Both lanes share ring_rd.
+    logic signed [PROD_W-1:0] prod1_a, prod1_b;
+    logic        v1, first1, last1, is_hb1;
     logic [3:0]  gain1;
     logic [LANE_W-1:0] lane1;
     logic [OCT_W:0]    oct1;
     logic [VOICE_W:0]  voice1;
 
-    // For VOICE we need the same ring sample on both re and im phases. The
-    // ring read has 1-cycle latency aligned to ag_v; on the im phase the FSM
-    // holds cur_tap (re address) so ring_rd is the SAME slot. So no special
-    // hold is needed: ring_rd is correct for both phases because the address
-    // is identical across the re/im pair.
-    //
-    // coef select MUST use the s1-stage marker ag_is_hb -- it is registered
-    // ONCE (from the FSM), so it is valid alongside ring_rd/hb_rd/coef_rd in
+    // coef select for lane A MUST use the s1-stage marker ag_is_hb -- it is
+    // registered ONCE (from the FSM), so it is valid alongside the RAM reads in
     // this same cycle. (is_hb1 is the s2 copy, one cycle too late for the
     // product, used only by the accumulate stage below.)
-    wire signed [COEF_W-1:0] coef_sel = ag_is_hb ? hb_rd : coef_rd;
+    wire signed [COEF_W-1:0] coef_sel_a = ag_is_hb ? hb_rd : coef_rd_a;
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
-            prod1<='0; v1<=0; first1<=0; last1<=0; im1<=0; is_hb1<=0;
+            prod1_a<='0; prod1_b<='0; v1<=0; first1<=0; last1<=0; is_hb1<=0;
             gain1<='0; lane1<='0; oct1<='0; voice1<='0;
         end else begin
-            prod1  <= ring_rd * coef_sel;
-            v1     <= ag_v; first1<=ag_first; last1<=ag_last; im1<=ag_im; is_hb1<=ag_is_hb;
-            gain1  <= ag_gain; lane1<=ag_lane; oct1<=ag_oct; voice1<=ag_voice;
+            prod1_a <= ring_rd * coef_sel_a;   // RE (or HB) product
+            prod1_b <= ring_rd * coef_rd_b;    // IM product (VOICE only)
+            v1      <= ag_v; first1<=ag_first; last1<=ag_last; is_hb1<=ag_is_hb;
+            gain1   <= ag_gain; lane1<=ag_lane; oct1<=ag_oct; voice1<=ag_voice;
         end
     end
 
@@ -390,12 +424,14 @@ module wavelet_cqt_engine #(
     logic signed [ACC_W-1:0] acc_re, acc_im, acc_hb;
     logic signed [ACC_W-1:0] vre_sum, vim_sum, hb_sum;
 
-    // first1 marks the first beat of an accumulator: re-phase of tap0 clears
-    // acc_re, im-phase of tap0 clears acc_im. (ag_first is asserted on BOTH.)
+    // first1 (tap0) clears both voice accumulators -- with 2 MAC lanes the re
+    // and im products of a tap arrive TOGETHER, so both acc_re and acc_im
+    // advance every voice cycle (no more re/im phase). The halfband uses
+    // acc_hb fed by lane A (prod1_a).
     always_comb begin
-        vre_sum = (first1 && !im1) ? $signed(prod1) : (acc_re + prod1);
-        vim_sum = (first1 &&  im1) ? $signed(prod1) : (acc_im + prod1);
-        hb_sum  = (first1)         ? $signed(prod1) : (acc_hb + prod1);
+        vre_sum = (first1) ? $signed(prod1_a) : (acc_re + prod1_a);
+        vim_sum = (first1) ? $signed(prod1_b) : (acc_im + prod1_b);
+        hb_sum  = (first1) ? $signed(prod1_a) : (acc_hb + prod1_a);
     end
 
     // round/shift helpers
@@ -477,15 +513,14 @@ module wavelet_cqt_engine #(
                         hb_raw_sum <= hb_sum;
                     end
                 end else begin
-                    // voice: re phase -> acc_re, im phase -> acc_im
-                    if (!im1) acc_re <= vre_sum;
-                    else      acc_im <= vim_sum;
-                    if (last1) begin   // last tap, im phase -> complex done
-                        // acc_re already holds the full re sum (the last re beat
-                        // preceded this im beat); vim_sum is the just-finished im.
+                    // voice: both re and im advance every cycle (2 MAC lanes).
+                    acc_re <= vre_sum;
+                    acc_im <= vim_sum;
+                    if (last1) begin   // last tap -> complex pair done THIS cycle
+                        // vre_sum / vim_sum are the just-finished full sums.
                         // Capture RAW here; shift/saturate is the next cycle.
                         v_raw        <= 1'b1;
-                        v_raw_re     <= acc_re;
+                        v_raw_re     <= vre_sum;
                         v_raw_im     <= vim_sum;
                         v_raw_gain   <= gain1;
                         v_raw_lane   <= lane1;
@@ -503,10 +538,10 @@ module wavelet_cqt_engine #(
     always_ff @(posedge clk) begin
         if (!rstn) begin
             st<=S_IDLE; busy<=0; overrun<=0; frame_seq<='0; fcount<='0;
-            cur_lane<='0; cur_oct<='0; cur_voice<='0; cur_tap<='0; cur_im<=0;
+            cur_lane<='0; cur_oct<='0; cur_voice<='0; cur_tap<='0;
             commit_lane<='0; hb_lane<='0; hb_oct<='0; hb_tap<='0; hb_run_last<=0;
             ring_we<=0; drain<='0; oct_adv_snap<='0;
-            ag_v<=0; ag_first<=0; ag_last<=0; ag_im<=0; ag_is_hb<=0; ag_gain<='0;
+            ag_v<=0; ag_first<=0; ag_last<=0; ag_is_hb<=0; ag_gain<='0;
             ag_lane<='0; ag_oct<='0; ag_voice<='0;
             nscales_snap<='0; nvoc_snap<='0; noct_snap<='0; nvoc4_snap<='0;
             ntap_snap<='0; hdr_seq<='0; ov_snap<=0; gain_snap<='0; hdr_kick<=0;
@@ -514,7 +549,7 @@ module wavelet_cqt_engine #(
         end else begin
             ring_we  <= 1'b0;
             ag_v     <= 1'b0;
-            ag_first <= 1'b0; ag_last<=1'b0; ag_im<=1'b0; ag_is_hb<=1'b0;
+            ag_first <= 1'b0; ag_last<=1'b0; ag_is_hb<=1'b0;
             hdr_kick <= 1'b0;
 
             if (start_pass && st != S_IDLE) overrun <= 1'b1;
@@ -615,29 +650,23 @@ module wavelet_cqt_engine #(
                 end else if (!oct_adv_snap[cur_oct[OCT_W-1:0]]) begin
                     cur_oct <= cur_oct + 1'b1;
                 end else begin
-                    cur_voice <= '0; cur_tap <= '0; cur_im <= 1'b0;
+                    cur_voice <= '0; cur_tap <= '0;
                     st <= S_V_RUN;
                 end
             end
 
-            // walk taps: re phase then im phase for each tap
+            // walk taps: ONE cycle per tap (re on lane A, im on lane B together)
             S_V_RUN: begin
                 ag_v     <= 1'b1;
                 ag_is_hb <= 1'b0;
-                ag_first <= (cur_tap==0);  // tap0 re-beat clears acc_re, tap0 im-beat clears acc_im
-                ag_im    <= cur_im;
-                ag_last  <= (cur_tap==n_tap-1) && (cur_im==1'b1);
+                ag_first <= (cur_tap==0);  // tap0 clears both acc_re and acc_im
+                ag_last  <= (cur_tap==n_tap-1);
                 ag_gain  <= gain_cfg[4*cur_oct +: 4];
                 ag_lane  <= cur_lane;
                 ag_oct   <= cur_oct;
                 ag_voice <= cur_voice;
-                if (cur_im == 1'b0) begin
-                    cur_im <= 1'b1;            // im phase next, SAME tap (ring reused)
-                end else begin
-                    cur_im <= 1'b0;
-                    if (cur_tap + 1 >= n_tap) st <= S_V_EMIT;
-                    else cur_tap <= cur_tap + 1'b1;
-                end
+                if (cur_tap + 1 >= n_tap) st <= S_V_EMIT;
+                else cur_tap <= cur_tap + 1'b1;
             end
 
             // wait for the complex pair to emit, then advance voice/octave
@@ -647,7 +676,7 @@ module wavelet_cqt_engine #(
                         cur_oct <= cur_oct + 1'b1; st <= S_V_NEXT;
                     end else begin
                         cur_voice <= cur_voice + 1'b1;
-                        cur_tap <= '0; cur_im <= 1'b0;
+                        cur_tap <= '0;
                         st <= S_V_RUN;
                     end
                 end

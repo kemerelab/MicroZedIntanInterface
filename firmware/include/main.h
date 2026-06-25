@@ -95,8 +95,8 @@
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
 // Wavelet (Tier-3) scalogram engine control registers (PL regs 28..31;
-// see wavelet_dsp_block.sv). Build params: K=256, N_OCTAVES=8, V=4, N_TAPS=24.
-// WIP/BLOCKED: K=256 OVERRUNS the single-MAC engine (see WAV_K note below).
+// see wavelet_dsp_block.sv). Build params: K=16, N_OCTAVES=8, V=4, N_TAPS=24.
+// v2 STEP 1 (2 MAC lanes): real-time-clean ceiling K=16 (see WAV_K note below).
 #define CTRL_REG_WAV_CFG_OFFSET     (28 * 4)  // [0]en [7:4]n_oct [11:8]n_voices [19:12]n_taps
 #define CTRL_REG_WAV_GAIN_OFFSET    (29 * 4)  // 4 bits/octave: gain[4*o +: 4] = left-shift
 #define CTRL_REG_WAV_DATA_OFFSET    (30 * 4)  // upload payload (target-dependent, [17:0] coef / [7:0] chan)
@@ -107,14 +107,13 @@
 #define WAV_TARGET_HALFBAND         (1u << 2)
 #define WAV_TARGET_SELECTOR         (2u << 2)
 // Wavelet build dimensions (must match wavelet_dsp_block.sv instantiation)
-// WIP/BLOCKED (K=256): the single time-shared MAC needs ~450055 clocks for the
-// worst-case (fcount=0, all 8 octaves coincide) compute pass at the full
-// 8-octave/4-voice/24-tap config, vs only ~28000 clocks between 3 kHz LFP
-// frames (84 MHz / 3 kHz) -> 16.1x OVER budget; the engine's overrun flag
-// asserts. K=256 requires the v2 2-MAC-lane + per-octave work-spread engine
-// (a large redesign, intentionally NOT attempted here). Cost is linear in K:
-// worst-case busy ~= 1758*K clocks; max sustainable K at full config ~= 16.
-#define WAV_K                       256
+// v2 STEP 1 (2 MAC lanes): the voice MAC computes a tap's RE and IM parts in
+// ONE cycle (lane A=re, lane B=im, shared ring read), halving the worst-case
+// (fcount=0, all 8 octaves coincide) compute pass from ~1758*K to ~990*K
+// clocks. Budget = ~28000 clocks/frame (84 MHz / 3 kHz). Measured worst-case
+// busy: K=16 -> 15847 clk (CLEAN), K=32 -> 31687 (1.13x over). So the STEP-1
+// real-time-clean ceiling is K=16. (STEP 2 = per-octave work-spread raises it.)
+#define WAV_K                       16
 #define WAV_N_OCTAVES               8
 #define WAV_V                       4
 #define WAV_N_TAPS                  24
@@ -127,9 +126,10 @@
 // The PS just CDMAs the whole frame into a pbuf and sends it (no repack).
 #define WAV_HDR_WORDS               8
 #define WAV_BRAM_BASE_ADDR          0x90000000
-// Resized 64 KB -> 128 KB for K=256: 8 hdr + K*WAV_N_SCALES*2 = 8 + 256*32*2
-// = 16392 words > 16384 (64 KB overflow). 128 KB = 32768 words fits with margin.
-#define WAV_BRAM_SIZE_WORDS         32768      // 128 KB
+// 64 KB = 16384 words. Holds the full wire packet (8 hdr + K*WAV_N_SCALES*2):
+// K=16 = 1032 words, K=128 = 8200 words -- both fit. (The k256 WIP tried 128 KB
+// but the BRAM wrapper's MEM_SIZE attribute is read-only and broke the BD.)
+#define WAV_BRAM_SIZE_WORDS         16384      // 64 KB
 #define WAV_UDP_PORT                5004       // decimated scalogram monitor stream
 
 // CTRL_REG_AUX_CTRL bit fields

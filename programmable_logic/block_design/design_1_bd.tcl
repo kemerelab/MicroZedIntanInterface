@@ -684,18 +684,21 @@ proc create_root_design { parentCell } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>."}
      return 1
    }
-  # 128 KB: 17-bit byte address, 32768 32-bit words, MEM_SIZE 131072 bytes.
-  set_property -dict [list \
-    CONFIG.ADDR_WIDTH {17} \
-    CONFIG.DEPTH {32768} \
-  ] $simple_dual_port_bram_wav
+  # 64 KB result BRAM (16-bit byte address, 16384 32-bit words = the wrapper
+  # default, MEM_SIZE 65536). This holds the full wire packet for K up to 127
+  # (8 hdr + K*32*2 words; K=128 = 8200 words still fits). The v2 2-MAC +
+  # work-spread engine tops out at K~128 (the average per-frame compute exceeds
+  # the 28000-clock budget beyond that with 2 MAC lanes), so 64 KB is ample and
+  # keeps the BRAM_PORTB MEM_SIZE consistent with axi_bram_ctrl_2 (both 64 KB);
+  # the k256 WIP 128-KB resize left BRAM_PORTB at the read-only 65536 default and
+  # broke validate_bd_design. (Reverted to the wrapper default here.)
 
-  # Create instance: axi_bram_ctrl_2 -- PS read port for the wavelet results BRAM
+  # Create instance: axi_bram_ctrl_2 -- PS read port for the wavelet results BRAM.
+  # MEM_DEPTH auto-derives from the connected BRAM's MEM_SIZE (64 KB = 16384
+  # words), same as axi_bram_ctrl_0/_1 -- it is read-only and must NOT be set
+  # explicitly (a stale 32768 here is what broke validate_bd_design).
   set axi_bram_ctrl_2 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_2 ]
-  set_property -dict [list \
-    CONFIG.SINGLE_PORT_BRAM {1} \
-    CONFIG.MEM_DEPTH {32768} \
-  ] $axi_bram_ctrl_2
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_2
 
   # Create instance: axi_cdma_0 -- memory-to-memory DMA that copies a packet from
   # the capture BRAM (0x80000000) to a DDR buffer (via S_AXI_HP0), taking the PS
@@ -858,9 +861,10 @@ proc create_root_design { parentCell } {
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
   # LFP output BRAM, PS read view (small GP reads -- below the long-burst threshold)
   assign_bd_address -offset 0x84000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
-  # Wavelet (Tier-3) results BRAM, PS read view @ 0x90000000 -- 128 KB (was 64 KB)
-  # for K=256: the 16392-word wire packet overflows 64 KB. Range 0x20000 = 128 KB.
-  assign_bd_address -offset 0x90000000 -range 0x00020000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
+  # Wavelet (Tier-3) results BRAM, PS read view @ 0x90000000 -- 64 KB. Holds the
+  # full wire packet for K up to 127 (K=128 = 8200 words also fits); the v2
+  # 2-MAC + work-spread engine tops out near K=128, so 64 KB is ample.
+  assign_bd_address -offset 0x90000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
   assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers/s_axi/reg0] -force
   # CDMA control registers in the PS GP address space
   assign_bd_address -offset 0x44A00000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_cdma_0/S_AXI_LITE/Reg] -force
@@ -876,8 +880,8 @@ proc create_root_design { parentCell } {
   # axi_bram_ctrl_2), but without this segment a CDMA read of 0x90000000 decodes to
   # nothing, the AXI transaction never completes, and XAxiCdma_IsBusy hangs forever
   # (the STFT-branch symptom). This assignment is what makes wav_stream_service's
-  # CDMA read of WAV_BRAM_BASE_ADDR reach the results BRAM. 128 KB for K=256.
-  assign_bd_address -offset 0x90000000 -range 0x00020000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
+  # CDMA read of WAV_BRAM_BASE_ADDR reach the results BRAM. 64 KB.
+  assign_bd_address -offset 0x90000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
   assign_bd_address -offset 0x00000000 -range 0x40000000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
   # The PS GP masters can reach HP0 through the smartconnect_1 crossbar but never
   # address DDR that way -- exclude it so processing_system7_0/Data is clean.

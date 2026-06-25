@@ -6,11 +6,12 @@ module data_generator #(
     parameter integer BRAM_ADDR_WIDTH = 16,        // Byte address width
     parameter integer BRAM_DATA_WIDTH = 32,        // Data width
     parameter integer BRAM_DEPTH_WORDS = 16384,   // BRAM depth in words (64KB / 4 = 16K words)
-    // Wavelet (Tier-3) results BRAM is sized independently of the broadband/LFP
-    // BRAMs: K=256 needs 8 + 256*32*2 = 16392 words > 16384 (64 KB overflow), so
-    // it is 128 KB = 32768 words -> 17-bit byte address. (BD overrides the wav
-    // bram_wrapper instance to ADDR_WIDTH=17/DEPTH=32768 + MEM_SIZE 131072.)
-    parameter integer WAV_BRAM_ADDR_WIDTH = 17,    // 128 KB wavelet result BRAM
+    // Wavelet (Tier-3) results BRAM: 64 KB = 16384 words -> 16-bit byte address
+    // (the wrapper default). Holds the full wire packet for K up to 127 (K=128 =
+    // 8200 words also fits); the v2 2-MAC + work-spread engine tops out near
+    // K=128, so 64 KB is ample. (The k256 WIP tried 128 KB but the wrapper's
+    // read-only MEM_SIZE attribute broke validate_bd_design -- reverted.)
+    parameter integer WAV_BRAM_ADDR_WIDTH = 16,    // 64 KB wavelet result BRAM
     parameter integer FIFO_DEPTH = 256,           // FIFO depth (64-bit entries)
     parameter integer BUFFER_DEPTH = 16           // Segment buffer depth for selective copying
 )(
@@ -248,13 +249,17 @@ module data_generator #(
 
     // Instantiate the Tier-3 on-PL wavelet scalogram engine (control regs
     // 28..31; writes its own results BRAM read by the PS via a 3rd
-    // axi_bram_ctrl mapped at 0x90000000). WIP/BLOCKED: K=256 (was 32) -- the
-    // single time-shared MAC OVERRUNS (~450055 clk worst-case pass vs ~28000
-    // clk budget, 16.1x over). Result BRAM widened to 128 KB (RES_AW=17) to fit
-    // the 16392-word K=256 packet, but the engine needs the v2 2-MAC + per-octave
-    // work-spread redesign to actually meet the per-frame budget at K=256.
+    // axi_bram_ctrl mapped at 0x90000000).
+    //
+    // v2 STEP 1 -- 2 MAC lanes: the voice MAC now computes the RE and IM parts
+    // of a tap in ONE cycle (lane A=re, lane B=im, shared ring read), halving
+    // the worst-case (all-octaves-coincide) pass from ~1758*K to ~990*K clocks.
+    // Worst-case overrun-TB measurements (8 oct/4 voc/24 tap, fcount=0 frame):
+    //   K=16 -> 15847 clk (CLEAN, < 28000 budget),  K=32 -> 31687 (1.13x over).
+    // So the STEP-1 real-time-clean ceiling is K=16. The result BRAM stays
+    // 128 KB (RES_AW=17) -- room for a larger K once STEP-2 work-spread lands.
     wavelet_dsp_block #(
-        .N_CH(256), .K(256), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
+        .N_CH(256), .K(16), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
         .RES_AW(WAV_BRAM_ADDR_WIDTH)
     ) wav_dsp_inst (
         .clk(clk),
