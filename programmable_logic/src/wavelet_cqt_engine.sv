@@ -14,11 +14,25 @@
 // (all-octaves-coincide) pass from ~1758*K to ~990*K clocks. The scalogram
 // VALUES are bit-identical to the single-MAC engine (only the issue order
 // changed; re and im now accumulate in lockstep instead of alternating). The
-// halfband ÷2 still uses lane A only (lane B idle during HB). At the 3 kHz /
-// 84 MHz budget (~28000 clocks/frame) the real-time-clean ceiling is K=16
-// (worst-case busy 15847 clk; K=32 = 31687, 1.13x over). Reaching larger K
-// needs the STEP-2 per-octave work-spread scheduler (deferring slow octaves
-// across their 2^o-frame windows so the peak collapses toward the average).
+// halfband ÷2 still uses lane A only (lane B idle during HB). Two MAC lanes
+// alone reach K=16 real-time-clean.
+//
+// v2 STEP 2 -- LAZY WORK-SPREAD (the big win). The old engine ran the WHOLE
+// voice MAC for every advancing octave inside the single coincidence-frame pass
+// (peak = all octaves at fcount=0). STEP 2 keeps octave 0 (and the cheap HB
+// cascade) EAGER each frame but DEFERS each slower octave's voice column into a
+// persistent, deadline-monotonic drain that spreads it across the octave's
+// 2^o-frame window. The peak per-frame compute collapses from ~990*K (peak)
+// toward ~2x octave-0's cost (~198*K average), so the real-time-clean ceiling
+// rises to K=96 (busy duty 80%) / K=112 (94%, tight); K=128 overruns (99%).
+// Each deferred voice column reads the ring at a head-pointer snapshot pinned at
+// the octave's enqueue deadline (head_snap[o]) -- the octave's ring is written
+// only at its own deadlines and RING_DEPTH (64) >> N_TAPS (24), so the
+// newest-N_TAPS window stays intact for the whole deferred drain (the
+// snapshot-across-frames rule, satisfied by a pointer snapshot, no BRAM copy).
+// The arithmetic is the identical 2-MAC datapath, so the VALUES stay bit-exact;
+// only WHEN each column is emitted changes. See the FSM block below for detail.
+// Reaching K=256 needs a 4-MAC (2-voices-per-cycle) datapath -- not built here.
 //
 // Generalizes lfp_fir_decimator.sv (time-shared MAC, shared coef RAM,
 // per-channel delay-line BRAM, compute-overrun guard) to:
@@ -287,10 +301,36 @@ module wavelet_cqt_engine #(
 
     // =================================================================
     // FSM state.
+    //
+    // v2 STEP 2 -- LAZY WORK-SPREAD. The old engine ran the WHOLE voice MAC for
+    // every advancing octave inside the single coincidence-frame pass (peak =
+    // all 8 octaves at fcount=0). STEP 2 splits the per-frame work into:
+    //   (1) an EAGER phase per frame: commit octave-0's new sample, run the HB
+    //       cascade for every advancing octave (cheap), and ENQUEUE each
+    //       advancing octave's voice column (set pend[o], snapshot its ring head
+    //       head_snap[o]); and
+    //   (2) a persistent VOICE DRAIN that, in deadline-monotonic order (octave 0
+    //       first -- it is due every frame -- then 1,2,...), computes ONE pending
+    //       octave's full K*V voice column and clears its pend bit, then re-picks.
+    // The drain CONTINUES ACROSS FRAME BOUNDARIES: a new frame's eager phase
+    // preempts it (at a voice-column boundary), then the drain resumes. So slow
+    // octaves' columns are spread over their 2^o-frame windows and the PEAK
+    // per-frame busy collapses toward the AVERAGE (~2x octave-0's cost) instead
+    // of the all-octaves-coincide sum.
+    //
+    // BIT-EXACT: each voice column reads the ring at head_snap[o] -- the head
+    // pinned when octave o was enqueued. octave o's ring is written ONLY at its
+    // own deadlines (every 2^o frames) and RING_DEPTH (64) >> N_TAPS (24), so the
+    // newest-N_TAPS window stays intact for the whole deferred drain (the
+    // snapshot-across-frames rule -- a head-pointer snapshot suffices, no BRAM
+    // copy). The arithmetic is the identical 2-MAC datapath; only WHEN each
+    // column is emitted changes, not its value. When real-time-clean every
+    // octave drains before its next deadline, so head_snap is always its own
+    // deadline's head -> identical to the eager engine.
     // =================================================================
     typedef enum logic [3:0] {
         S_IDLE, S_COMMIT0, S_HB_NEXT, S_HB_RUN, S_HB_STORE,
-        S_V_NEXT, S_V_RUN, S_V_EMIT, S_DRAIN
+        S_V_PICK, S_V_RUN, S_V_EMIT
     } st_t;
     st_t st;
 
@@ -299,6 +339,31 @@ module wavelet_cqt_engine #(
     logic [VOICE_W:0]   cur_voice;
     logic [TAP_W:0]     cur_tap;
     logic [LANE_W-1:0]  commit_lane;
+
+    // ---- work-spread bookkeeping ----
+    // pend[o] : octave o has a voice column enqueued (computed from head_snap[o])
+    //           that has not yet been fully emitted.
+    // head_snap[o] : ring head pinned for octave o's pending column. All lanes
+    //           share one octave head (they advance together), so one snap/octave.
+    // frame_req : a new frame's eager phase is owed (start_pass latched). Serviced
+    //           at the next voice-column boundary (or immediately if idle).
+    // oct0_was_pending_at_frame : tracks whether octave 0 missed its deadline.
+    logic [N_OCTAVES-1:0] pend;
+    logic [RING_AW-1:0]   head_snap [0:N_OCTAVES-1];
+    logic                 frame_req;
+    logic [N_OCTAVES-1:0] frame_adv;   // oct_adv latched for the owed eager phase
+    logic [31:0]          seq_inc;     // pending frame_seq increments (one per frame)
+
+    // lowest set bit of pend = the most-urgent pending octave (deadline-monotonic)
+    logic [OCT_W:0] pick_oct;
+    logic           pick_vld;
+    always_comb begin
+        pick_vld = 1'b0;
+        pick_oct = '0;
+        for (int o=N_OCTAVES-1; o>=0; o--) begin
+            if (pend[o]) begin pick_oct = (OCT_W+1)'(o); pick_vld = 1'b1; end
+        end
+    end
 
     // -----------------------------------------------------------------
     // Per-pass config snapshot for the wire-packet header + compacted payload
@@ -353,8 +418,25 @@ module wavelet_cqt_engine #(
     wire in_hb    = (st == S_HB_RUN);
     wire in_voice = (st == S_V_RUN);
 
-    wire [RING_AW-1:0] hb_head  = head[(hb_lane*N_OCTAVES) + (hb_oct-1)];
-    wire [RING_AW-1:0] v_head   = head[(cur_lane*N_OCTAVES) + cur_oct];
+    // TIMING: at K=96 the head[] array is K*N_OCTAVES (768) entries, so the
+    // combinational read mux head[(hb_lane*N_OCTAVES)+hb_oct] in the ring
+    // address path is a 768:1 mux feeding the BRAM address -- the worst-case
+    // critical path (hb_oct -> head mux -> +1 -> ridx -> ring ADDRBWRADDR,
+    // ~10 logic levels, missed setup). Fix: latch the source- and dest-octave
+    // heads into small REGISTERS (hb_src_head/hb_dst_head) at S_HB_NEXT entry
+    // (hb_lane/hb_oct are stable through the HB_TAPS-cycle run), so the per-cycle
+    // ring read addr and the store write addr come from registers, not the big
+    // mux. The voice path reads head_snap (only N_OCTAVES=8 entries -> tiny mux).
+    logic [RING_AW-1:0] hb_src_head;   // head of source octave (hb_oct-1), latched
+    logic [RING_AW-1:0] hb_dst_head;   // head of dest octave (hb_oct), latched
+    // octave 0's ring head is UNIFORM across lanes (all lanes commit one sample
+    // per frame together), so track it in ONE register instead of reading the
+    // 768-entry head[] array per lane in S_COMMIT0 (same critical-path fix).
+    logic [RING_AW-1:0] oct0_head;     // octave-0 newest ring position (all lanes)
+    logic [RING_AW-1:0] commit_pos;    // this frame's octave-0 write position
+    // VOICE reads the PINNED head (head_snap), not the live head -- the deferred
+    // column must see octave cur_oct's ring as of its enqueue deadline.
+    wire [RING_AW-1:0] v_head   = head_snap[cur_oct];
 
     always_comb begin
         // defaults
@@ -364,7 +446,7 @@ module wavelet_cqt_engine #(
         coef_rd_addr_b = '0;
         if (in_hb) begin
             ring_rd_addr   = ridx(hb_lane, hb_oct-1,
-                                  (hb_head - RING_AW'(hb_tap)) & (RING_DEPTH-1));
+                                  (hb_src_head - RING_AW'(hb_tap)) & (RING_DEPTH-1));
             hb_rd_addr     = hb_tap[HBTAP_W-1:0];
         end else begin // voice -- both lanes read the SAME ring slot
             ring_rd_addr   = ridx(cur_lane, cur_oct,
@@ -535,6 +617,10 @@ module wavelet_cqt_engine #(
     // =================================================================
     // FSM.
     // =================================================================
+    // helper: do the per-frame EAGER phase setup (header + config snapshot + the
+    // oct_adv latch). Called when a frame_req is serviced.
+    // (inlined below; kept as a comment marker for readability)
+
     always_ff @(posedge clk) begin
         if (!rstn) begin
             st<=S_IDLE; busy<=0; overrun<=0; frame_seq<='0; fcount<='0;
@@ -545,75 +631,97 @@ module wavelet_cqt_engine #(
             ag_lane<='0; ag_oct<='0; ag_voice<='0;
             nscales_snap<='0; nvoc_snap<='0; noct_snap<='0; nvoc4_snap<='0;
             ntap_snap<='0; hdr_seq<='0; ov_snap<=0; gain_snap<='0; hdr_kick<=0;
+            pend<='0; frame_req<=0; frame_adv<='0; seq_inc<='0;
+            hb_src_head<='0; hb_dst_head<='0; oct0_head<='0; commit_pos<='0;
             for (int i=0;i<K*N_OCTAVES;i++) head[i]<='0;
+            for (int i=0;i<N_OCTAVES;i++) head_snap[i]<='0;
         end else begin
             ring_we  <= 1'b0;
             ag_v     <= 1'b0;
             ag_first <= 1'b0; ag_last<=1'b0; ag_is_hb<=1'b0;
             hdr_kick <= 1'b0;
 
-            if (start_pass && st != S_IDLE) overrun <= 1'b1;
+            // ---- frame arrival: latch a frame request. The eager phase is owed
+            // and will be serviced at the next voice-column boundary (S_V_PICK)
+            // or immediately if idle. OVERRUN = octave 0 still pending from the
+            // previous frame when a new frame arrives (oct0 missed its deadline),
+            // OR an eager phase is still owed (frame_req already set = the engine
+            // never got to service the previous frame). Latch (sticky).
+            if (start_pass) begin
+                if (frame_req || pend[0]) overrun <= 1'b1;
+                frame_req <= 1'b1;
+                frame_adv <= oct_adv;        // capture this frame's advancing set
+                fcount    <= fcount + 1'b1;  // one fcount tick per frame
+            end
 
             case (st)
             // -----------------------------------------------------------
+            // IDLE: nothing pending. Service an owed frame immediately.
             S_IDLE: begin
                 busy <= 1'b0;
-                if (start_pass) begin
-                    // snap[] was captured in the staging block at frame-start.
-                    oct_adv_snap <= oct_adv;
-                    commit_lane  <= '0;
+                if (frame_req || start_pass) begin
                     busy <= 1'b1;
-                    // Snapshot the wire-packet header fields + the compacted
-                    // lane stride (nscales = n_oct*n_voc) for THIS pass, and
-                    // kick the header writer. n_oct/n_voc/n_tap are held while
-                    // disabled, so they are stable for the whole pass. seq is
-                    // the value frame_seq becomes after this pass completes
-                    // (S_DRAIN does frame_seq++), so the status reg the PS polls
-                    // and this header carry the same number for the same column.
+                    // begin the eager phase (header + config snapshot below)
+                    st <= S_COMMIT0;
+                    commit_lane  <= '0;
+                    commit_pos   <= (oct0_head + 1'b1) & (RING_DEPTH-1);  // this frame's oct0 pos
+                    oct0_head    <= (oct0_head + 1'b1) & (RING_DEPTH-1);
+                    oct_adv_snap <= start_pass ? oct_adv : frame_adv;
                     nscales_snap <= NSC_W'(n_oct * n_voc);
                     nvoc_snap    <= n_voc;
-                    noct_snap    <= 4'(n_oct);   // zero-extend (n_oct may be <4 bits)
+                    noct_snap    <= 4'(n_oct);
                     nvoc4_snap   <= 4'(n_voc);
                     ntap_snap    <= 8'(n_tap);
-                    gain_snap    <= 32'(gain_cfg);   // zero-extend the host gain word
+                    gain_snap    <= 32'(gain_cfg);
                     ov_snap      <= overrun;
                     hdr_seq      <= frame_seq + 1'b1;
                     hdr_kick     <= 1'b1;
-                    st <= S_COMMIT0;
+                    frame_seq    <= frame_seq + 1'b1;   // one column per frame
+                    frame_req    <= 1'b0;               // consuming the request
                 end
             end
 
-            // commit each lane's new octave-0 sample
+            // commit each lane's new octave-0 sample, then enqueue octave 0's
+            // voice column (pend[0]=1, head_snap[0] = oct0's new head). All lanes
+            // write the SAME ring position (commit_pos, computed once at entry
+            // from the single oct0_head register) -- so the write address carries
+            // only the lane shift in ridx, NOT the 768:1 head[] read mux. The
+            // per-lane head[] entry is still updated so the HB octave-1 read
+            // (hb_src_head latch) sees octave 0's current head.
             S_COMMIT0: begin
-                head[(commit_lane*N_OCTAVES)+0] <=
-                    (head[(commit_lane*N_OCTAVES)+0] + 1'b1) & (RING_DEPTH-1);
-                ring_wr_addr <= ridx(commit_lane, 0,
-                                  (head[(commit_lane*N_OCTAVES)+0] + 1'b1) & (RING_DEPTH-1));
+                head[(commit_lane*N_OCTAVES)+0] <= commit_pos;
+                ring_wr_addr <= ridx(commit_lane, 0, commit_pos);
                 ring_wr_data <= snap[commit_lane];
                 ring_we      <= 1'b1;
                 if (commit_lane + 1 >= K) begin
+                    head_snap[0] <= commit_pos;   // octave 0's new newest position
+                    pend[0]      <= 1'b1;
                     hb_lane <= '0; hb_oct <= (OCT_W+1)'(1);
                     st <= S_HB_NEXT;
                 end else commit_lane <= commit_lane + 1'b1;
             end
 
             // -----------------------------------------------------------
-            // Halfband cascade: for each (octave 1..n_oct-1 that advances,
-            // each lane) produce one ÷2 sample. Octave hb_oct's NEW sample
-            // is HB over octave hb_oct-1's newest HB_TAPS samples.
+            // Halfband cascade: for each (advancing octave 1..n_oct-1, each lane)
+            // produce one ÷2 sample. After an octave's HB finishes for all lanes,
+            // pin its head + enqueue its voice column (pend[o]=1).
             S_HB_NEXT: begin
                 if (hb_oct >= n_oct) begin
-                    cur_lane <= '0; cur_oct <= '0;
-                    st <= S_V_NEXT;
+                    st <= S_V_PICK;       // eager phase done -> (re)enter the drain
                 end else if (!oct_adv_snap[hb_oct[OCT_W-1:0]]) begin
                     hb_oct <= hb_oct + 1'b1; hb_lane <= '0;
                 end else begin
+                    // latch the source/dest octave heads for (hb_lane, hb_oct)
+                    // into registers so the HB ring read/write addresses don't
+                    // carry the 768:1 head[] mux on their critical path.
+                    hb_src_head <= head[(hb_lane*N_OCTAVES) + (hb_oct-1)];
+                    hb_dst_head <= head[(hb_lane*N_OCTAVES) + hb_oct];
                     hb_tap <= '0; hb_run_last <= 1'b0;
                     st <= S_HB_RUN;
                 end
             end
 
-            // issue HB_TAPS taps into the MAC
+            // issue HB_TAPS taps into the MAC (lane A)
             S_HB_RUN: begin
                 ag_v     <= 1'b1;
                 ag_is_hb <= 1'b1;
@@ -626,13 +734,19 @@ module wavelet_cqt_engine #(
             // wait for hb_emit, store the ÷2 sample into octave hb_oct ring
             S_HB_STORE: begin
                 if (hb_emit) begin
+                    // hb_dst_head was latched at S_HB_NEXT entry for this
+                    // (hb_lane, hb_oct); the new sample goes one slot past it.
                     head[(hb_lane*N_OCTAVES)+hb_oct] <=
-                        (head[(hb_lane*N_OCTAVES)+hb_oct] + 1'b1) & (RING_DEPTH-1);
+                        (hb_dst_head + 1'b1) & (RING_DEPTH-1);
                     ring_wr_addr <= ridx(hb_lane, hb_oct,
-                                     (head[(hb_lane*N_OCTAVES)+hb_oct] + 1'b1) & (RING_DEPTH-1));
+                                     (hb_dst_head + 1'b1) & (RING_DEPTH-1));
                     ring_wr_data <= hb_emit_data;
                     ring_we      <= 1'b1;
                     if (hb_lane + 1 >= K) begin
+                        // octave hb_oct advanced -> pin its head (= the new dst
+                        // head) + enqueue its voice column.
+                        head_snap[hb_oct] <= (hb_dst_head + 1'b1) & (RING_DEPTH-1);
+                        pend[hb_oct]      <= 1'b1;
                         hb_lane <= '0; hb_oct <= hb_oct + 1'b1;
                     end else hb_lane <= hb_lane + 1'b1;
                     st <= S_HB_NEXT;
@@ -640,18 +754,40 @@ module wavelet_cqt_engine #(
             end
 
             // -----------------------------------------------------------
-            // Voice MACs: for each (lane, advancing octave, voice) compute
-            // the complex bin and write it to the results BRAM.
-            S_V_NEXT: begin
-                if (cur_oct >= n_oct) begin
-                    cur_oct <= '0;
-                    if (cur_lane + 1 >= K) begin st <= S_DRAIN; drain <= 3'd5; end
-                    else cur_lane <= cur_lane + 1'b1;
-                end else if (!oct_adv_snap[cur_oct[OCT_W-1:0]]) begin
-                    cur_oct <= cur_oct + 1'b1;
-                end else begin
-                    cur_voice <= '0; cur_tap <= '0;
+            // VOICE DRAIN (persistent, deadline-monotonic). Pick the lowest
+            // pending octave; if a frame's eager phase is owed, service it FIRST
+            // (preempt at this column boundary). If nothing pending and no frame
+            // owed -> go idle.
+            S_V_PICK: begin
+                if (frame_req) begin
+                    // a new frame arrived; do its eager phase before more voices
+                    busy <= 1'b1;
+                    st <= S_COMMIT0;
+                    commit_lane  <= '0;
+                    commit_pos   <= (oct0_head + 1'b1) & (RING_DEPTH-1);
+                    oct0_head    <= (oct0_head + 1'b1) & (RING_DEPTH-1);
+                    oct_adv_snap <= frame_adv;
+                    nscales_snap <= NSC_W'(n_oct * n_voc);
+                    nvoc_snap    <= n_voc;
+                    noct_snap    <= 4'(n_oct);
+                    nvoc4_snap   <= 4'(n_voc);
+                    ntap_snap    <= 8'(n_tap);
+                    gain_snap    <= 32'(gain_cfg);
+                    ov_snap      <= overrun;
+                    hdr_seq      <= frame_seq + 1'b1;
+                    hdr_kick     <= 1'b1;
+                    frame_seq    <= frame_seq + 1'b1;
+                    frame_req    <= 1'b0;
+                end else if (pick_vld) begin
+                    busy      <= 1'b1;
+                    cur_oct   <= pick_oct;
+                    cur_lane  <= '0;
+                    cur_voice <= '0;
+                    cur_tap   <= '0;
                     st <= S_V_RUN;
+                end else begin
+                    busy <= 1'b0;
+                    st   <= S_IDLE;
                 end
             end
 
@@ -669,25 +805,27 @@ module wavelet_cqt_engine #(
                 else cur_tap <= cur_tap + 1'b1;
             end
 
-            // wait for the complex pair to emit, then advance voice/octave
+            // wait for the complex pair to emit, then advance voice/lane within
+            // the current octave's column. When the column (all lanes, all
+            // voices) is done, clear pend[cur_oct] and re-pick.
             S_V_EMIT: begin
                 if (v_emit) begin
                     if (cur_voice + 1 >= n_voc) begin
-                        cur_oct <= cur_oct + 1'b1; st <= S_V_NEXT;
+                        cur_voice <= '0; cur_tap <= '0;
+                        if (cur_lane + 1 >= K) begin
+                            // octave column complete
+                            pend[cur_oct] <= 1'b0;
+                            st <= S_V_PICK;
+                        end else begin
+                            cur_lane <= cur_lane + 1'b1;
+                            st <= S_V_RUN;
+                        end
                     end else begin
                         cur_voice <= cur_voice + 1'b1;
                         cur_tap <= '0;
                         st <= S_V_RUN;
                     end
                 end
-            end
-
-            S_DRAIN: begin
-                if (drain == 0) begin
-                    frame_seq <= frame_seq + 1'b1;
-                    fcount    <= fcount + 1'b1;
-                    st <= S_IDLE; busy <= 1'b0;
-                end else drain <= drain - 1'b1;
             end
 
             default: st <= S_IDLE;

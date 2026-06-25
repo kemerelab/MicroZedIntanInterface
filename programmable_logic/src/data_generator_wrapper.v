@@ -251,15 +251,18 @@ module data_generator #(
     // 28..31; writes its own results BRAM read by the PS via a 3rd
     // axi_bram_ctrl mapped at 0x90000000).
     //
-    // v2 STEP 1 -- 2 MAC lanes: the voice MAC now computes the RE and IM parts
-    // of a tap in ONE cycle (lane A=re, lane B=im, shared ring read), halving
-    // the worst-case (all-octaves-coincide) pass from ~1758*K to ~990*K clocks.
-    // Worst-case overrun-TB measurements (8 oct/4 voc/24 tap, fcount=0 frame):
-    //   K=16 -> 15847 clk (CLEAN, < 28000 budget),  K=32 -> 31687 (1.13x over).
-    // So the STEP-1 real-time-clean ceiling is K=16. The result BRAM stays
-    // 128 KB (RES_AW=17) -- room for a larger K once STEP-2 work-spread lands.
+    // v2 STEP 1 -- 2 MAC lanes: the voice MAC computes the RE and IM parts of a
+    // tap in ONE cycle (lane A=re, lane B=im, shared ring read), halving the
+    // worst-case pass from ~1758*K to ~990*K clocks (K=16 clean alone).
+    // v2 STEP 2 -- lazy work-spread: octave 0 + the HB cascade run eagerly each
+    // frame; each slower octave's voice column is DEFERRED across its 2^o-frame
+    // window via a persistent deadline-monotonic drain, so the peak collapses
+    // toward the average (~198*K). Real-time-clean ceiling K=96 (overrun TB at
+    // the real 28000-clock frame spacing: busy duty 80%, no overrun, no dropped
+    // columns; K=112 = 94% tight, K=128 overruns). BIT-EXACT (same 2-MAC math).
+    // The 64 KB result BRAM holds K=96's wire packet (8 + 96*32*2 = 6152 words).
     wavelet_dsp_block #(
-        .N_CH(256), .K(16), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
+        .N_CH(256), .K(96), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
         .RES_AW(WAV_BRAM_ADDR_WIDTH)
     ) wav_dsp_inst (
         .clk(clk),

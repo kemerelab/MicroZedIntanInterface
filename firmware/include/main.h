@@ -95,8 +95,8 @@
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
 // Wavelet (Tier-3) scalogram engine control registers (PL regs 28..31;
-// see wavelet_dsp_block.sv). Build params: K=16, N_OCTAVES=8, V=4, N_TAPS=24.
-// v2 STEP 1 (2 MAC lanes): real-time-clean ceiling K=16 (see WAV_K note below).
+// see wavelet_dsp_block.sv). Build params: K=96, N_OCTAVES=8, V=4, N_TAPS=24.
+// v2 STEP 2 (2 MAC lanes + work-spread): real-time-clean ceiling K=96 (below).
 #define CTRL_REG_WAV_CFG_OFFSET     (28 * 4)  // [0]en [7:4]n_oct [11:8]n_voices [19:12]n_taps
 #define CTRL_REG_WAV_GAIN_OFFSET    (29 * 4)  // 4 bits/octave: gain[4*o +: 4] = left-shift
 #define CTRL_REG_WAV_DATA_OFFSET    (30 * 4)  // upload payload (target-dependent, [17:0] coef / [7:0] chan)
@@ -109,11 +109,14 @@
 // Wavelet build dimensions (must match wavelet_dsp_block.sv instantiation)
 // v2 STEP 1 (2 MAC lanes): the voice MAC computes a tap's RE and IM parts in
 // ONE cycle (lane A=re, lane B=im, shared ring read), halving the worst-case
-// (fcount=0, all 8 octaves coincide) compute pass from ~1758*K to ~990*K
-// clocks. Budget = ~28000 clocks/frame (84 MHz / 3 kHz). Measured worst-case
-// busy: K=16 -> 15847 clk (CLEAN), K=32 -> 31687 (1.13x over). So the STEP-1
-// real-time-clean ceiling is K=16. (STEP 2 = per-octave work-spread raises it.)
-#define WAV_K                       16
+// pass from ~1758*K to ~990*K clocks (K=16 clean alone).
+// v2 STEP 2 (lazy work-spread): octave 0 + HB cascade stay eager each frame;
+// each slower octave's voice column is deferred across its 2^o-frame window via
+// a persistent deadline-monotonic drain, so the peak collapses toward the
+// average (~198*K). Real-time-clean ceiling K=96 (at the real 28000-clock frame
+// spacing: 80% busy duty, no overrun, no dropped columns; K=112 = 94% tight,
+// K=128 overruns). Budget = ~28000 clocks/frame (84 MHz / 3 kHz).
+#define WAV_K                       96
 #define WAV_N_OCTAVES               8
 #define WAV_V                       4
 #define WAV_N_TAPS                  24
