@@ -1681,34 +1681,47 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
 # ============================================================================
 def design_wavelet_bank(V=WAV_V, n_octaves=WAV_N_OCTAVES, n_taps=WAV_N_TAPS,
                         fs=3000, gamma=3, beta=3.0, fc_top=0.34):
-    """Design the V constant-Q Morse (gamma) complex voice shapes (reused at
-    every octave -- the cascade halves fs each octave) + the halfband ÷2 FIR,
-    all quantized to signed Q1.17. Returns (voices, hb, centers) where:
+    """Design the V constant-Q true generalized-MORSE complex voice shapes
+    (reused at every octave -- the cascade halves fs each octave) + the
+    halfband ÷2 FIR, all quantized to signed Q1.17. Returns (voices, hb,
+    centers) where:
       voices : list of V lists of (re_int, im_int) Q1.17 tuples, N_TAPS long
       hb     : list of HB_TAPS Q1.17 ints
       centers: list of n_octaves lists of V center frequencies (Hz)
-    Matches gen_wavelet_vectors.py's morse_voice_shapes()/halfband_coeffs()."""
+    Voice = ghostipy MorseWavelet(gamma, beta): freq-domain Psi(w) =
+    a*w^beta*exp(-w^gamma), w>0, log a = ln2 + (beta/gamma)(1+ln gamma-ln beta)
+    (peak value 2), peak wp = (beta/gamma)^(1/gamma); voice v centers at
+    fc = fc_top*2^(-v/V) cycles/sample (scale s = wp/(2*pi*fc)); taps = the
+    inverse FT of Psi(s*w), zero-meaned + unit-L1. beta is the Q knob (ghostipy
+    default 20; beta=3 here is broad so it fits N_TAPS taps). Matches
+    gen_wavelet_vectors.py's morse_voice_shapes(); verified against ghostipy in
+    docs/validate_against_ghostipy.py."""
+    gamma = float(gamma); beta = float(beta)      # bit-exactness across sites
     scale = (1 << WAV_COEF_FRAC)
     lim   = (1 << 17)
     M     = n_taps - 1
-    Q     = math.sqrt(beta * gamma)
+    wp    = (beta / gamma) ** (1.0 / gamma)       # peak angular freq
+    log_a = math.log(2.0) + (beta / gamma) * (1.0 + math.log(gamma) - math.log(beta))
+    UMAX, NU = 12.0, 6000                          # inverse-FT grid (w>0), gamma=3 decays fast
+    du    = UMAX / NU
+    us    = [k * du for k in range(1, NU + 1)]     # skip w=0 (w^beta=0)
+    amp   = [math.exp(log_a + beta * math.log(u) - u ** gamma) for u in us]
     voices = []
     for v in range(V):
-        fc = fc_top * (2.0 ** (-v / float(V)))      # cycles/sample in this octave
-        omega_c = 2.0 * math.pi * fc
-        sigma = n_taps / 6.0
-        sigma = min(sigma, Q / (2.0 * math.pi * fc) * 1.0)
-        sigma = max(sigma, 1.5)
-        re_e = 0.0
+        fc = fc_top * (2.0 ** (-v / float(V)))    # cycles/sample in this octave
+        s  = wp / (2.0 * math.pi * fc)            # scale: peak -> fc
         raw = []
         for n in range(n_taps):
-            t = n - M / 2.0
-            env = math.exp(-0.5 * (t / sigma) ** 2)
-            raw.append((env * math.cos(omega_c * t), env * math.sin(omega_c * t), env))
-            re_e += raw[-1][0]
-        env_sum = sum(r[2] for r in raw) or 1.0
-        dc = re_e / env_sum
-        taps2 = [(r[0] - dc * r[2], r[1]) for r in raw]
+            tau = (n - M / 2.0) / s               # psi_s(t) = psi_1(t/s)
+            re = im = 0.0
+            for k in range(NU):                   # inverse FT over w>0
+                u = us[k]; a = amp[k]
+                re += a * math.cos(u * tau)
+                im += a * math.sin(u * tau)
+            raw.append((re * du / (2.0 * math.pi), im * du / (2.0 * math.pi)))
+        mre = sum(r for r, _ in raw) / n_taps     # zero-mean both parts -> reject DC
+        mim = sum(i for _, i in raw) / n_taps
+        taps2 = [(r - mre, i - mim) for (r, i) in raw]
         norm = sum(math.hypot(re, im) for (re, im) in taps2) or 1.0
         q = []
         for (re, im) in taps2:

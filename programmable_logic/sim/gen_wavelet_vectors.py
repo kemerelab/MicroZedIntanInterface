@@ -94,58 +94,53 @@ def rnd(lo, hi):
 # REUSED across octaves (constant-Q), so the center frequency as a
 # fraction of the octave sample rate is the same for every octave.
 # =====================================================================
+# inverse-FT integration grid for the time-domain Morse wavelet (w > 0);
+# a*w^beta*exp(-w^gamma) decays fast (gamma=3 -> negligible past w~4). Fixed
+# constants -> deterministic + bit-identical to net.py / docs/wavelet_coeffs.py.
+_UMAX, _NU = 12.0, 6000
+
+
 def morse_voice_shapes():
-    """V complex FIR voices (constant-Q Morse, gamma=GAMMA, beta=BETA),
-    each N_TAPS taps, normalized then quantized to signed Q1.17.
-    Returns voices[v] = list of (re_int, im_int) tuples."""
+    """V complex FIR voices = true generalized-MORSE wavelets (gamma=GAMMA,
+    beta=BETA), each N_TAPS taps, normalized then quantized to signed Q1.17.
+    Returns voices[v] = list of (re_int, im_int) tuples.
+
+    Frequency domain (ghostipy convention, EXACTLY ghostipy.MorseWavelet):
+        Psi(w) = a * w^beta * exp(-w^gamma),  w > 0
+        log a  = ln2 + (beta/gamma)*(1 + ln gamma - ln beta)   (peak value 2)
+        wp     = (beta/gamma)^(1/gamma)        (peak angular frequency)
+    Voice v centers at fc = fc_top*2^(-v/V) cycles/sample, i.e. omega_peak =
+    2*pi*fc, by choosing scale s = wp/omega_peak; the time-domain wavelet is
+    the inverse FT of Psi(s*w), psi_s(t) ~ psi_1(t/s). Beta is the Q knob
+    (ghostipy default 20; beta=3 here is broad so it fits N_TAPS taps).
+    Cross-checked vs ghostipy in docs/validate_against_ghostipy.py."""
     scale = (1 << COEF_FRAC)
     lim   = (1 << (COEF_W - 1))
-    # Voice v covers a center frequency fc_v as a fraction of the octave
-    # sample rate. The top octave maps to the highest band; the V voices
-    # tile one octave (a factor of 2 in frequency). Center frac for the
-    # top voice ~0.34 (just under Nyquist-with-headroom), descending by
-    # 2^(-v/V) so the V voices span one octave.
-    # peak frac of the octave's Nyquist band:
+    M     = N_TAPS - 1
     fc_top = 0.34
+    wp    = (BETA / GAMMA) ** (1.0 / GAMMA)                  # peak angular freq
+    log_a = math.log(2.0) + (BETA / GAMMA) * (1.0 + math.log(GAMMA) - math.log(BETA))
+    du    = _UMAX / _NU
+    us    = [k * du for k in range(1, _NU + 1)]              # skip w=0 (w^beta=0)
+    amp   = [math.exp(log_a + BETA * math.log(u) - u ** GAMMA) for u in us]
     voices = []
-    M = N_TAPS - 1
     for v in range(V):
-        fc = fc_top * (2.0 ** (-v / float(V)))   # cycles/sample in this octave
-        omega_c = 2.0 * math.pi * fc
-        # Morse-like envelope: a Gaussian-in-log-frequency wavelet has a
-        # time-domain envelope ~ a generalized Gaussian. We synthesize the
-        # analytic bandpass directly: g(t) = env(t) * exp(j*omega_c*t),
-        # with env a Gaussian whose width gives the constant-Q bandwidth.
-        # Q = fc / bandwidth; for a Morse wavelet Q ~ sqrt(beta*gamma).
-        Q = math.sqrt(BETA * GAMMA)
-        # time spread (samples): sigma_t ~ Q / (2*pi*fc) * k  (k packs the
-        # support into N_TAPS). Choose sigma so +/-3 sigma fits N_TAPS.
-        sigma = (N_TAPS / 6.0)
-        # but also tie sigma to Q so higher Q -> longer support (constant-Q):
-        sigma = min(sigma, Q / (2.0 * math.pi * fc) * 1.0)
-        sigma = max(sigma, 1.5)
-        taps_c = []
-        re_e = im_e = 0.0
+        fc = fc_top * (2.0 ** (-v / float(V)))               # cycles/sample in octave
+        s  = wp / (2.0 * math.pi * fc)                       # scale: peak -> fc
+        raw = []
         for n in range(N_TAPS):
-            t = n - M / 2.0
-            env = math.exp(-0.5 * (t / sigma) ** 2)
-            re = env * math.cos(omega_c * t)
-            im = env * math.sin(omega_c * t)
-            taps_c.append((re, im))
-            re_e += re
-            im_e += im
-        # zero-mean (admissibility): subtract the DC leakage of the real part
-        # (analytic wavelet should have ~0 mean). Use the envelope sum to
-        # de-bias the cosine part so the voice rejects DC.
-        env_sum = sum(math.exp(-0.5 * ((n - M/2.0)/sigma) ** 2) for n in range(N_TAPS))
-        dc = re_e / env_sum if env_sum != 0 else 0.0
-        taps2 = []
-        for n in range(N_TAPS):
-            t = n - M / 2.0
-            env = math.exp(-0.5 * (t / sigma) ** 2)
-            re = taps_c[n][0] - dc * env
-            im = taps_c[n][1]
-            taps2.append((re, im))
+            tau = (n - M / 2.0) / s                           # psi_s(t) = psi_1(t/s)
+            re = im = 0.0
+            for k in range(_NU):                              # inverse FT over w>0
+                u = us[k]; a = amp[k]
+                re += a * math.cos(u * tau)
+                im += a * math.sin(u * tau)
+            raw.append((re * du / (2.0 * math.pi), im * du / (2.0 * math.pi)))
+        # zero-mean both parts -> reject DC (true Morse is ~zero-mean already;
+        # this cleans the residual from truncating to N_TAPS taps).
+        mre = sum(r for r, _ in raw) / N_TAPS
+        mim = sum(i for _, i in raw) / N_TAPS
+        taps2 = [(r - mre, i - mim) for (r, i) in raw]
         # normalize to unit L1 of the complex magnitude so a unit-amplitude
         # tone at fc gives a predictable response and stays in range.
         norm = sum(math.hypot(r, i) for (r, i) in taps2) or 1.0
