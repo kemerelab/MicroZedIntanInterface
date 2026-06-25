@@ -26,6 +26,10 @@ uint8_t pl_dma_staging[0x100000] __attribute__((aligned(0x100000)));
 // reference into its own buffer until the EMAC transmits it).
 uint8_t pl_dma_lfp_staging[0x100000] __attribute__((aligned(0x100000)));
 
+// Separate 1 MB-aligned non-cacheable staging buffer for the movement accel
+// stream (same rationale as the LFP buffer above).
+uint8_t pl_dma_accel_staging[0x100000] __attribute__((aligned(0x100000)));
+
 static XAxiCdma cdma;
 static int      cdma_ready = 0;
 
@@ -39,6 +43,9 @@ int pl_dma_init(void) {
     // Same treatment for the LFP staging buffer.
     Xil_DCacheFlushRange((UINTPTR)pl_dma_lfp_staging, sizeof(pl_dma_lfp_staging));
     Xil_SetTlbAttributes((UINTPTR)pl_dma_lfp_staging, NORM_NONCACHE_SHARED);
+    // Same treatment for the accel/movement staging buffer.
+    Xil_DCacheFlushRange((UINTPTR)pl_dma_accel_staging, sizeof(pl_dma_accel_staging));
+    Xil_SetTlbAttributes((UINTPTR)pl_dma_accel_staging, NORM_NONCACHE_SHARED);
 
     XAxiCdma_Config *cfg = XAxiCdma_LookupConfig(CDMA_BASEADDR);
     if (cfg == NULL) {

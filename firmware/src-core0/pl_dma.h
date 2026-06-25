@@ -26,6 +26,10 @@ extern uint8_t pl_dma_staging[];
 extern uint8_t pl_dma_lfp_staging[];
 #define LFP_DMA_BUF_ADDR  ((uintptr_t)pl_dma_lfp_staging)
 
+// Separate non-cacheable staging buffer for the movement accel stream.
+extern uint8_t pl_dma_accel_staging[];
+#define ACCEL_DMA_BUF_ADDR  ((uintptr_t)pl_dma_accel_staging)
+
 // Initialize the AXI CDMA (polled mode) and mark the staging buffer
 // non-cacheable. Returns 0 on success, negative on failure.
 int pl_dma_init(void);

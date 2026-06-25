@@ -10,6 +10,7 @@
 //#include "xuartps.h"
 #include "shared_print.h"
 #include "pl_dma.h"
+#include "motion.h"     // PS-side movement estimator (accel block DMA + speed/activity)
 #include "xiltimer.h"  // XTime_GetTime / COUNTS_PER_SECOND for perf instrumentation
 
 // Forward declare eth_link_detect from xemacpsif adapter
@@ -75,7 +76,7 @@ uint32_t drop_ring[8] = {0};
 uint32_t drop_ring_idx = 0;
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 288, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 308, "status_response_t size must match net.py get_status");
 
 // Clear the sticky maxes + worst-case snapshot + histogram + counts so the user
 // controls the measurement window (CMD_PERF_RESET). Leaves the last-sample fields
@@ -535,6 +536,10 @@ void network_maintenance_loop(void) {
   // enabled; the 16K-word ring tolerates bursty servicing.
   lfp_stream_service();
 
+  // Drain the movement accel blocks -> estimator (+ optional UDP 5005). No-op
+  // unless enabled.
+  motion_stream_service();
+
   // Refresh the shared status snapshot at ~200 Hz (every 5 ms). Cheap and
   // non-blocking; core 1 reads it on demand or for its ~1 Hz monitor.
   uint32_t now_ms = sys_now();
@@ -689,6 +694,7 @@ int main() {
   // Initialize UDP (always enabled)
   udp_stream_init();
   lfp_stream_init();   // separate UDP stream for the LFP band (port 5001)
+  motion_init();       // movement estimator + accel block stream (port 5005)
 
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
   

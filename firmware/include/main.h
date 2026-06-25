@@ -390,6 +390,18 @@ typedef struct __attribute__((packed)) {
     uint32_t memp_num_pbuf;       // = MEMP_NUM_PBUF (shared zero-copy pool size)
     uint32_t drop_ring[8];        // last 8 broadband drop packet indices (clustering)
 
+    // Movement accel-extract engine config + live estimate (CTRL_REG_ACCEL_CFG +
+    // STATUS_REG_14). Per "get_status reports everything configurable". 20 bytes.
+    uint8_t  move_enable;         // estimator/extractor enabled
+    uint8_t  move_headstage;      // selected aux bank (regular stream 0/2/4/6)
+    uint8_t  move_ema_shift;      // per-axis EMA leak K
+    uint8_t  move_reserved;
+    uint16_t move_decim_M;        // packets per [x,y,z] triplet
+    uint16_t move_overrun;        // PL accel block overrun (sticky)
+    uint32_t move_blocks;         // accel blocks processed by the PS
+    float    move_speed;          // speed proxy (a.u.)
+    float    move_activity;       // activity index (g)
+
 } status_response_t;
 
 // recv->transmit histogram bucket count (keep in sync with loop_hist[] + net.py)

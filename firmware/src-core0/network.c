@@ -1,5 +1,6 @@
 #include "main.h"
 #include "pl_dma.h"     // CDMA read of the LFP output BRAM into non-cacheable staging
+#include "motion.h"     // movement estimator config/state for get_status + CMD_MOTION_*
 #include "lwip/init.h"
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
@@ -72,6 +73,10 @@ ID   | Command          | Param1              | Param2
 #define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
 #define CMD_PERF_RESET       0x91  // clear recv->transmit sticky maxes + histogram + counts
+// Movement (accel-extract) engine commands
+#define CMD_MOTION_ENABLE     0xA0 // param1 = 0/1
+#define CMD_MOTION_SET_CONFIG 0xA1 // param1 = headstage | ema_shift<<8; param2 = decim_M (packets/triplet)
+#define CMD_MOTION_SET_PARAMS 0xA2 // param1 = gravity_fc (mHz); param2 = zupt thresh (mg)
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
@@ -278,6 +283,16 @@ void collect_status_data(status_response_t* status) {
     for (int i = 0; i < 8; i++) status->drop_ring[i] = drop_ring[i];
     for (int i = 0; i < PERF_HIST_BUCKETS; i++)
         status->loop_hist[i] = loop_hist[i];
+
+    // Movement accel-extract engine config + live estimate.
+    status->move_enable    = motion_cfg_enable;
+    status->move_headstage = motion_cfg_headstage;
+    status->move_ema_shift = motion_cfg_ema_shift;
+    status->move_decim_M   = motion_cfg_decim_M;
+    status->move_overrun   = (uint16_t)((Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_14_OFFSET) >> 16) & 0x1);
+    status->move_blocks    = motion_blocks_processed;
+    status->move_speed     = motion_get_speed();
+    status->move_activity  = motion_get_activity();
 
     // Aux config read-back (fast-settle / DSP / digout settings live in CTRL_REG_22)
     status->aux_ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
@@ -570,6 +585,24 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
         case CMD_PERF_RESET:
             perf_reset();   // fresh recv->transmit measurement window
             send_message("Binary Command: PERF_RESET (maxes/histogram/counts cleared)\r\n");
+            break;
+
+        case CMD_MOTION_ENABLE:
+            motion_set_config(cmd->param1 ? 1 : 0, motion_cfg_headstage,
+                              motion_cfg_ema_shift, motion_cfg_decim_M);
+            break;
+
+        case CMD_MOTION_SET_CONFIG:
+            motion_set_config(motion_cfg_enable, cmd->param1 & 0x3,
+                              (cmd->param1 >> 8) & 0xF, cmd->param2 & 0x7FFF);
+            break;
+
+        case CMD_MOTION_SET_PARAMS:
+            motion_set_dsp((float)(cmd->param1 & 0xFFFF) / 1000.0f,  // gravity fc (Hz)
+                           -1.0f, -1.0f,                             // keep activity tau / leak
+                           (float)(cmd->param2 & 0xFFFF) / 1000.0f); // zupt threshold (g)
+            send_message("Binary Command: MOTION_SET_PARAMS fc=%umHz zupt=%umg\r\n",
+                         cmd->param1 & 0xFFFF, cmd->param2 & 0xFFFF);
             break;
 
         default:
