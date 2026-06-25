@@ -16,7 +16,7 @@ module wavelet_engine_tb;
     localparam int K         = 4;
     localparam int N_OCTAVES = 4;
     localparam int V         = 4;
-    localparam int N_TAPS    = 24;
+    localparam int N_TAPS    = 16;
     localparam int HB_TAPS   = 7;
     localparam int DATA_W    = 16;
     localparam int COEF_W    = 18;
