@@ -512,6 +512,12 @@ void pl_aux_select_bank(int slot, int bank);
 int  pl_aux_confirm_bank(int slot, int bank, int timeout_ms);
 void pl_aux_seq_enable(int enable);
 int  pl_aux_seq_is_enabled(void);
+// Load the standard 3-slot streaming program (slot 0 = Reg-3 carrier, slot 1 =
+// accel CONVERT(32->33->34) sweep @10 kHz, slot 2 = supply/temp/link housekeeping)
+// into bank 0 of each slot, seed Reg-3 static from the init shadow, and enable the
+// sequencer. Bound to pl_set_convert_sequence() so data acquisition always streams
+// the rotating accel (mirrors net.py aux_load_defaults()).
+void pl_aux_load_default_program(void);
 void pl_aux_set_fast_settle(uint32_t cfg);   // AUX_CTRL fs/dsp bit fields [13:4]
 void pl_aux_set_digout(uint32_t cfg);        // AUX_CTRL digout fields [18:14] + reg3_static [31:24]
 int  pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms);

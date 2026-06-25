@@ -336,12 +336,19 @@ int pl_set_copi_commands_safe(const uint16_t copi_array[35], const char* sequenc
 
 void pl_set_convert_sequence(void) {
     if (pl_set_copi_commands_safe(convert_cmd_sequence, "CONVERT sequence (channels 0-31)")) {
+        // Data acquisition: the rotating-accel aux sequencer is the standard.
+        // Loading the convert table is the "now streaming data" signal, so enable
+        // the sequencer + standard program here (init/cable-test disable it below).
+        pl_aux_load_default_program();
         send_message("Ready for normal data acquisition from channels 0-31\r\n");
     }
 }
 
 void pl_set_initialization_sequence(void) {
     if (pl_set_copi_commands_safe(initialization_cmd_sequence, "INITIALIZATION sequence")) {
+        // Init must play the full static table verbatim: disable the aux sequencer
+        // so it cannot override cycles 32..34 of the init/calibrate sequence.
+        pl_aux_seq_enable(0);
         send_message("Ready for chip initialization - run this before first data acquisition\r\n");
     }
     pl_rhd_shadow_init();   // re-seed the register shadow to the init defaults
@@ -349,6 +356,7 @@ void pl_set_initialization_sequence(void) {
 
 void pl_set_cable_length_sequence(void) {
     if (pl_set_copi_commands_safe(cable_length_cmd_sequence, "CABLE LENGTH test sequence")) {
+        pl_aux_seq_enable(0);   // cable test plays the full static table verbatim
         send_message("Ready for cable length calibration - look for 'INTAN' patterns in data\r\n");
     }
 }
@@ -504,6 +512,33 @@ void pl_aux_seq_enable(int enable) {
 
 int pl_aux_seq_is_enabled(void) {
     return (Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET) & AUX_CTRL_SEQ_EN) ? 1 : 0;
+}
+
+// Standard 3-slot streaming program (mirrors net.py AUX_SLOT*_DEFAULT;
+// command-bank-design.md slot roles). Slot 1 (cycle 33) is the accelerometer
+// sweep the movement extractor consumes: one axis per packet, 10 kHz/axis.
+static const uint16_t aux_slot0_default[] = { RHD_CMD_WRITE(3, 0x02) };  // Reg-3 carrier (digout mirror)
+static const uint16_t aux_slot1_default[] = {                            // accel @ 10 kHz
+    RHD_CMD_CONVERT(32), RHD_CMD_CONVERT(33), RHD_CMD_CONVERT(34) };
+static const uint16_t aux_slot2_default[] = {                           // supply/temp/link housekeeping
+    RHD_CMD_CONVERT(48), RHD_CMD_CONVERT(49),                           //   supply, temp
+    RHD_CMD_READ(63), RHD_CMD_READ(62),                                 //   chip ID, #amps
+    RHD_CMD_READ(40), RHD_CMD_READ(41), RHD_CMD_READ(42),               //   'INTA'
+    RHD_CMD_READ(43), RHD_CMD_READ(44) };                              //   'N'
+
+void pl_aux_load_default_program(void) {
+    pl_aux_upload_bank(0, 0, aux_slot0_default, (int)(sizeof aux_slot0_default / sizeof aux_slot0_default[0]), 0);
+    pl_aux_upload_bank(1, 0, aux_slot1_default, (int)(sizeof aux_slot1_default / sizeof aux_slot1_default[0]), 0);
+    pl_aux_upload_bank(2, 0, aux_slot2_default, (int)(sizeof aux_slot2_default / sizeof aux_slot2_default[0]), 0);
+    // Seed Reg-3 static bits from the init shadow so the override layer reproduces
+    // the init reg-3 value (D0 = live digout, default 0) on its per-packet WRITE(3);
+    // without this the override would drive reg 3 to 0x00 and lose the init config.
+    uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
+    ctrl = (ctrl & ~AUX_CTRL_REG3_STATIC_MASK)
+           | (((uint32_t)rhd_reg_shadow[3] << AUX_CTRL_REG3_STATIC_SHIFT) & AUX_CTRL_REG3_STATIC_MASK);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
+    pl_aux_seq_enable(1);
+    send_message("Aux default program loaded (rotating accel on slot 1) + sequencer ON\r\n");
 }
 
 // cfg carries the AUX_CTRL fast-settle + DSP fields (bits [13:4])
