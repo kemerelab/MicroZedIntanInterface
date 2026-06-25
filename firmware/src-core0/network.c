@@ -1,4 +1,5 @@
 #include "main.h"
+#include "pl_dma.h"     // CDMA read of the LFP output BRAM into non-cacheable staging
 #include "lwip/init.h"
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
@@ -70,6 +71,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_LFP_SET_CHANNELS 0x82  // param1 = 8-bit lane mask
 #define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
+#define CMD_PERF_RESET       0x91  // clear recv->transmit sticky maxes + histogram + counts
 
 #define ACK_SUCCESS         0x06
 #define ACK_ERROR           0x15
@@ -255,15 +257,39 @@ void collect_status_data(status_response_t* status) {
     status->loop_ticks_max  = loop_ticks_max;
     status->timer_hz        = perf_timer_hz;
 
+    // recv->transmit spike instrumentation (raw ticks; cleared by CMD_PERF_RESET)
+    status->send_ticks_last   = send_ticks_last;
+    status->send_ticks_max    = send_ticks_max;
+    status->over_budget_count = over_budget_count;
+    status->worst_pkt_index   = worst_pkt_index;
+    status->worst_cdma_ticks  = worst_cdma_ticks;
+    status->worst_send_ticks  = worst_send_ticks;
+    status->worst_other_ticks = worst_other_ticks;
+    // TX drop diagnostics (v1.6)
+    status->bb_pbuf_alloc_fail  = bb_pbuf_alloc_fail;
+    status->bb_send_err         = bb_send_err;
+    status->bb_last_send_err    = bb_last_send_err;
+    status->lfp_pbuf_alloc_fail = lfp_pbuf_alloc_fail;
+    status->lfp_send_err        = lfp_send_err;
+    status->lfp_last_send_err   = lfp_last_send_err;
+    status->first_drop_pkt      = first_drop_pkt;
+    status->last_drop_pkt       = last_drop_pkt;
+    status->memp_num_pbuf       = (uint32_t)MEMP_NUM_PBUF;
+    for (int i = 0; i < 8; i++) status->drop_ring[i] = drop_ring[i];
+    for (int i = 0; i < PERF_HIST_BUCKETS; i++)
+        status->loop_hist[i] = loop_hist[i];
+
     // Aux config read-back (fast-settle / DSP / digout settings live in CTRL_REG_22)
     status->aux_ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
 
     // RHD chip register mirror (commanded state of regs 0..21)
     memcpy(status->rhd_reg, rhd_reg_shadow, sizeof(status->rhd_reg));
 
-    // LFP/DSP engine config (host-set) + live status
+    // LFP/DSP engine config (host-set) + live status. The lane mask now MIRRORS
+    // the broadband channel-enable mask (single source of truth), so report the
+    // live broadband mask rather than a separate LFP mask.
     status->lfp_enable       = lfp_cfg_enable;
-    status->lfp_lane_mask    = lfp_cfg_lane_mask;
+    status->lfp_lane_mask    = pl_get_current_channel_enable() & 0xFF;
     status->lfp_decim_R      = lfp_cfg_decim_R;
     status->lfp_num_taps     = lfp_cfg_num_taps;
     status->lfp_packets_sent = lfp_udp_packets_sent;
@@ -514,22 +540,22 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             break;
 
         case CMD_LFP_ENABLE:
-            pl_lfp_set_config(cmd->param1 ? 1 : 0, lfp_cfg_lane_mask,
-                              lfp_cfg_decim_R, lfp_cfg_num_taps);
+            pl_lfp_set_config(cmd->param1 ? 1 : 0, lfp_cfg_decim_R, lfp_cfg_num_taps);
             send_message("Binary Command: LFP_ENABLE %u\r\n", cmd->param1 ? 1 : 0);
             break;
 
         case CMD_LFP_SET_PARAMS:
-            pl_lfp_set_config(lfp_cfg_enable, lfp_cfg_lane_mask,
-                              cmd->param1 & 0xFF, cmd->param2 & 0xFF);
+            pl_lfp_set_config(lfp_cfg_enable, cmd->param1 & 0xFF, cmd->param2 & 0xFF);
             send_message("Binary Command: LFP_SET_PARAMS decimR=%u num_taps=%u\r\n",
                          cmd->param1 & 0xFF, cmd->param2 & 0xFF);
             break;
 
+        // CMD_LFP_SET_CHANNELS is DEPRECATED: the LFP lane mask now mirrors the
+        // broadband channel-enable mask (set_channels) -- single source of truth.
+        // Accept-and-ignore so older hosts don't error; it no longer sets a mask.
         case CMD_LFP_SET_CHANNELS:
-            pl_lfp_set_config(lfp_cfg_enable, cmd->param1 & 0xFF,
-                              lfp_cfg_decim_R, lfp_cfg_num_taps);
-            send_message("Binary Command: LFP_SET_CHANNELS 0x%02X\r\n", cmd->param1 & 0xFF);
+            send_message("Binary Command: LFP_SET_CHANNELS ignored "
+                         "(lane mask mirrors broadband channel_enable)\r\n");
             break;
 
         case CMD_LFP_WRITE_COEF:
@@ -539,6 +565,11 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
 
         case CMD_UDP_BENCH:
             udp_bench_blast(cmd->param1, cmd->param2);
+            break;
+
+        case CMD_PERF_RESET:
+            perf_reset();   // fresh recv->transmit measurement window
+            send_message("Binary Command: PERF_RESET (maxes/histogram/counts cleared)\r\n");
             break;
 
         default:
@@ -706,64 +737,79 @@ void stop_udp_stream(void) {
 
 // ============================================================================
 // LFP/DSP STREAM (Tier-1): drain the LFP output BRAM -> UDP on LFP_UDP_PORT.
-// Each decimation frame = popcount(lane_mask) streams x 32 ch x 16-bit, packed
-// 2/word, written sequentially to the ring at 0x84000000. The PL exposes its
-// write pointer in STATUS_REG_13; we drain whole frames and wrap each in a
-// compact LFP packet (own magic, so a misrouted datagram is detectable).
+//
+// The PL now builds the COMPLETE LFP wire packet in its output BRAM (0x84000000):
+// per frame, a 6-word header (LFP magic, 64-bit master timestamp, lane_mask/
+// decim_R/num_taps/overrun, seq) followed by the decimated samples (popcount of
+// the broadband channel_enable mask x 32 ch x 16-bit, packed 2/word). So the PS
+// just CDMAs the whole packet from the LFP BRAM into a non-cacheable staging
+// buffer and sends a zero-copy pbuf referencing it -- NO PS-side header math and
+// NO Xil_In32 sample loop (the long single-beat loop blew the per-packet budget;
+// see CLAUDE.md "PL->PS bulk data ALWAYS moves by DMA").
+//
+// The PL exposes its write pointer (next word to be written) in STATUS_REG_13;
+// we drain whole [header|samples] frames as they complete. The frame size is
+// derived from the broadband channel_enable mask (= the PL's LFP lane mask).
 // ============================================================================
 static struct udp_pcb *lfp_pcb = NULL;
 static uint32_t lfp_read_word = 0;
-static uint32_t lfp_frame_seq = 0;
 uint32_t lfp_udp_packets_sent = 0;
-// 6-word header + max frame (8 streams x 32 ch / 2 = 128 words).
-static uint32_t lfp_pktbuf[6 + 128] __attribute__((aligned(8)));
+#define LFP_HDR_WORDS 6
 
 void lfp_stream_init(void) {
     lfp_pcb = udp_new();
     lfp_read_word = 0;
-    lfp_frame_seq = 0;
     lfp_udp_packets_sent = 0;
     if (lfp_pcb == NULL) send_message("ERROR: Could not create LFP UDP PCB\r\n");
 }
 
 void lfp_stream_service(void) {
     if (!lfp_cfg_enable || lfp_pcb == NULL) return;
-    int nlanes = __builtin_popcount(lfp_cfg_lane_mask);
+    // Lane mask = broadband channel_enable (single source of truth; the PL drives
+    // the LFP lane_mask from channel_enable_reg).
+    int nlanes = __builtin_popcount(pl_get_current_channel_enable() & 0xFF);
     if (nlanes == 0) return;
-    uint32_t frame_words = (uint32_t)nlanes * 16;       // popcount*32 samples / 2 per word
+    uint32_t sample_words = (uint32_t)nlanes * 16;      // popcount*32 samples / 2 per word
+    uint32_t frame_words  = LFP_HDR_WORDS + sample_words;  // full wire packet (header+samples)
     const uint32_t mask = LFP_BRAM_SIZE_WORDS - 1;
 
     uint32_t st = pl_lfp_read_status();
     uint32_t wr_word = (st & 0xFFFF) >> 2;              // byte addr -> 32-bit word index
-    uint8_t  overrun = (st >> 16) & 1;
+
+    uint32_t *pkt = (uint32_t *)LFP_DMA_BUF_ADDR;       // non-cacheable LFP staging
 
     int budget = 8;   // cap frames per call so the broadband loop isn't starved
     while (budget-- > 0) {
         if (((wr_word - lfp_read_word) & mask) < frame_words) break;  // no full frame yet
 
-        lfp_pktbuf[0] = 0x1F1FBEEF;                     // LFP magic (low)
-        lfp_pktbuf[1] = 0xCAFEBABE;                     // magic (high)
-        uint64_t ts = (uint64_t)lfp_frame_seq * lfp_cfg_decim_R;  // ~broadband packet index
-        lfp_pktbuf[2] = (uint32_t)ts;
-        lfp_pktbuf[3] = (uint32_t)(ts >> 32);
-        lfp_pktbuf[4] = (uint32_t)lfp_cfg_lane_mask
-                      | ((uint32_t)lfp_cfg_decim_R  << 8)
-                      | ((uint32_t)lfp_cfg_num_taps << 16)
-                      | ((uint32_t)overrun          << 24);
-        lfp_pktbuf[5] = lfp_frame_seq;
-        for (uint32_t i = 0; i < frame_words; i++)
-            lfp_pktbuf[6 + i] = Xil_In32(LFP_BRAM_BASE_ADDR + (((lfp_read_word + i) & mask) << 2));
+        // CDMA the whole packet (header + samples) from the LFP BRAM ring into the
+        // non-cacheable staging buffer, splitting at the ring wrap if needed.
+        int derr;
+        if ((lfp_read_word + frame_words) <= LFP_BRAM_SIZE_WORDS) {
+            derr = pl_dma_read_addr(pkt,
+                       LFP_BRAM_BASE_ADDR + (lfp_read_word << 2), frame_words);
+        } else {
+            uint32_t first = LFP_BRAM_SIZE_WORDS - lfp_read_word;
+            derr  = pl_dma_read_addr(pkt,
+                       LFP_BRAM_BASE_ADDR + (lfp_read_word << 2), first);
+            derr |= pl_dma_read_addr(pkt + first,
+                       LFP_BRAM_BASE_ADDR, frame_words - first);
+        }
+        if (derr) { dma_errors++; break; }   // CDMA error: retry next call
 
-        uint32_t total = (6 + frame_words) * 4;
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_REF);
+        // Zero-copy send: the pbuf references the staging buffer directly (the PL
+        // built the header, so we send exactly what the PL wrote).
+        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_words * 4, PBUF_REF);
         if (p != NULL) {
-            p->payload = (void*)lfp_pktbuf;
+            p->payload = (void*)pkt;
             ip_addr_t dst; dst.addr = udp_dest_ip;
-            udp_sendto(lfp_pcb, p, &dst, LFP_UDP_PORT);
+            err_t e = udp_sendto(lfp_pcb, p, &dst, LFP_UDP_PORT);
+            if (e != ERR_OK) { lfp_send_err++; lfp_last_send_err = (int32_t)e; }
             pbuf_free(p);
             lfp_udp_packets_sent++;
+        } else {
+            lfp_pbuf_alloc_fail++;   // shared MEMP_PBUF pool empty -> this LFP frame is dropped
         }
         lfp_read_word = (lfp_read_word + frame_words) & mask;
-        lfp_frame_seq++;
     }
 }

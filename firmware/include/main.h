@@ -215,7 +215,23 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         3   // 1.3: LFP default R=10 (3 kHz) + dual-MAC engine;
+#define FIRMWARE_VERSION_MINOR         7   // 1.7: lwIP TX headroom -- n_tx_descriptors 64->256, mem_size
+                                           //      128K->256K (BSP lwip220 config) to eliminate the rare
+                                           //      udp_sendto ERR_MEM drops under ISR-stall catch-up bursts.
+                                           //      NOT the pbuf pool (pbuf_alloc never failed). Firmware
+                                           //      sources + struct unchanged (still 288 B); BSP regen only.
+                                           // 1.6: OCM staging REVERTED (back to DDR; OCM didn't help --
+                                           //      the recv->transmit tail is EMAC TX-done ISR preemption,
+                                           //      not DDR contention). Adds TX-drop instrumentation: split
+                                           //      udp_send_errors into bb/lfp pbuf-alloc-fail vs sendto-err
+                                           //      (+ err code), first/last drop packet index, and an 8-deep
+                                           //      drop-index ring; reports MEMP_NUM_PBUF. get_status -> 288 B.
+                                           // 1.4: recv->transmit spike instrumentation -- split the
+                                           //      timed window into CDMA / udp_sendto / other, capture
+                                           //      the worst packet's breakdown, a 6-bucket recv->transmit
+                                           //      histogram + over-budget count, and CMD_PERF_RESET to
+                                           //      clear the window. get_status grows to 220 bytes.
+                                           // 1.3: LFP default R=10 (3 kHz) + dual-MAC engine;
                                            //      analytic chirp NCO (CTRL_REG_3). get_status adds
                                            //      chirp config. Status wire = 168 bytes.
                                            // 1.2: AXI-CDMA read path; get_status config tracking
@@ -317,7 +333,44 @@ typedef struct __attribute__((packed)) {
     uint16_t chirp_rate;        // sweep_rate field (12-bit)
     uint8_t  chirp_reserved[2];
 
+    // recv->transmit spike instrumentation (52 bytes; appended -- keep net.py in
+    // sync). All times are raw global-timer ticks (host converts with timer_hz).
+    // The recv->transmit window (loop_ticks) is split into CDMA / udp_sendto /
+    // other so the host can attribute the occasional ~40 us spike. The worst-case
+    // snapshot is captured the instant a new loop_ticks_max is set, so we see WHAT
+    // dominated that packet; the histogram + over_budget_count give the frequency
+    // and shape of the tail. Cleared by CMD_PERF_RESET (see network.c).
+    uint32_t send_ticks_last;   // last udp_sendto() call (ticks)
+    uint32_t send_ticks_max;    // worst udp_sendto() call (ticks)
+    uint32_t over_budget_count; // packets whose loop_ticks exceeded the 33.3 us budget
+    uint32_t worst_pkt_index;   // packets_received_count at the worst-loop packet
+    uint32_t worst_cdma_ticks;  // that packet's CDMA time (ticks)
+    uint32_t worst_send_ticks;  // that packet's udp_sendto time (ticks)
+    uint32_t worst_other_ticks; // that packet's loop - cdma - send (ticks)
+    // recv->transmit histogram, microsecond bucket edges [<16,16-25,25-33,33-50,50-100,>=100]
+    uint32_t loop_hist[6];      // counts per bucket
+
+    // TX drop diagnostics (v1.6): split udp_send_errors by stream + failure mode,
+    // and record WHEN drops happen. Each zero-copy PBUF_REF send holds one
+    // MEMP_PBUF entry (MEMP_NUM_PBUF, shared by broadband + LFP) until the GEM
+    // TX-done reaps it; pbuf_alloc()==NULL => that pool was momentarily empty,
+    // a udp_sendto err (ERR_MEM) => no TX BD/mem. Cleared by CMD_PERF_RESET.
+    // 68 bytes (keep net.py + _Static_assert in sync).
+    uint32_t bb_pbuf_alloc_fail;  // broadband: pbuf_alloc returned NULL
+    uint32_t bb_send_err;         // broadband: udp_sendto() != ERR_OK
+    int32_t  bb_last_send_err;    // broadband: last err_t (ERR_MEM = -1, ...)
+    uint32_t lfp_pbuf_alloc_fail; // LFP: pbuf_alloc returned NULL
+    uint32_t lfp_send_err;        // LFP: udp_sendto() != ERR_OK
+    int32_t  lfp_last_send_err;   // LFP: last err_t
+    uint32_t first_drop_pkt;      // packets_received_count at the first broadband drop
+    uint32_t last_drop_pkt;       // ... at the most recent broadband drop
+    uint32_t memp_num_pbuf;       // = MEMP_NUM_PBUF (shared zero-copy pool size)
+    uint32_t drop_ring[8];        // last 8 broadband drop packet indices (clustering)
+
 } status_response_t;
+
+// recv->transmit histogram bucket count (keep in sync with loop_hist[] + net.py)
+#define PERF_HIST_BUCKETS   6
 
 // Flag definitions
 #define STATUS_PL_TRANSMISSION_ACTIVE  (1 << 0)
@@ -357,6 +410,20 @@ extern uint32_t dma_errors;
 extern uint32_t dma_ticks_last, dma_ticks_max;
 extern uint32_t loop_ticks_last, loop_ticks_max;
 extern uint32_t perf_timer_hz;
+// recv->transmit spike instrumentation (raw ticks; see status_response_t)
+extern uint32_t send_ticks_last, send_ticks_max;
+extern uint32_t over_budget_count;
+extern uint32_t worst_pkt_index, worst_cdma_ticks, worst_send_ticks, worst_other_ticks;
+extern uint32_t loop_hist[PERF_HIST_BUCKETS];
+// TX drop diagnostics (v1.6)
+extern uint32_t bb_pbuf_alloc_fail, bb_send_err;
+extern int32_t  bb_last_send_err;
+extern uint32_t lfp_pbuf_alloc_fail, lfp_send_err;
+extern int32_t  lfp_last_send_err;
+extern uint32_t first_drop_pkt, last_drop_pkt;
+extern uint32_t drop_ring[8];
+extern uint32_t drop_ring_idx;
+void perf_reset(void);   // clear sticky maxes + histogram + counts (CMD_PERF_RESET)
 
 // UDP transmission
 extern uint32_t udp_packets_sent;
@@ -489,7 +556,11 @@ void stop_udp_stream(void);
 // LFP/DSP ENGINE (Tier-1) -- control + streaming
 // ============================================================================
 // Control (pl_control.c): config latches while streaming is stopped.
-void pl_lfp_set_config(uint8_t enable, uint8_t lane_mask, uint8_t decim_R, uint8_t num_taps);
+// NOTE: the LFP lane mask is NO LONGER a separate parameter -- it MIRRORS the
+// broadband channel-enable mask in the PL (single source of truth). The PL
+// builds the complete LFP wire packet (header + samples) in its output BRAM, so
+// the PS just CDMAs it into a pbuf and sends it.
+void pl_lfp_set_config(uint8_t enable, uint8_t decim_R, uint8_t num_taps);
 void pl_lfp_coef_begin(void);                             // clear the coef write pointer
 void pl_lfp_coef_push(int32_t coef);                      // write one 18-bit Q1.17 tap
 void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
@@ -499,8 +570,9 @@ uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 void lfp_stream_init(void);
 void lfp_stream_service(void);   // call from the core-0 maintenance loop
 
-// Tracked config / counters (mirrored into status_response_t).
-extern uint8_t  lfp_cfg_enable, lfp_cfg_lane_mask, lfp_cfg_decim_R, lfp_cfg_num_taps;
+// Tracked config / counters (mirrored into status_response_t). The lane mask is
+// the broadband channel_enable (reported via pl_get_current_channel_enable()).
+extern uint8_t  lfp_cfg_enable, lfp_cfg_decim_R, lfp_cfg_num_taps;
 extern uint32_t lfp_udp_packets_sent;
 
 #endif // MAIN_H

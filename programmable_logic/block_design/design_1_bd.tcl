@@ -827,8 +827,11 @@ proc create_root_design { parentCell } {
   assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers/s_axi/reg0] -force
   # CDMA control registers in the PS GP address space
   assign_bd_address -offset 0x44A00000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_cdma_0/S_AXI_LITE/Reg] -force
-  # CDMA master view: it must reach the capture BRAM (read src) and DDR via HP0 (write dst)
+  # CDMA master view: it must reach the capture BRAM (read src), the LFP output
+  # BRAM (read src -- the PL builds the whole LFP wire packet there and the PS
+  # CDMAs it straight into the pbuf), and DDR via HP0 (write dst).
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x84000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
   assign_bd_address -offset 0x00000000 -range 0x40000000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
   # The PS GP masters can reach HP0 through the smartconnect_1 crossbar but never
   # address DDR that way -- exclude it so processing_system7_0/Data is clean.

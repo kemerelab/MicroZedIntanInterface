@@ -14,7 +14,7 @@ module lfp_halfband_tb;
     logic [N_LANES-1:0] lane_mask;
     logic [TAPN_W-1:0] num_taps;
     logic coef_wr_en; logic [RING_AW-1:0] coef_wr_addr; logic [COEF_W-1:0] coef_wr_data;
-    logic out_valid, out_frame_start, busy, compute_overrun;
+    logic out_valid, out_frame_start, frame_tick, busy, compute_overrun;
     logic [CH_W-1:0] out_channel; logic [OUT_W-1:0] out_data;
 
     lfp_halfband #(.N_LANES(N_LANES),.N_SLOTS(N_SLOTS),.DATA_W(DATA_W),.COEF_W(COEF_W),

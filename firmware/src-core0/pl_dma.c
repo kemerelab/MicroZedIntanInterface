@@ -20,6 +20,12 @@
 // owns exactly one 1 MB TLB section, which pl_dma_init() marks non-cacheable.
 uint8_t pl_dma_staging[0x100000] __attribute__((aligned(0x100000)));
 
+// Separate 1 MB-aligned non-cacheable staging buffer for the LFP stream, so the
+// LFP path's CDMA + zero-copy pbuf never share/clobber the broadband staging
+// buffer (the two run sequentially in the same loop, but each holds a pbuf
+// reference into its own buffer until the EMAC transmits it).
+uint8_t pl_dma_lfp_staging[0x100000] __attribute__((aligned(0x100000)));
+
 static XAxiCdma cdma;
 static int      cdma_ready = 0;
 
@@ -30,6 +36,9 @@ int pl_dma_init(void) {
     // path needs no per-packet cache ops.
     Xil_DCacheFlushRange((UINTPTR)pl_dma_staging, sizeof(pl_dma_staging));
     Xil_SetTlbAttributes((UINTPTR)pl_dma_staging, NORM_NONCACHE_SHARED);
+    // Same treatment for the LFP staging buffer.
+    Xil_DCacheFlushRange((UINTPTR)pl_dma_lfp_staging, sizeof(pl_dma_lfp_staging));
+    Xil_SetTlbAttributes((UINTPTR)pl_dma_lfp_staging, NORM_NONCACHE_SHARED);
 
     XAxiCdma_Config *cfg = XAxiCdma_LookupConfig(CDMA_BASEADDR);
     if (cfg == NULL) {
@@ -60,11 +69,15 @@ int pl_dma_init(void) {
     return 0;
 }
 
-int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words) {
+// Generic CDMA read: copy n_words from an ARBITRARY PL/BRAM source byte address
+// (e.g. the capture BRAM at 0x80000000 or the LFP output BRAM at 0x84000000) to
+// dst (must be inside the non-cacheable DMA_BUF_ADDR section). Both source BRAMs
+// are in the axi_cdma_0/Data address space (see design_1_bd.tcl).
+int pl_dma_read_addr(uint32_t *dst, uintptr_t src_addr, uint32_t n_words) {
     if (!cdma_ready) return -1;
 
     int     nbytes = (int)(n_words * 4U);
-    UINTPTR src    = (UINTPTR)(BRAM_BASE_ADDR + bram_word_addr * 4U);
+    UINTPTR src    = (UINTPTR)src_addr;
 
     // BRAM is a PL slave (uncached) and dst is non-cacheable -> no cache ops.
     if (XAxiCdma_SimpleTransfer(&cdma, src, (UINTPTR)dst, nbytes, NULL, NULL)
@@ -72,7 +85,7 @@ int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words) {
         return -2;
     }
 
-    // Poll for completion (600-byte transfer is microseconds; guard bounds it).
+    // Poll for completion (sub-kB transfer is microseconds; guard bounds it).
     uint32_t guard = 0;
     while (XAxiCdma_IsBusy(&cdma)) {
         if (++guard > 100000000U) return -3;   // timeout
@@ -84,4 +97,9 @@ int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words) {
         return -4;
     }
     return 0;
+}
+
+int pl_dma_read_bram(uint32_t *dst, uint32_t bram_word_addr, uint32_t n_words) {
+    return pl_dma_read_addr(dst, (uintptr_t)(BRAM_BASE_ADDR + bram_word_addr * 4U),
+                            n_words);
 }

@@ -24,6 +24,8 @@ module lfp_dsp_block_tb;
     logic [127:0] dsp_sample_data;
     logic [5:0]  dsp_sample_slot;
     logic        dsp_packet_tick;
+    logic [63:0] dsp_master_timestamp;
+    logic [7:0]  dsp_channel_enable;
     logic [31:0] lfp_cfg, lfp_coef, lfp_strobe;
     logic                   bram_clk, bram_rst, bram_en;
     logic [LFP_BRAM_AW-1:0] bram_addr;
@@ -41,6 +43,8 @@ module lfp_dsp_block_tb;
         .clk(clk), .rstn(rstn),
         .dsp_sample_valid(dsp_sample_valid), .dsp_sample_data(dsp_sample_data),
         .dsp_sample_slot(dsp_sample_slot), .dsp_packet_tick(dsp_packet_tick),
+        .dsp_master_timestamp(dsp_master_timestamp),
+        .dsp_channel_enable(dsp_channel_enable),
         .lfp_cfg(lfp_cfg), .lfp_coef(lfp_coef), .lfp_strobe(lfp_strobe),
         .bram_clk(bram_clk), .bram_rst(bram_rst), .bram_addr(bram_addr),
         .bram_din(bram_din), .bram_dout(32'h0), .bram_en(bram_en), .bram_we(bram_we),
@@ -70,6 +74,7 @@ module lfp_dsp_block_tb;
             if (exp_w[i] !== 32'hxxxxxxxx) n_exp = i + 1;
 
         dsp_sample_valid = 0; dsp_sample_data = 0; dsp_sample_slot = 0; dsp_packet_tick = 0;
+        dsp_master_timestamp = 64'd0; dsp_channel_enable = LANE_MASK;
         lfp_cfg = 0; lfp_coef = 0; lfp_strobe = 0; tog = 0;
         repeat (5) @(posedge clk); rstn = 1; @(posedge clk);
 
@@ -96,6 +101,9 @@ module lfp_dsp_block_tb;
                 @(negedge clk); dsp_sample_valid = 0;
                 repeat (7) @(negedge clk);
             end
+            // Mirror the core: timestamp has incremented to (p+1) on the same edge
+            // packet_tick rises, so the just-completed packet p stamps master count p.
+            dsp_master_timestamp = p + 1;
             @(negedge clk); dsp_packet_tick = 1;
             @(negedge clk); dsp_packet_tick = 0;
             // Pad the inter-packet gap to cover the worst-case compute pass

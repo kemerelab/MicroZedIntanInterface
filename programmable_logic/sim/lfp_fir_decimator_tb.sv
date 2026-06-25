@@ -40,7 +40,7 @@ module lfp_fir_decimator_tb;
     logic                      out_valid;
     logic [CH_W-1:0]           out_channel;
     logic [OUT_W-1:0]          out_data;
-    logic                      out_frame_start, busy, compute_overrun;
+    logic                      out_frame_start, frame_tick, busy, compute_overrun;
 
     lfp_fir_decimator #(
         .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .COEF_W(COEF_W),
