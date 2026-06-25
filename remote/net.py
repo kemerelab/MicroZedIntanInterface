@@ -65,6 +65,10 @@ CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + co
 
 UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
 LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
+# Persistent LFP UDP sink (created in tcp_control(); see class LfpSink). Keeps
+# port 5001 bound + drained for the whole session so the host never replies ICMP
+# port-unreachable to the board while the LFP stream runs.
+LFP_SINK = None
 LFP_MAGIC_LOW = 0x1F1FBEEF
 LFP_MAGIC_HIGH = 0xCAFEBABE
 LFP_COEF_FRAC = 17          # Q1.17 coefficient fixed-point
@@ -1355,6 +1359,125 @@ def lfp_enable(sock, on=True):
     send_binary_command(sock, CMD_LFP_ENABLE, 1 if on else 0)
     print(f"[LFP] {'ENABLED' if on else 'disabled'}")
 
+
+# ---------------------------------------------------------------------------
+# Persistent LFP UDP sink (port 5001).
+#
+# An UNCONSUMED UDP port makes the host kernel reply ICMP "port unreachable" to
+# the sender for every datagram. With the LFP stream at ~3 kHz that is a ~3000/s
+# ICMP storm back to the board -> ~3000 RX interrupts/s that preempt its polled
+# acquisition loop (exactly why the recv->transmit spikes + rare drops appear
+# only when lfp_on but 5001 is not being drained; broadband on 5000 IS consumed,
+# so it stays clean). Keep 5001 bound + drained for the whole session. The sink
+# owns the socket; receive_lfp / lfp_sweep read from it via _LfpReader (a 2nd
+# bind on 5001 would collide), and fall back to a private bind if it isn't up.
+# ---------------------------------------------------------------------------
+class LfpSink:
+    def __init__(self, port=LFP_UDP_PORT, rcvbuf=1 << 20):
+        self.port = port
+        self.rcvbuf = rcvbuf
+        self._sock = None
+        self._thread = None
+        self._running = False
+        self.pkts = 0
+        self.bytes = 0
+        self.last_addr = None
+        self._subs = []
+        self._lock = threading.Lock()
+
+    def start(self):
+        if self._running:
+            return True
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.rcvbuf)
+            except OSError:
+                pass
+            s.bind(('', self.port))
+            s.settimeout(0.5)
+        except OSError as e:
+            print(f"[LFP-SINK] could NOT bind UDP {self.port}: {e} -- board may get "
+                  f"ICMP-unreachable storms while LFP streams.")
+            return False
+        self._sock = s
+        self._running = True
+        self._thread = threading.Thread(target=self._run, name="lfp-sink", daemon=True)
+        self._thread.start()
+        print(f"[LFP-SINK] draining UDP {self.port} (prevents ICMP-unreachable storms to the board)")
+        return True
+
+    def _run(self):
+        while self._running:
+            try:
+                data, addr = self._sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            self.pkts += 1
+            self.bytes += len(data)
+            self.last_addr = addr
+            with self._lock:
+                subs = list(self._subs)
+            for q in subs:
+                try:
+                    q.put_nowait(data)
+                except queue.Full:
+                    pass
+
+    def subscribe(self, maxsize=20000):
+        q = queue.Queue(maxsize=maxsize)
+        with self._lock:
+            self._subs.append(q)
+        return q
+
+    def unsubscribe(self, q):
+        with self._lock:
+            if q in self._subs:
+                self._subs.remove(q)
+
+
+class _LfpReader:
+    """Yields LFP datagrams from the persistent LfpSink if it is running (so 5001
+    stays drained), else from a private socket bound to the port (fallback)."""
+    def __init__(self, port=LFP_UDP_PORT, timeout=3.0):
+        self.port = port
+        self.timeout = timeout
+        self._q = None
+        self._sock = None
+
+    def open(self):
+        if LFP_SINK is not None and LFP_SINK._running and self.port == LFP_SINK.port:
+            self._q = LFP_SINK.subscribe()
+        else:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('', self.port))
+            s.settimeout(self.timeout)
+            self._sock = s
+        return self
+
+    def recv(self):
+        """Next datagram, or raise socket.timeout."""
+        if self._q is not None:
+            try:
+                return self._q.get(timeout=self.timeout)
+            except queue.Empty:
+                raise socket.timeout()
+        data, _ = self._sock.recvfrom(4096)
+        return data
+
+    def close(self):
+        if self._q is not None:
+            LFP_SINK.unsubscribe(self._q)
+            self._q = None
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
+
+
 def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
     """Bind the LFP UDP port and parse frames -- a reference receiver for the
     plugin. Payload samples are offset-binary 16-bit (subtract 0x8000 for signed).
@@ -1378,15 +1501,12 @@ def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
       w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24); lane_mask =
            the broadband channel_enable mask (single source of truth).
       w5 = PL-maintained LFP frame sequence number (++ per emitted frame)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('', bind_port))
-    s.settimeout(3.0)
+    r = _LfpReader(port=bind_port, timeout=3.0).open()
     got = bad = 0
     last_seq = None
     try:
         while got < n_packets:
-            data, _ = s.recvfrom(4096)
+            data = r.recv()
             if len(data) < 24:
                 bad += 1; continue
             mlo, mhi, ts_lo, ts_hi, cfg, seq = struct.unpack('<IIIIII', data[:24])
@@ -1408,7 +1528,7 @@ def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
     except socket.timeout:
         print("[LFP] receive timeout (is the engine enabled + streaming?)")
     finally:
-        s.close()
+        r.close()
     print(f"[LFP] received {got} frames, {bad} non-LFP/short datagrams")
     return got
 
@@ -1462,15 +1582,13 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     # ---- capture one channel's time series off UDP 5001 ----
     settle = int(0.3 * fs)
     n_want = int(n_periods * period * fs) + settle
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('', LFP_UDP_PORT)); s.settimeout(3.0)
+    r = _LfpReader(port=LFP_UDP_PORT, timeout=3.0).open()
     series = []
     t_start = time.time()
     max_wall = n_periods * period * 4.0 + 8.0   # hard wall-clock cap; never spin forever
     try:
         while len(series) < n_want and (time.time() - t_start) < max_wall:
-            data, _ = s.recvfrom(4096)
+            data = r.recv()
             if len(data) < 24: continue
             mlo, mhi = struct.unpack('<II', data[:8])
             if mlo != LFP_MAGIC_LOW or mhi != LFP_MAGIC_HIGH: continue
@@ -1480,7 +1598,7 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     except socket.timeout:
         print("[SWEEP] capture timed out -- is the chirp+LFP streaming?")
     finally:
-        s.close()
+        r.close()
     series = series[settle:]
     if len(series) < int(period * fs):
         print(f"[SWEEP] only {len(series)} LFP samples in ~{max_wall:.0f}s -- the board "
@@ -2143,6 +2261,14 @@ def tcp_control():
             print(f"[TCP] Failed to configure UDP destination")
             print(f"[TCP] Device may still be sending to default: 192.168.18.100:{UDP_PORT}")
         
+        # Keep the LFP UDP port (5001) drained for the whole session: an
+        # unconsumed UDP port makes the host reply ICMP port-unreachable per
+        # datagram -> a ~3 kHz RX-interrupt storm on the board (seen only with
+        # lfp_on). The sink owns 5001; lfp_recv / lfp_sweep read from it.
+        global LFP_SINK
+        LFP_SINK = LfpSink()
+        LFP_SINK.start()
+
         # Get and display initial status
         print("\n[TCP] Getting initial device status...")
         status = get_status(sock)
@@ -2157,7 +2283,7 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, perf_reset, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
-        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n]  (mask = broadband set_channels)")
+        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], lfp_sink  (5001 auto-drained)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2316,10 +2442,16 @@ def tcp_control():
                 elif cmd == "lfp_off":
                     lfp_enable(sock, False)
                 elif cmd == "lfp_recv" or cmd.startswith("lfp_recv "):
-                    # bind UDP 5001 and print decoded LFP frames (blocks until n or timeout)
+                    # read decoded LFP frames from the persistent sink (blocks until n or timeout)
                     parts = cmd.split()
                     n = int(parts[1]) if len(parts) > 1 else 200
                     receive_lfp(n)
+                elif cmd == "lfp_sink":
+                    if LFP_SINK is not None and LFP_SINK._running:
+                        print(f"[LFP-SINK] draining UDP {LFP_SINK.port}: {LFP_SINK.pkts} pkts, "
+                              f"{LFP_SINK.bytes/1024.0:.0f} KB, last from {LFP_SINK.last_addr}")
+                    else:
+                        print("[LFP-SINK] not running")
                 elif cmd == "aux":
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
