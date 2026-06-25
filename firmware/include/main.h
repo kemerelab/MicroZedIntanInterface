@@ -107,16 +107,16 @@
 #define WAV_TARGET_HALFBAND         (1u << 2)
 #define WAV_TARGET_SELECTOR         (2u << 2)
 // Wavelet build dimensions (must match wavelet_dsp_block.sv instantiation)
-// v2 STEP 1 (2 MAC lanes): the voice MAC computes a tap's RE and IM parts in
-// ONE cycle (lane A=re, lane B=im, shared ring read), halving the worst-case
-// pass from ~1758*K to ~990*K clocks (K=16 clean alone).
+// v2 STEP 1 (2 MAC lanes): a tap's RE+IM in one cycle. K=16 clean alone.
 // v2 STEP 2 (lazy work-spread): octave 0 + HB cascade stay eager each frame;
 // each slower octave's voice column is deferred across its 2^o-frame window via
 // a persistent deadline-monotonic drain, so the peak collapses toward the
-// average (~198*K). Real-time-clean ceiling K=96 (at the real 28000-clock frame
-// spacing: 80% busy duty, no overrun, no dropped columns; K=112 = 94% tight,
-// K=128 overruns). Budget = ~28000 clocks/frame (84 MHz / 3 kHz).
-#define WAV_K                       96
+// average. 2-MAC + work-spread reaches K=96 (80% duty) / K=112 tight.
+// v2 STEP 2b (4 MAC lanes, TWO voices/cycle): halves the voice cost again ->
+// real-time-clean ceiling K=176 (spread TB at the real 28000-clock frame
+// spacing: 82% busy duty, no overrun, no dropped columns; K=184 = 86%, K=192
+// overruns). Budget = ~28000 clocks/frame (84 MHz / 3 kHz).
+#define WAV_K                       176
 #define WAV_N_OCTAVES               8
 #define WAV_V                       4
 #define WAV_N_TAPS                  24

@@ -17,7 +17,7 @@
 // =====================================================================
 module wav_spread_tb;
     parameter int N_CH      = 256;
-    parameter int K         = 96;     // v2 step2 real-time-clean ceiling (sweep to test)
+    parameter int K         = 176;    // v2 step2b real-time-clean ceiling (sweep to test)
     parameter int N_OCTAVES = 8;
     parameter int V         = 4;
     parameter int N_TAPS    = 24;

@@ -251,18 +251,21 @@ module data_generator #(
     // 28..31; writes its own results BRAM read by the PS via a 3rd
     // axi_bram_ctrl mapped at 0x90000000).
     //
-    // v2 STEP 1 -- 2 MAC lanes: the voice MAC computes the RE and IM parts of a
-    // tap in ONE cycle (lane A=re, lane B=im, shared ring read), halving the
-    // worst-case pass from ~1758*K to ~990*K clocks (K=16 clean alone).
+    // v2 STEP 1 -- 2 MAC lanes (re+im of a tap in one cycle): K=16 clean alone.
     // v2 STEP 2 -- lazy work-spread: octave 0 + the HB cascade run eagerly each
     // frame; each slower octave's voice column is DEFERRED across its 2^o-frame
     // window via a persistent deadline-monotonic drain, so the peak collapses
-    // toward the average (~198*K). Real-time-clean ceiling K=96 (overrun TB at
-    // the real 28000-clock frame spacing: busy duty 80%, no overrun, no dropped
-    // columns; K=112 = 94% tight, K=128 overruns). BIT-EXACT (same 2-MAC math).
-    // The 64 KB result BRAM holds K=96's wire packet (8 + 96*32*2 = 6152 words).
+    // toward the average. 2-MAC + work-spread reaches K=96 (80% duty)/K=112 tight.
+    // v2 STEP 2b -- 4 MAC lanes (TWO voices/cycle: re+im of voice v on a/b, of
+    // v+1 on c/d, sharing one ring read; coef RAM replicated 4x, ring BRAM stays
+    // single-copy). Halves the voice cost again -> real-time-clean ceiling K=176
+    // (spread TB at the real 28000-clock frame spacing: 82% duty, no overrun, no
+    // dropped columns; K=184 = 86%, K=192 overruns). BIT-EXACT (same per-voice
+    // math). The 64 KB result BRAM holds K=176's packet (8 + 176*32*2 = 11272
+    // words). K=256 still needs more lanes / emit-pipelining (avg compute exceeds
+    // the budget at K>~184 with 4 lanes due to the per-voice emit overhead).
     wavelet_dsp_block #(
-        .N_CH(256), .K(96), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
+        .N_CH(256), .K(176), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
         .RES_AW(WAV_BRAM_ADDR_WIDTH)
     ) wav_dsp_inst (
         .clk(clk),

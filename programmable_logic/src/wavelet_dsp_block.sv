@@ -29,7 +29,7 @@
 // =====================================================================
 module wavelet_dsp_block #(
     parameter int N_CH      = 256,
-    parameter int K         = 96,   // v2 step2 real-time-clean ceiling (2 MAC + work-spread)
+    parameter int K         = 176,  // v2 step2b ceiling (4 MAC lanes + work-spread)
     parameter int N_OCTAVES = 8,
     parameter int V         = 4,
     parameter int N_TAPS    = 24,

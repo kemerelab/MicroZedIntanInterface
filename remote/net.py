@@ -86,11 +86,11 @@ WAV_UDP_PORT = 5004         # decimated scalogram monitor stream
 WAV_MAGIC_LOW = 0x5CA70900  # "SCALOG"
 WAV_MAGIC_HIGH = 0xCAFEBABE
 WAV_COEF_FRAC = 17          # Q1.17 complex coefficient fixed-point
-WAV_K = 96                  # selected channels (build param) -- v2 STEP 2 (2 MAC lanes +
-                            # lazy per-octave work-spread) real-time-clean ceiling. The peak
-                            # per-frame compute collapses toward the average (~198*K); at the
-                            # real 28000-clock 3 kHz @ 84 MHz frame spacing K=96 runs at 80%
-                            # busy duty with no overrun (K=112 = 94% tight, K=128 overruns).
+WAV_K = 176                 # selected channels (build param) -- v2 STEP 2b (4 MAC lanes,
+                            # TWO voices/cycle + lazy per-octave work-spread) real-time-clean
+                            # ceiling. At the real 28000-clock 3 kHz @ 84 MHz frame spacing
+                            # K=176 runs at 82% busy duty with no overrun and no dropped
+                            # columns (K=184 = 86%, K=192 overruns). 2-MAC tops at K=96/112.
 WAV_N_OCTAVES = 8           # octaves (build param)
 WAV_V = 4                   # voices/octave (build param)
 WAV_N_TAPS = 24             # complex taps/voice (build param)
