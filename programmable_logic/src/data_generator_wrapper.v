@@ -243,9 +243,14 @@ module data_generator #(
 
     // Instantiate the Tier-3 on-PL wavelet scalogram engine (control regs
     // 28..31; writes its own results BRAM read by the PS via a 3rd
-    // axi_bram_ctrl mapped at 0x90000000). K=32 first build, single MAC.
+    // axi_bram_ctrl mapped at 0x90000000). K=32, single MAC.
+    // LOW-LATENCY variant: N_OCTAVES=5, N_TAPS=16 (base is 8 octaves / 24 taps).
+    // Fewer octaves drops the slow theta/delta bands (deepest decimation =
+    // longest group delay); the shorter 16-tap support trims per-octave delay
+    // and shrinks the coef RAM + ring BRAM, so timing closes easier. Must match
+    // firmware/include/main.h WAV_* and net.py WAV_*/design_wavelet_bank.
     wavelet_dsp_block #(
-        .N_CH(256), .K(32), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
+        .N_CH(256), .K(32), .N_OCTAVES(5), .V(4), .N_TAPS(16), .HB_TAPS(7),
         .RES_AW(BRAM_ADDR_WIDTH)
     ) wav_dsp_inst (
         .clk(clk),

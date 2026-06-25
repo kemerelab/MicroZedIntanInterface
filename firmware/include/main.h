@@ -95,7 +95,11 @@
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
 // Wavelet (Tier-3) scalogram engine control registers (PL regs 28..31;
-// see wavelet_dsp_block.sv). Build params: K=32, N_OCTAVES=8, V=4, N_TAPS=24.
+// see wavelet_dsp_block.sv). Build params: K=32, N_OCTAVES=5, V=4, N_TAPS=16
+// (LOW-LATENCY variant: 5 octaves keep fast-ripple..low-gamma (~1020..~38 Hz)
+// and drop the slow theta/delta octaves whose deeply-decimated streams carry
+// the longest group delay; the shorter 16-tap wavelet support trims per-octave
+// delay further. The base claude/tier3-wavelet config is 8 octaves / 24 taps.)
 #define CTRL_REG_WAV_CFG_OFFSET     (28 * 4)  // [0]en [7:4]n_oct [11:8]n_voices [19:12]n_taps
 #define CTRL_REG_WAV_GAIN_OFFSET    (29 * 4)  // 4 bits/octave: gain[4*o +: 4] = left-shift
 #define CTRL_REG_WAV_DATA_OFFSET    (30 * 4)  // upload payload (target-dependent, [17:0] coef / [7:0] chan)
@@ -107,11 +111,11 @@
 #define WAV_TARGET_SELECTOR         (2u << 2)
 // Wavelet build dimensions (must match wavelet_dsp_block.sv instantiation)
 #define WAV_K                       32
-#define WAV_N_OCTAVES               8
+#define WAV_N_OCTAVES               5
 #define WAV_V                       4
-#define WAV_N_TAPS                  24
+#define WAV_N_TAPS                  16
 #define WAV_HB_TAPS                 7
-#define WAV_N_SCALES                (WAV_N_OCTAVES * WAV_V)   // 32 scales (build max)
+#define WAV_N_SCALES                (WAV_N_OCTAVES * WAV_V)   // 20 scales (build max)
 // Wavelet results BRAM (PS read via 3rd axi_bram_ctrl). The PL builds the
 // COMPLETE wire packet here: an 8-word header then the COMPACTED payload --
 // per lane, nscales (= n_octaves*n_voices, runtime <= WAV_N_SCALES) complex
