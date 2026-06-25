@@ -1676,7 +1676,7 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 220:
+    if len(data) != 288:
         print(f"[TCP] Invalid status response length: {len(data)} (expected 220)")
         return None
     
@@ -1732,6 +1732,16 @@ def get_status(sock):
         struct.unpack('<7I', data[168:196])
     loop_hist = struct.unpack('<6I', data[196:220])
 
+    # TX drop diagnostics (v1.6, 68 bytes): split udp_send_errors into broadband
+    # vs LFP, pbuf-alloc-fail (MEMP_PBUF pool empty) vs udp_sendto error (+ err
+    # code), first/last drop packet index, MEMP_NUM_PBUF, and an 8-deep ring of
+    # recent drop indices. err_t: ERR_MEM=-1, ERR_BUF=-2, ERR_RTE=-4, ...
+    (bb_pbuf_alloc_fail, bb_send_err, bb_last_send_err,
+     lfp_pbuf_alloc_fail, lfp_send_err, lfp_last_send_err,
+     first_drop_pkt, last_drop_pkt, memp_num_pbuf) = \
+        struct.unpack('<IIiIIiIII', data[220:256])
+    drop_ring = struct.unpack('<8I', data[256:288])
+
     status = {
         'version': version,
         'device_type': device_type,
@@ -1782,6 +1792,17 @@ def get_status(sock):
         'worst_send_ticks': worst_send_ticks,
         'worst_other_ticks': worst_other_ticks,
         'loop_hist': list(loop_hist),
+        # TX drop diagnostics (v1.6)
+        'bb_pbuf_alloc_fail': bb_pbuf_alloc_fail,
+        'bb_send_err': bb_send_err,
+        'bb_last_send_err': bb_last_send_err,
+        'lfp_pbuf_alloc_fail': lfp_pbuf_alloc_fail,
+        'lfp_send_err': lfp_send_err,
+        'lfp_last_send_err': lfp_last_send_err,
+        'first_drop_pkt': first_drop_pkt,
+        'last_drop_pkt': last_drop_pkt,
+        'memp_num_pbuf': memp_num_pbuf,
+        'drop_ring': list(drop_ring),
         # Aux config decoded from CTRL_REG_22 (fast-settle / DSP / digout)
         'aux_ctrl': aux_ctrl,
         'fs_sw': bool(aux_ctrl & (1 << 4)),
@@ -1890,6 +1911,22 @@ def print_status(status):
         print(f"   {lbl:>7}: {c:>10}  ({100.0*c/total:5.1f}%)")
     print(f"Over budget (>=33 us): {status['over_budget_count']}  ({100.0*status['over_budget_count']/total:.3f}% of {total} pkts)")
     print(f"DMA errors: {status['dma_errors']}   (timer {hz/1e6:.1f} MHz)   [perf_reset to clear maxes/histogram]")
+
+    # --- TX drops (v1.6): WHY udp_send_errors happened. pbuf-alloc-fail => the
+    # shared MEMP_PBUF zero-copy pool (bb + lfp) was momentarily empty; sendto-err
+    # (ERR_MEM=-1) => no TX BD/mem. first/last/ring show whether drops cluster at
+    # stream start (cold/warmup) or recur in steady state. Cleared by perf_reset.
+    _errname = {0: "OK", -1: "ERR_MEM", -2: "ERR_BUF", -3: "ERR_TIMEOUT",
+                -4: "ERR_RTE", -6: "ERR_VAL", -7: "ERR_WOULDBLOCK"}
+    _en = lambda c: _errname.get(c, str(c))
+    print("\n--- TX drops (zero-copy pbuf pool / send) ---")
+    print(f"MEMP_NUM_PBUF (shared bb+lfp zero-copy pool): {status['memp_num_pbuf']}")
+    print(f"Broadband: pbuf_alloc-fail={status['bb_pbuf_alloc_fail']}  "
+          f"sendto-err={status['bb_send_err']} (last {_en(status['bb_last_send_err'])})")
+    print(f"LFP:       pbuf_alloc-fail={status['lfp_pbuf_alloc_fail']}  "
+          f"sendto-err={status['lfp_send_err']} (last {_en(status['lfp_last_send_err'])})")
+    print(f"Broadband drop span: first pkt={status['first_drop_pkt']}, last pkt={status['last_drop_pkt']}")
+    print(f"  recent drop pkt ring (last 8): {list(status['drop_ring'])}")
 
     rr = status['rhd_reg']
     print("\n--- RHD Chip Registers (mirror, commanded state) ---")

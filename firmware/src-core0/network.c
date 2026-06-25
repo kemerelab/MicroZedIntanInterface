@@ -265,6 +265,17 @@ void collect_status_data(status_response_t* status) {
     status->worst_cdma_ticks  = worst_cdma_ticks;
     status->worst_send_ticks  = worst_send_ticks;
     status->worst_other_ticks = worst_other_ticks;
+    // TX drop diagnostics (v1.6)
+    status->bb_pbuf_alloc_fail  = bb_pbuf_alloc_fail;
+    status->bb_send_err         = bb_send_err;
+    status->bb_last_send_err    = bb_last_send_err;
+    status->lfp_pbuf_alloc_fail = lfp_pbuf_alloc_fail;
+    status->lfp_send_err        = lfp_send_err;
+    status->lfp_last_send_err   = lfp_last_send_err;
+    status->first_drop_pkt      = first_drop_pkt;
+    status->last_drop_pkt       = last_drop_pkt;
+    status->memp_num_pbuf       = (uint32_t)MEMP_NUM_PBUF;
+    for (int i = 0; i < 8; i++) status->drop_ring[i] = drop_ring[i];
     for (int i = 0; i < PERF_HIST_BUCKETS; i++)
         status->loop_hist[i] = loop_hist[i];
 
@@ -792,9 +803,12 @@ void lfp_stream_service(void) {
         if (p != NULL) {
             p->payload = (void*)pkt;
             ip_addr_t dst; dst.addr = udp_dest_ip;
-            udp_sendto(lfp_pcb, p, &dst, LFP_UDP_PORT);
+            err_t e = udp_sendto(lfp_pcb, p, &dst, LFP_UDP_PORT);
+            if (e != ERR_OK) { lfp_send_err++; lfp_last_send_err = (int32_t)e; }
             pbuf_free(p);
             lfp_udp_packets_sent++;
+        } else {
+            lfp_pbuf_alloc_fail++;   // shared MEMP_PBUF pool empty -> this LFP frame is dropped
         }
         lfp_read_word = (lfp_read_word + frame_words) & mask;
     }

@@ -60,9 +60,22 @@ uint32_t over_budget_count = 0;                     // packets over the 33.3 us 
 uint32_t worst_pkt_index = 0;                       // packet idx of the worst loop
 uint32_t worst_cdma_ticks = 0, worst_send_ticks = 0, worst_other_ticks = 0;
 uint32_t loop_hist[PERF_HIST_BUCKETS] = {0};        // recv->transmit time distribution
+
+// TX drop diagnostics (v1.6): split udp_send_errors by stream + failure mode and
+// record WHEN drops happen. Each zero-copy PBUF_REF send holds one MEMP_PBUF
+// entry (MEMP_NUM_PBUF, shared by broadband + LFP) until the GEM TX-done reaps
+// it; pbuf_alloc()==NULL => that pool is momentarily empty. Declared before
+// perf_reset() so it can clear them. Cleared by CMD_PERF_RESET.
+uint32_t bb_pbuf_alloc_fail = 0, bb_send_err = 0;
+int32_t  bb_last_send_err = 0;
+uint32_t lfp_pbuf_alloc_fail = 0, lfp_send_err = 0;
+int32_t  lfp_last_send_err = 0;
+uint32_t first_drop_pkt = 0, last_drop_pkt = 0;
+uint32_t drop_ring[8] = {0};
+uint32_t drop_ring_idx = 0;
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 220, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 288, "status_response_t size must match net.py get_status");
 
 // Clear the sticky maxes + worst-case snapshot + histogram + counts so the user
 // controls the measurement window (CMD_PERF_RESET). Leaves the last-sample fields
@@ -75,6 +88,22 @@ void perf_reset(void) {
   worst_pkt_index = 0;
   worst_cdma_ticks = worst_send_ticks = worst_other_ticks = 0;
   for (int i = 0; i < PERF_HIST_BUCKETS; i++) loop_hist[i] = 0;
+  // TX drop diagnostics
+  bb_pbuf_alloc_fail = bb_send_err = 0; bb_last_send_err = 0;
+  lfp_pbuf_alloc_fail = lfp_send_err = 0; lfp_last_send_err = 0;
+  first_drop_pkt = last_drop_pkt = 0; drop_ring_idx = 0;
+  for (int i = 0; i < 8; i++) drop_ring[i] = 0;
+}
+
+// Record a broadband TX drop (pbuf-alloc fail or udp_sendto error). packets_
+// received_count is the count BEFORE this packet's increment, so the dropped
+// packet is ~that index. first/last bracket the span; the ring shows clustering.
+static void record_bb_drop(void) {
+  uint32_t idx = packets_received_count;
+  if (first_drop_pkt == 0) first_drop_pkt = idx;
+  last_drop_pkt = idx;
+  drop_ring[drop_ring_idx & 7u] = idx;
+  drop_ring_idx++;
 }
 
 // UDP transmission
@@ -267,6 +296,9 @@ static int process_packet_from_bram(void) {
     } else {
       send_message("UDP Send Error: %d\r\n", result);
       udp_send_errors++; // ERROR TO TRACK
+      bb_send_err++;                       // broadband: udp_sendto rejected it
+      bb_last_send_err = (int32_t)result;  // err_t (ERR_MEM=-1 => no TX BD/mem)
+      record_bb_drop();
     }
     
     // Free pbuf (this won't free our buffer since it's PBUF_REF)
@@ -274,6 +306,8 @@ static int process_packet_from_bram(void) {
   } else {
     send_ticks_last = 0;   // perf: no send happened; keep the breakdown honest
     udp_send_errors++;
+    bb_pbuf_alloc_fail++;  // MEMP_PBUF (shared zero-copy pool) momentarily empty
+    record_bb_drop();
   }
 
   // Update read pointer with variable packet size

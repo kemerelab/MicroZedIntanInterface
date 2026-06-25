@@ -215,7 +215,13 @@
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         4   // 1.4: recv->transmit spike instrumentation -- split the
+#define FIRMWARE_VERSION_MINOR         6   // 1.6: OCM staging REVERTED (back to DDR; OCM didn't help --
+                                           //      the recv->transmit tail is EMAC TX-done ISR preemption,
+                                           //      not DDR contention). Adds TX-drop instrumentation: split
+                                           //      udp_send_errors into bb/lfp pbuf-alloc-fail vs sendto-err
+                                           //      (+ err code), first/last drop packet index, and an 8-deep
+                                           //      drop-index ring; reports MEMP_NUM_PBUF. get_status -> 288 B.
+                                           // 1.4: recv->transmit spike instrumentation -- split the
                                            //      timed window into CDMA / udp_sendto / other, capture
                                            //      the worst packet's breakdown, a 6-bucket recv->transmit
                                            //      histogram + over-budget count, and CMD_PERF_RESET to
@@ -339,6 +345,23 @@ typedef struct __attribute__((packed)) {
     // recv->transmit histogram, microsecond bucket edges [<16,16-25,25-33,33-50,50-100,>=100]
     uint32_t loop_hist[6];      // counts per bucket
 
+    // TX drop diagnostics (v1.6): split udp_send_errors by stream + failure mode,
+    // and record WHEN drops happen. Each zero-copy PBUF_REF send holds one
+    // MEMP_PBUF entry (MEMP_NUM_PBUF, shared by broadband + LFP) until the GEM
+    // TX-done reaps it; pbuf_alloc()==NULL => that pool was momentarily empty,
+    // a udp_sendto err (ERR_MEM) => no TX BD/mem. Cleared by CMD_PERF_RESET.
+    // 68 bytes (keep net.py + _Static_assert in sync).
+    uint32_t bb_pbuf_alloc_fail;  // broadband: pbuf_alloc returned NULL
+    uint32_t bb_send_err;         // broadband: udp_sendto() != ERR_OK
+    int32_t  bb_last_send_err;    // broadband: last err_t (ERR_MEM = -1, ...)
+    uint32_t lfp_pbuf_alloc_fail; // LFP: pbuf_alloc returned NULL
+    uint32_t lfp_send_err;        // LFP: udp_sendto() != ERR_OK
+    int32_t  lfp_last_send_err;   // LFP: last err_t
+    uint32_t first_drop_pkt;      // packets_received_count at the first broadband drop
+    uint32_t last_drop_pkt;       // ... at the most recent broadband drop
+    uint32_t memp_num_pbuf;       // = MEMP_NUM_PBUF (shared zero-copy pool size)
+    uint32_t drop_ring[8];        // last 8 broadband drop packet indices (clustering)
+
 } status_response_t;
 
 // recv->transmit histogram bucket count (keep in sync with loop_hist[] + net.py)
@@ -387,6 +410,14 @@ extern uint32_t send_ticks_last, send_ticks_max;
 extern uint32_t over_budget_count;
 extern uint32_t worst_pkt_index, worst_cdma_ticks, worst_send_ticks, worst_other_ticks;
 extern uint32_t loop_hist[PERF_HIST_BUCKETS];
+// TX drop diagnostics (v1.6)
+extern uint32_t bb_pbuf_alloc_fail, bb_send_err;
+extern int32_t  bb_last_send_err;
+extern uint32_t lfp_pbuf_alloc_fail, lfp_send_err;
+extern int32_t  lfp_last_send_err;
+extern uint32_t first_drop_pkt, last_drop_pkt;
+extern uint32_t drop_ring[8];
+extern uint32_t drop_ring_idx;
 void perf_reset(void);   // clear sticky maxes + histogram + counts (CMD_PERF_RESET)
 
 // UDP transmission
