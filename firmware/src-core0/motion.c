@@ -6,6 +6,7 @@
 #include "motion_estimator.h"
 #include "pl_dma.h"
 #include "xil_io.h"
+#include "shared_print.h"   // send_message
 #include "lwip/udp.h"
 #include "lwip/pbuf.h"
 

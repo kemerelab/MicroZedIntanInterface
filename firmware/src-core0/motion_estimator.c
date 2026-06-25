@@ -1,7 +1,20 @@
 // motion_estimator.c -- see motion_estimator.h. Pure C (stdint + math), no
 // Xilinx/lwIP deps, so it builds + unit-tests under native gcc.
 #include "motion_estimator.h"
-#include <math.h>
+
+// libm is NOT linked into the bare-metal core-0 image, so we can't use sqrtf.
+// The A9 VFP has hardware add/mul/div, so a seeded Newton-Raphson sqrt is cheap
+// and ~1e-4 accurate -- ample for a movement proxy. (The native unit test uses
+// this same path, so the test validates exactly what the firmware runs.)
+static float fsqrtf(float x) {
+    if (x <= 0.0f) return 0.0f;
+    union { float f; uint32_t i; } u; u.f = x;
+    u.i = (u.i >> 1) + 0x1FBD1DF5;          // fast initial sqrt estimate
+    float y = u.f;
+    y = 0.5f * (y + x / y);                  // Newton-Raphson x2
+    y = 0.5f * (y + x / y);
+    return y;
+}
 
 // Nominal ADXL335 on the RHD aux ADC: ~300 mV/g, the aux LSB is small. The real
 // counts->g must be characterized on hardware (6-position static cal); this is a
@@ -48,14 +61,14 @@ static void motion_apply_dynamic(motion_est_t *m, float dx, float dy, float dz) 
     float mag2 = dx*dx + dy*dy + dz*dz;
     // activity index: RMS via mean-square EMA
     m->act_ms += m->activity_alpha * (mag2 - m->act_ms);
-    m->activity = sqrtf(m->act_ms);
+    m->activity = fsqrtf(m->act_ms);
 
     // speed proxy: integrate dynamic accel, leak to bound drift, ZUPT when still
     m->vel[0] += dx * m->dt;  m->vel[1] += dy * m->dt;  m->vel[2] += dz * m->dt;
     float keep = 1.0f - m->leak;
     if (m->activity < m->zupt_thresh) keep *= 0.5f;   // fast bleed when at rest
     m->vel[0] *= keep;  m->vel[1] *= keep;  m->vel[2] *= keep;
-    m->speed = sqrtf(m->vel[0]*m->vel[0] + m->vel[1]*m->vel[1] + m->vel[2]*m->vel[2]);
+    m->speed = fsqrtf(m->vel[0]*m->vel[0] + m->vel[1]*m->vel[1] + m->vel[2]*m->vel[2]);
 
     if (m->n < 0xFFFFFFFFu) m->n++;
 }
