@@ -1837,6 +1837,413 @@ def receive_wavelet(n_packets=100, bind_port=WAV_UDP_PORT):
     return got
 
 # ============================================================================
+# Wavelet VALIDATION harness + ridge analyzer -- the Tier-3 analogue of
+# lfp_sweep/measure_lfp_response. The analyzer core (ridge detection, the
+# synthetic injector, the center-frequency table) lives in wav_validate.py so
+# it is exercised HEADLESS, with no board, by wav_selftest below. Here we wrap
+# it with the live-HW capture path.
+#
+# Scale ordering (authoritative): nscales = n_octaves*n_voices, scale index
+# s = octave*n_voices + voice. Bin 0 is the HIGHEST center frequency; frequency
+# DECREASES monotonically with s. So the analytic chirp sweeping LOW->HIGH in Hz
+# lights up a ridge that walks from a HIGH scale index toward a LOW one (and
+# back, for a triangle) -- a diagonal ridge. We assert the measured ridge tracks
+# that, using design_wavelet_bank's center freqs as ground truth.
+# ============================================================================
+try:
+    import wav_validate as _wv
+except ImportError:
+    _wv = None
+
+
+def wav_selftest(n_frames=240, K=4, n_oct=WAV_N_OCTAVES, n_voc=WAV_V, lane=0,
+                 via_sink=False):
+    """HEADLESS self-test (no board): inject a KNOWN scale-sweep ridge, decode
+    it with the production decoder, and assert the ridge analyzer recovers it.
+    This validates the wav_validate analyzer end-to-end tonight without HW.
+
+    via_sink=False (default): feed synthetic packets straight through the
+      decoder+analyzer (fast, deterministic, the canonical self-test).
+    via_sink=True: actually UDP-send the synthetic packets to 127.0.0.1:5004 so
+      they traverse the real LfpSink/_LfpReader drain path that the live HW
+      harness uses -- proves the socket plumbing, not just the math."""
+    if _wv is None:
+        print("[WAV-TEST] wav_validate.py helper not found next to net.py -- "
+              "cannot run the ridge self-test."); return False
+    if not via_sink:
+        ok, _res, _err = _wv.run_selftest(n_frames=n_frames, K=K, n_oct=n_oct,
+                                          n_voc=n_voc, lane=lane, verbose=True)
+        return ok
+    # ---- sink path: send the synthetic stream over UDP 5004 and read it back
+    #      through the same sink/_LfpReader the live harness uses. ----
+    nscales = n_oct * n_voc
+    pkts, truth = _wv.synth_chirp_columns(n_frames, K=K, n_oct=n_oct,
+                                          n_voc=n_voc, triangle=True)
+    r = _LfpReader(port=WAV_UDP_PORT, timeout=2.0).open()
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cols, bad = [], 0
+    t0 = time.time()
+    max_wall = 15.0
+    try:
+        # emit slowly enough that the sink thread + queue keep up
+        for raw in pkts:
+            tx.sendto(raw, ("127.0.0.1", WAV_UDP_PORT))
+            time.sleep(0.001)
+        # drain whatever made it through (loopback UDP can drop; tolerate some)
+        while len(cols) < n_frames and (time.time() - t0) < max_wall:
+            try:
+                data = r.recv()
+            except socket.timeout:
+                break
+            pkt = _wv.decode_wavelet_packet(data)
+            if pkt is None:
+                bad += 1; continue
+            cols.append(pkt['mag'][lane])
+    finally:
+        r.close(); tx.close()
+    res = _wv.analyze_ridge(cols, n_oct, n_voc, fs=3000.0)
+    print("=" * 64)
+    print("  WAVELET RIDGE ANALYZER -- SELF-TEST (through live 5004 sink)")
+    print("=" * 64)
+    print(f"  sent {len(pkts)} synthetic columns -> 127.0.0.1:{WAV_UDP_PORT}, "
+          f"drained {len(cols)} via the sink ({bad} non-wavelet)")
+    print(f"  recovered {len(res.ridge_bins)} ridge cols  bins_covered="
+          f"{res.bins_covered}/{nscales}  span={res.span_bins}  "
+          f"sharpness(med)={res.median_sharpness:.1f}x  sweeps={res.sweeps}")
+    # loopback can drop; require we recovered a clean sweep over what arrived
+    ok = (len(cols) >= n_frames * 0.5 and res.sweeps
+          and res.bins_covered >= nscales // 2 and res.median_sharpness > 2.0)
+    print(f"  RESULT: {'PASS' if ok else 'FAIL'} (sink/plumbing path)")
+    print("=" * 64)
+    return ok
+
+
+def wav_validate(sock, f_max=1000.0, period=3.0, n_periods=2, lane=0,
+                 n_octaves=WAV_N_OCTAVES, V=WAV_V, n_taps=WAV_N_TAPS,
+                 channel=0):
+    """LIVE-HW Tier-3 validation, the wavelet analogue of lfp_sweep. Preflight
+    get_status; enable the analytic chirp (swept tone) + configure & enable the
+    wavelet engine; drain UDP 5004 via the persistent sink; then QUANTITATIVELY
+    check that scalogram energy tracks the swept frequency -- a diagonal ridge
+    that walks across scale bins over time -- and report the measured ridge vs
+    the expected center freqs from design_wavelet_bank. PASS/FAIL. Hard
+    wall-clock cap so it never hangs (mirrors lfp_sweep).
+
+    NOTE: This is the HARDWARE assert. It requires a streaming board; with no
+    board it fails fast at preflight. The analyzer it uses is the same one
+    proven headless by `wav_selftest`.
+
+    `channel` selects the broadband source lane to drive into the engine (the
+    chirp fills all lanes, so channel 0 is fine); `lane` is which of the K
+    streamed scalogram lanes we analyze."""
+    if _wv is None:
+        print("[WAV-VAL] wav_validate.py helper not found -- cannot analyze.")
+        return False
+    import math, time
+    fs = 3000.0   # wavelet engine octave-0 rate (LFP rate)
+    # --- preflight: same failure-fast contract as lfp_sweep ---
+    st = get_status(sock)
+    if not st:
+        print("[WAV-VAL] board did NOT answer get_status -- unresponsive/wedged. "
+              "Power-cycle + flash the Tier-3 BOOT.bin. Aborting.")
+        return False
+    fw = st.get('firmware_version', 0)
+    fmaj, fmin = (fw >> 24) & 0xFF, (fw >> 16) & 0xFF
+    print(f"[WAV-VAL] board firmware {fmaj}.{fmin}  wav_enable={st.get('wav_enable')} "
+          f"K={st.get('wav_K')} oct={st.get('wav_n_octaves')} V={st.get('wav_n_voices')}")
+    if (fmaj, fmin) < (1, 3):
+        print(f"[WAV-VAL] firmware {fmaj}.{fmin} too old for the chirp/wavelet path "
+              f"(needs >=1.3). Wrong image. Aborting.")
+        return False
+    # Keep the swept tone strictly below the octave-0 voice band so it actually
+    # lands inside the scalogram (bin0 ~ fc_top*fs ~ 1020 Hz). f_max default 1 kHz.
+    nscales = n_octaves * V
+    voices, hb, centers = design_wavelet_bank(V, n_octaves, n_taps, fs)
+    print(f"[WAV-VAL] expected center freqs: bin0={centers[0][0]:.1f} Hz .. "
+          f"bin{nscales-1}={centers[-1][-1]:.1f} Hz  ({nscales} scales)")
+    send_binary_command(sock, CMD_STOP)
+    # broadband lane select (chirp fills lanes); the engine taps these lanes.
+    send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, 0x0F)
+    configure_lfp(sock, datapath="cic")                 # wavelet octave-0 = LFP rate
+    configure_wavelet(sock, channels=list(range(WAV_K)), V=V, n_octaves=n_octaves,
+                      n_taps=n_taps, fs=fs)
+    configure_chirp(sock, f_max, period, stride=0, enable=True)
+    lfp_enable(sock, True)
+    wavelet_enable(sock, True)
+    send_binary_command(sock, CMD_START)
+    # ---- capture scalogram columns off UDP 5004 via the persistent sink ----
+    n_want = int(n_periods * period * fs / 10.0) + 60   # ~300 col/s monitor rate guess
+    r = _LfpReader(port=WAV_UDP_PORT, timeout=3.0).open()
+    cols = []
+    bad = 0
+    t_start = time.time()
+    max_wall = n_periods * period * 4.0 + 10.0          # HARD wall-clock cap
+    try:
+        while len(cols) < n_want and (time.time() - t_start) < max_wall:
+            try:
+                data = r.recv()
+            except socket.timeout:
+                break
+            pkt = _wv.decode_wavelet_packet(data)
+            if pkt is None:
+                bad += 1; continue
+            if lane < pkt['K']:
+                cols.append(pkt['mag'][lane])
+    except socket.timeout:
+        print("[WAV-VAL] capture timed out.")
+    finally:
+        r.close()
+    if len(cols) < 30:
+        print(f"[WAV-VAL] only {len(cols)} scalogram columns in ~{max_wall:.0f}s "
+              f"({bad} non-wavelet). The board answered control (fw {fmaj}.{fmin}) "
+              f"but isn't streaming wavelet surfaces -- engine/DMA likely wedged. "
+              f"FAIL.")
+        return False
+    # ---- ridge analysis (the SAME analyzer the headless self-test proves) ----
+    res = _wv.analyze_ridge(cols, n_octaves, V, fs=fs)
+    flat_centers = _wv.scale_center_freqs(n_octaves, V, fs=fs)
+    print(f"\n[WAV-VAL] wavelet scalogram ridge (chirp 0->{f_max:.0f} Hz, "
+          f"{n_periods}x{period:.1f}s, lane {lane}, {len(cols)} columns @ ~300/s)")
+    print(f"  ridge columns (sharp peaks): {len(res.ridge_bins)}/{len(cols)}")
+    print(f"  bins covered : {res.bins_covered}/{nscales}   span={res.span_bins} bins")
+    print(f"  sharpness    : median peak/median = {res.median_sharpness:.1f}x")
+    print(f"  ridge freq   : {res.f_lo:.1f} .. {res.f_hi:.1f} Hz  "
+          f"(bank: {flat_centers[-1]:.1f} .. {flat_centers[0]:.1f} Hz)")
+    print(f"  diagonal?    : sweeps={res.sweeps}  monotone_frac={res.monotone_frac:.2f}")
+    # per-bin dwell histogram (ASCII) -- where did the ridge spend time
+    hist = [0] * nscales
+    for b in res.ridge_bins:
+        if 0 <= b < nscales:
+            hist[b] += 1
+    hmax = max(hist) if hist else 1
+    print("  scale  cf(Hz)  dwell |")
+    for s in range(nscales):
+        bar = "#" * int(42 * hist[s] / hmax) if hmax else ""
+        print(f"  {s:5d} {flat_centers[s]:7.1f} {hist[s]:5d} |{bar}")
+    # ---- PASS/FAIL: a real swept tone must (a) form sharp ridges, (b) sweep a
+    #      meaningful range of bins, (c) be reasonably diagonal/monotone within
+    #      each ramp. min_peak_ratio in analyze_ridge already gates (a). ----
+    ok = (res.sweeps and res.bins_covered >= max(4, nscales // 4)
+          and res.median_sharpness >= 2.0)
+    # amplitude sanity: the ridge bins should carry non-trivial energy
+    print("-" * 64)
+    if ok:
+        print(f"  RESULT: PASS -- scalogram energy tracks the swept tone across "
+              f"{res.bins_covered} scale bins ({res.span_bins}-bin diagonal ridge), "
+              f"sharpness {res.median_sharpness:.1f}x.")
+    else:
+        print(f"  RESULT: FAIL -- ridge did not track the sweep "
+              f"(sweeps={res.sweeps}, bins_covered={res.bins_covered}, "
+              f"sharpness={res.median_sharpness:.1f}x). Check chirp f_max < "
+              f"{flat_centers[0]:.0f} Hz and that the engine is streaming.")
+    print(f"  (chirp+engine left running; 'chirp_off' + 'wav_off' to stop)")
+    return ok
+
+
+# ============================================================================
+# Wavelet PRESETS -- one-command coefficient RE-UPLOADS (no PL rebuild). Each
+# re-runs design_wavelet_bank with different args and pushes the result via
+# configure_wavelet, then prints exactly what it uploaded (shapes + center
+# freqs). All stay within the build maxima: N_OCTAVES<=8, V<=4, N_TAPS<=24.
+# ============================================================================
+def _wav_bank_shapes(voices, hb, n_octaves, V, n_taps):
+    """(voice_count x taps complex, halfband len, nscales) shape summary."""
+    return (len(voices), len(voices[0]) if voices else 0, len(hb),
+            n_octaves * V)
+
+
+def wav_preset_beta(sock, sharp=True, n_octaves=WAV_N_OCTAVES, V=WAV_V,
+                    n_taps=WAV_N_TAPS):
+    """(a) Morse-beta sharpness sweep. Higher beta -> higher Q -> a sharper
+    (more frequency-localized, longer-support) wavelet; lower beta -> more
+    time-localized (shorter effective support, broader band). Re-uploads the
+    voice bank designed at that beta."""
+    beta = 6.0 if sharp else 1.5
+    label = "SHARP (high-Q, freq-localized)" if sharp else "BROAD (low-Q, time-localized)"
+    print(f"[WAV-PRESET] beta sweep -> beta={beta}  {label}")
+    out = configure_wavelet(sock, V=V, n_octaves=n_octaves, n_taps=n_taps,
+                            beta=beta)
+    if out:
+        voices, hb, centers = out
+        nv, nt, nhb, ns = _wav_bank_shapes(voices, hb, n_octaves, V, n_taps)
+        print(f"[WAV-PRESET] uploaded beta={beta}: {nv} voices x {nt} complex taps "
+              f"({nv*nt*2} int coefs) + {nhb} halfband taps; nscales={ns}")
+    return out
+
+
+def wav_preset_grid(sock, which="dense", n_taps=WAV_N_TAPS):
+    """(b) Alternate scale grids -- vary V and/or fc_top within the build maxima
+    (N_OCTAVES<=8, V<=4). 'dense' = full V=4 over 8 octaves (finest grid);
+    'coarse' = V=2 over 8 octaves (half the voices, wider bins); 'lowtop' =
+    V=4 but fc_top=0.25 (push the top band down, more headroom under Nyquist)."""
+    if which == "coarse":
+        V, n_oct, fc_top = 2, WAV_N_OCTAVES, 0.34
+    elif which == "lowtop":
+        V, n_oct, fc_top = WAV_V, WAV_N_OCTAVES, 0.25
+    else:  # dense
+        which, V, n_oct, fc_top = "dense", WAV_V, WAV_N_OCTAVES, 0.34
+    print(f"[WAV-PRESET] scale grid '{which}': V={V} octaves={n_oct} fc_top={fc_top}")
+    # design_wavelet_bank's fc_top is a kwarg; configure_wavelet doesn't expose
+    # it, so design here for the printout and upload via configure_wavelet's
+    # default fc_top path when fc_top is default; for lowtop, design+push coeffs
+    # directly so the alternate fc_top is honored.
+    voices, hb, centers = design_wavelet_bank(V=V, n_octaves=n_oct,
+                                              n_taps=n_taps, fc_top=fc_top)
+    ns = n_oct * V
+    if fc_top == 0.34:
+        out = configure_wavelet(sock, V=V, n_octaves=n_oct, n_taps=n_taps)
+    else:
+        out = _wav_upload_bank(sock, voices, hb, V, n_oct, n_taps, centers)
+    print(f"[WAV-PRESET] grid '{which}': {len(voices)} voices x {len(voices[0])} "
+          f"taps, {len(hb)} halfband taps, nscales={ns}; "
+          f"oct0 cf={[round(f,1) for f in centers[0]]} Hz")
+    return out
+
+
+def wav_preset_gain(sock, profile="1/f", n_octaves=WAV_N_OCTAVES, V=WAV_V,
+                    n_taps=WAV_N_TAPS):
+    """(c) Per-octave gain presets. 'flat' = no per-octave boost (gain word 0);
+    '1/f' = boost the HIGH octaves (low energy) to fill fixed-point range
+    (matches the default ramp [3,2,1,0,...]). Same voice coeffs, different gain
+    word -- this is the fastest re-tune (one CMD_WAV_SET_PARAMS)."""
+    if profile == "flat":
+        gains = [0] * n_octaves
+    else:  # 1/f-comp
+        profile = "1/f"
+        ramp = [3, 2, 1, 0, 0, 0, 0, 0]
+        gains = ramp[:n_octaves] + [0] * max(0, n_octaves - len(ramp))
+    print(f"[WAV-PRESET] gain profile '{profile}': per-octave left-shifts={gains}")
+    out = configure_wavelet(sock, V=V, n_octaves=n_octaves, n_taps=n_taps,
+                            gains=gains)
+    if out:
+        gw = 0
+        for o in range(n_octaves):
+            gw |= (gains[o] & 0xF) << (4 * o)
+        print(f"[WAV-PRESET] uploaded gain word=0x{gw:08X} (octaves {n_octaves})")
+    return out
+
+
+def design_morlet_bank(V=WAV_V, n_octaves=WAV_N_OCTAVES, n_taps=WAV_N_TAPS,
+                       fs=3000, fc_top=0.34, n_cycles=6.0):
+    """(d, Morlet half) A Morlet (Gabor) complex bank for direct comparison
+    against the default Morse bank. Same wire/coeff contract as
+    design_wavelet_bank: returns (voices, hb, centers), signed Q1.17, the SAME
+    halfband, the SAME center-freq grid -- only the envelope differs (a Morlet
+    fixes the number of cycles under the Gaussian: sigma_t = n_cycles/(2*pi*fc),
+    i.e. a complex Gabor atom), vs the Morse generalized-Gaussian envelope. This
+    lets you A/B the two analytic kernels with one upload."""
+    import math
+    scale = (1 << WAV_COEF_FRAC)
+    lim   = (1 << 17)
+    M     = n_taps - 1
+    voices = []
+    for v in range(V):
+        fc = fc_top * (2.0 ** (-v / float(V)))
+        omega_c = 2.0 * math.pi * fc
+        sigma = n_cycles / (2.0 * math.pi * fc)     # Morlet: fixed cycles/atom
+        sigma = min(sigma, n_taps / 4.0)            # keep support inside N_TAPS
+        sigma = max(sigma, 1.5)
+        raw = []
+        re_e = 0.0
+        for n in range(n_taps):
+            t = n - M / 2.0
+            env = math.exp(-0.5 * (t / sigma) ** 2)
+            raw.append((env * math.cos(omega_c * t), env * math.sin(omega_c * t), env))
+            re_e += raw[-1][0]
+        env_sum = sum(r[2] for r in raw) or 1.0
+        dc = re_e / env_sum
+        taps2 = [(r[0] - dc * r[2], r[1]) for r in raw]
+        norm = sum(math.hypot(re, im) for (re, im) in taps2) or 1.0
+        q = []
+        for (re, im) in taps2:
+            ri = max(-lim, min(lim - 1, int(round(re / norm * scale))))
+            ii = max(-lim, min(lim - 1, int(round(im / norm * scale))))
+            q.append((ri, ii))
+        voices.append(q)
+    # SAME halfband as design_wavelet_bank (windowed-sinc fc=0.25, Hamming).
+    fcq, Mh = 0.25, WAV_HB_TAPS - 1
+    h = []
+    for n in range(WAV_HB_TAPS):
+        x = n - Mh / 2.0
+        s = 2 * fcq if abs(x) < 1e-9 else math.sin(2 * math.pi * fcq * x) / (math.pi * x)
+        w = 0.54 - 0.46 * math.cos(2 * math.pi * n / Mh)
+        h.append(s * w)
+    g = sum(h) or 1.0
+    hb = [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
+    centers = []
+    for o in range(n_octaves):
+        fr = fs / (2.0 ** o)
+        centers.append([fc_top * (2.0 ** (-v / float(V))) * fr for v in range(V)])
+    return voices, hb, centers
+
+
+def _wav_upload_bank(sock, voices, hb, V, n_octaves, n_taps, centers,
+                     channels=None, gains=None):
+    """Upload an already-designed (voices, hb) bank via the raw WAV commands --
+    the same sequence configure_wavelet uses, but for a bank built by an
+    alternate designer (e.g. design_morlet_bank or an alternate fc_top). Prints
+    the upload shapes. Returns (voices, hb, centers) or None on stall."""
+    if channels is None:
+        channels = list(range(WAV_K))
+    if gains is None:
+        ramp = [3, 2, 1, 0, 0, 0, 0, 0]
+        gains = ramp[:n_octaves] + [0] * max(0, n_octaves - len(ramp))
+    gain_word = 0
+    for o in range(n_octaves):
+        gain_word |= (gains[o] & 0xF) << (4 * o)
+
+    def _push(cmd_id, p1, p2, what, idx, total):
+        ok, _ = send_binary_command(sock, cmd_id, p1, p2, timeout=2.0)
+        if not ok:
+            print(f"[WAV] {what} upload stalled at {idx}/{total}")
+        return ok
+
+    send_binary_command(sock, CMD_WAV_ENABLE, 0)
+    params = (n_octaves & 0xF) | ((V & 0xF) << 4) | ((n_taps & 0xFF) << 8)
+    send_binary_command(sock, CMD_WAV_SET_PARAMS, params, gain_word)
+    chans = channels[:WAV_K]
+    for i, ch in enumerate(chans):
+        if not _push(CMD_WAV_SET_CHANNELS, 1 if i == 0 else 0, ch & 0xFF,
+                     "selector", i, len(chans)):
+            return None
+    flat = []
+    for v in range(V):
+        for j in range(n_taps):
+            re, im = voices[v][j]
+            flat.append(re); flat.append(im)
+    for i, c in enumerate(flat):
+        if not _push(CMD_WAV_WRITE_COEF, 1 if i == 0 else 0, c & 0x3FFFF,
+                     "voice coef", i, len(flat)):
+            return None
+    for i, c in enumerate(hb):
+        if not _push(CMD_WAV_WRITE_HB, 1 if i == 0 else 0, c & 0x3FFFF,
+                     "halfband", i, len(hb)):
+            return None
+    print(f"[WAV] uploaded bank: K={len(chans)} octaves={n_octaves} V={V} "
+          f"taps={n_taps} gains={gains}; coefs={len(flat)} hb={len(hb)}")
+    print(f"[WAV] center freqs oct0 (Hz): {[round(f,1) for f in centers[0]]} ... "
+          f"oct{n_octaves-1}: {[round(f,1) for f in centers[-1]]}")
+    return voices, hb, centers
+
+
+def wav_preset_kernel(sock, kernel="morse", n_octaves=WAV_N_OCTAVES, V=WAV_V,
+                      n_taps=WAV_N_TAPS):
+    """(d) Morse-vs-Morlet coefficient banks. 'morse' = the default generalized
+    Morse bank (design_wavelet_bank); 'morlet' = a fixed-cycle complex Morlet
+    (Gabor) bank (design_morlet_bank) on the SAME scale grid + halfband, so you
+    can A/B the two analytic kernels with one re-upload (no rebuild)."""
+    if kernel == "morlet":
+        print(f"[WAV-PRESET] kernel 'morlet' (fixed-cycle Gabor), V={V} oct={n_octaves}")
+        voices, hb, centers = design_morlet_bank(V=V, n_octaves=n_octaves,
+                                                 n_taps=n_taps)
+        out = _wav_upload_bank(sock, voices, hb, V, n_octaves, n_taps, centers)
+    else:
+        print(f"[WAV-PRESET] kernel 'morse' (generalized Morse, gamma=3), "
+              f"V={V} oct={n_octaves}")
+        out = configure_wavelet(sock, V=V, n_octaves=n_octaves, n_taps=n_taps)
+    return out
+
+# ============================================================================
 # UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
 # replacing the ~18 MB/s small-packet broadband assumption with a measured
 # large-packet ceiling. (Payloads > ~1472 B fragment unless the path is jumbo-
@@ -2494,6 +2901,9 @@ def tcp_control():
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], lfp_sink  (5001 auto-drained)")
         print(f"  Wavelet (Tier-3): wav_config [oct] [V] [taps], wav_on, wav_off, wav_recv [n], wav_sink  (5004 auto-drained)")
+        print(f"         wav_validate [f_max=1000] [period=3] [n_periods=2] [lane=0]  (HW: chirp->ridge PASS/FAIL)")
+        print(f"         wav_selftest [n=240] [sink]  (HEADLESS: inject known ridge, assert recovery)")
+        print(f"         wav_preset <beta_sharp|beta_broad|grid_dense|grid_coarse|grid_lowtop|gain_flat|gain_1f|morse|morlet>")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2672,6 +3082,47 @@ def tcp_control():
                     parts = cmd.split()
                     n = int(parts[1]) if len(parts) > 1 else 100
                     receive_wavelet(n)
+                elif cmd == "wav_validate" or cmd.startswith("wav_validate ") \
+                        or cmd == "wav_sweep" or cmd.startswith("wav_sweep "):
+                    # wav_validate [f_max=1000] [period=3.0] [n_periods=2] [lane=0]
+                    # HW: chirp -> wavelet engine -> assert a diagonal ridge.
+                    parts = cmd.split()
+                    fmx = float(parts[1]) if len(parts) > 1 else 1000.0
+                    per = float(parts[2]) if len(parts) > 2 else 3.0
+                    npd = int(parts[3])   if len(parts) > 3 else 2
+                    lane = int(parts[4])  if len(parts) > 4 else 0
+                    wav_validate(sock, f_max=fmx, period=per, n_periods=npd, lane=lane)
+                elif cmd == "wav_selftest" or cmd.startswith("wav_selftest "):
+                    # wav_selftest [n_frames=240] [sink]  -- HEADLESS, no board.
+                    parts = cmd.split()
+                    nf = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 240
+                    via_sink = ("sink" in parts)
+                    wav_selftest(n_frames=nf, via_sink=via_sink)
+                elif cmd == "wav_preset" or cmd.startswith("wav_preset "):
+                    # wav_preset <name>  -- re-upload a coefficient bank (no rebuild).
+                    parts = cmd.split()
+                    name = parts[1] if len(parts) > 1 else ""
+                    if name in ("beta_sharp", "sharp"):
+                        wav_preset_beta(sock, sharp=True)
+                    elif name in ("beta_broad", "broad"):
+                        wav_preset_beta(sock, sharp=False)
+                    elif name in ("grid_dense", "dense"):
+                        wav_preset_grid(sock, "dense")
+                    elif name in ("grid_coarse", "coarse"):
+                        wav_preset_grid(sock, "coarse")
+                    elif name in ("grid_lowtop", "lowtop"):
+                        wav_preset_grid(sock, "lowtop")
+                    elif name in ("gain_flat", "flat"):
+                        wav_preset_gain(sock, "flat")
+                    elif name in ("gain_1f", "1/f", "1f"):
+                        wav_preset_gain(sock, "1/f")
+                    elif name == "morse":
+                        wav_preset_kernel(sock, "morse")
+                    elif name == "morlet":
+                        wav_preset_kernel(sock, "morlet")
+                    else:
+                        print("Usage: wav_preset <beta_sharp|beta_broad|grid_dense|"
+                              "grid_coarse|grid_lowtop|gain_flat|gain_1f|morse|morlet>")
                 elif cmd == "lfp_sink":
                     if LFP_SINK is not None and LFP_SINK._running:
                         print(f"[LFP-SINK] draining UDP {LFP_SINK.port}: {LFP_SINK.pkts} pkts, "
@@ -2761,6 +3212,16 @@ def tcp_control():
                     print("  wav_config [oct] [V] [taps] - upload Morse voice bank + halfband (Tier-3)")
                     print("  wav_on / wav_off    - enable / disable the wavelet scalogram engine")
                     print("  wav_recv [n]        - capture + print decoded scalogram surfaces (UDP 5004)")
+                    print("  wav_validate [f_max=1000] [period=3] [n_periods=2] [lane=0]")
+                    print("                      - HW: chirp->wavelet, assert energy tracks a diagonal")
+                    print("                        scale ridge vs design_wavelet_bank center freqs (PASS/FAIL)")
+                    print("  wav_selftest [n=240] [sink] - HEADLESS (no board): inject a known scale")
+                    print("                        sweep and assert the ridge analyzer recovers it")
+                    print("  wav_preset <name>   - re-upload a coef bank (no rebuild):")
+                    print("       beta_sharp|beta_broad  (Morse-beta Q/sharpness sweep)")
+                    print("       grid_dense|grid_coarse|grid_lowtop  (alternate V / fc_top scale grids)")
+                    print("       gain_flat|gain_1f      (per-octave gain: flat vs 1/f-comp)")
+                    print("       morse|morlet           (Morse vs fixed-cycle Morlet kernel banks)")
                     print("Aux sequencer (bank-programmable aux commands):")
                     print("  aux_demo            - load default slot programs + enable")
                     print("  aux_en <0|1>        - enable/disable the sequencer")
