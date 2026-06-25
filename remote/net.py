@@ -75,6 +75,8 @@ LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
 # port 5001 bound + drained for the whole session so the host never replies ICMP
 # port-unreachable to the board while the LFP stream runs.
 LFP_SINK = None
+WAV_SINK = None      # persistent sink for the wavelet monitor stream (UDP 5004)
+_SINKS = {}          # port -> running sink, so _LfpReader finds the right one for its port
 LFP_MAGIC_LOW = 0x1F1FBEEF
 LFP_MAGIC_HIGH = 0xCAFEBABE
 LFP_COEF_FRAC = 17          # Q1.17 coefficient fixed-point
@@ -1415,20 +1417,21 @@ class LfpSink:
             s.bind(('', self.port))
             s.settimeout(0.5)
         except OSError as e:
-            print(f"[LFP-SINK] could NOT bind UDP {self.port}: {e} -- board may get "
-                  f"ICMP-unreachable storms while LFP streams.")
+            print(f"[UDP-SINK] could NOT bind UDP {self.port}: {e} -- board may get "
+                  f"ICMP-unreachable storms while that stream runs.")
             return False
         self._sock = s
         self._running = True
-        self._thread = threading.Thread(target=self._run, name="lfp-sink", daemon=True)
+        _SINKS[self.port] = self
+        self._thread = threading.Thread(target=self._run, name=f"udp-sink-{self.port}", daemon=True)
         self._thread.start()
-        print(f"[LFP-SINK] draining UDP {self.port} (prevents ICMP-unreachable storms to the board)")
+        print(f"[UDP-SINK] draining UDP {self.port} (prevents ICMP-unreachable storms to the board)")
         return True
 
     def _run(self):
         while self._running:
             try:
-                data, addr = self._sock.recvfrom(4096)
+                data, addr = self._sock.recvfrom(65535)
             except socket.timeout:
                 continue
             except OSError:
@@ -1464,10 +1467,13 @@ class _LfpReader:
         self.timeout = timeout
         self._q = None
         self._sock = None
+        self._sink = None
 
     def open(self):
-        if LFP_SINK is not None and LFP_SINK._running and self.port == LFP_SINK.port:
-            self._q = LFP_SINK.subscribe()
+        sink = _SINKS.get(self.port)
+        if sink is not None and sink._running:
+            self._sink = sink
+            self._q = sink.subscribe()
         else:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1483,12 +1489,13 @@ class _LfpReader:
                 return self._q.get(timeout=self.timeout)
             except queue.Empty:
                 raise socket.timeout()
-        data, _ = self._sock.recvfrom(4096)
+        data, _ = self._sock.recvfrom(65535)
         return data
 
     def close(self):
         if self._q is not None:
-            LFP_SINK.unsubscribe(self._q)
+            if self._sink is not None:
+                self._sink.unsubscribe(self._q)
             self._q = None
         if self._sock is not None:
             self._sock.close()
@@ -1789,19 +1796,12 @@ def receive_wavelet(n_packets=100, bind_port=WAV_UDP_PORT):
     lane, n_scales complex int32 (re,im). Reference receiver for the host /
     soft-core consumer. (The full-resolution DDR path is v2; this is the
     rate-limited monitor.)"""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-    except OSError:
-        pass
-    s.bind(('', bind_port))
-    s.settimeout(3.0)
+    r = _LfpReader(port=bind_port, timeout=3.0).open()   # reads from the 5004 sink if running
     got = bad = 0
     last_seq = None
     try:
         while got < n_packets:
-            data, _ = s.recvfrom(65535)
+            data = r.recv()
             if len(data) < 32:
                 bad += 1; continue
             (mlo, mhi, ts, _ts_hi, w4, seq, w6, gain) = struct.unpack('<IIIIIIII', data[:32])
@@ -1832,7 +1832,7 @@ def receive_wavelet(n_packets=100, bind_port=WAV_UDP_PORT):
     except socket.timeout:
         print("[WAV] receive timeout (engine enabled? jumbo MTU on this host?)")
     finally:
-        s.close()
+        r.close()
     print(f"[WAV] received {got} surfaces, {bad} non-wavelet/short datagrams")
     return got
 
@@ -2493,7 +2493,7 @@ def tcp_control():
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], lfp_sink  (5001 auto-drained)")
-        print(f"  Wavelet (Tier-3): wav_config [oct] [V] [taps], wav_on, wav_off, wav_recv [n]")
+        print(f"  Wavelet (Tier-3): wav_config [oct] [V] [taps], wav_on, wav_off, wav_recv [n], wav_sink  (5004 auto-drained)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2678,6 +2678,12 @@ def tcp_control():
                               f"{LFP_SINK.bytes/1024.0:.0f} KB, last from {LFP_SINK.last_addr}")
                     else:
                         print("[LFP-SINK] not running")
+                elif cmd == "wav_sink":
+                    if WAV_SINK is not None and WAV_SINK._running:
+                        print(f"[WAV-SINK] draining UDP {WAV_SINK.port}: {WAV_SINK.pkts} pkts, "
+                              f"{WAV_SINK.bytes/1024.0:.0f} KB, last from {WAV_SINK.last_addr}")
+                    else:
+                        print("[WAV-SINK] 5004 not running")
                 elif cmd == "aux":
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
@@ -2806,6 +2812,11 @@ if __name__ == "__main__":
     # (not in tcp_control) so it drains regardless of the TCP control state.
     LFP_SINK = LfpSink()
     LFP_SINK.start()
+    # Same for the wavelet monitor stream (UDP 5004): an unconsumed port would
+    # ICMP-storm the board the moment wav_on streams (the LFP lesson). Registered
+    # by port, so wav_recv reads from this sink instead of binding 5004 itself.
+    WAV_SINK = LfpSink(port=WAV_UDP_PORT)
+    WAV_SINK.start()
 
     tcp_control()
     
