@@ -62,6 +62,11 @@ CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband ch
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
+# Movement (accel-extract) engine
+CMD_MOTION_ENABLE     = 0xA0  # param1 = 0/1
+CMD_MOTION_SET_CONFIG = 0xA1  # param1 = headstage | ema_shift<<8; param2 = decim_M (packets/triplet)
+CMD_MOTION_SET_PARAMS = 0xA2  # param1 = gravity_fc (mHz); param2 = zupt thresh (mg)
+MOVEMENT_UDP_PORT     = 5005  # decimated accel / movement block stream
 
 UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
 LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
@@ -1361,6 +1366,60 @@ def lfp_enable(sock, on=True):
 
 
 # ---------------------------------------------------------------------------
+# Movement accel-extract engine (PL pulls the 3 accel axes off the rotating aux
+# sweep, decimates, and DMAs [x,y,z] blocks; the PS runs the speed/activity DSP).
+# ---------------------------------------------------------------------------
+def motion_enable(sock, on=True):
+    send_binary_command(sock, CMD_MOTION_ENABLE, 1 if on else 0)
+    print(f"[MOVE] {'ENABLED' if on else 'disabled'}")
+
+def motion_config(sock, headstage=0, ema_shift=4, decim_M=30):
+    p1 = (headstage & 0x3) | ((ema_shift & 0xF) << 8)
+    send_binary_command(sock, CMD_MOTION_SET_CONFIG, p1, decim_M & 0x7FFF)
+    print(f"[MOVE] headstage={headstage} ema_shift={ema_shift} decim_M={decim_M}")
+
+def motion_set_params(sock, gravity_fc_hz=0.5, zupt_g=0.02):
+    send_binary_command(sock, CMD_MOTION_SET_PARAMS,
+                        int(gravity_fc_hz * 1000) & 0xFFFF, int(zupt_g * 1000) & 0xFFFF)
+    print(f"[MOVE] gravity_fc={gravity_fc_hz} Hz zupt={zupt_g} g")
+
+def receive_accel(n_blocks=50, bind_port=MOVEMENT_UDP_PORT):
+    """Receive decimated accel/movement blocks on UDP 5005 and print [x,y,z] rows.
+    Block = 6-word header (magic 0x1F1FACE1, 0xCAFEBABE, 64-bit ts, cfg, seq) then
+    N triplets, each 2 words: {y<<16|x}, {z}. Samples are SIGNED centered counts."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+    s.bind(('', bind_port))
+    s.settimeout(5.0)
+    got = 0
+    try:
+        while got < n_blocks:
+            data, _ = s.recvfrom(65536)
+            if len(data) < 24:
+                continue
+            mlo, mhi, ts_lo, ts_hi, cfg, seq = struct.unpack('<IIIIII', data[:24])
+            if mlo != 0x1F1FACE1 or mhi != 0xCAFEBABE:
+                continue
+            n_trip = cfg & 0xFF
+            decim_M = (cfg >> 8) & 0x7FFF
+            ts = (ts_hi << 32) | ts_lo
+            words = struct.unpack(f'<{(len(data) - 24) // 4}I', data[24:])
+            trip0 = None
+            if n_trip and len(words) >= 2:
+                x = struct.unpack('<h', struct.pack('<H', words[0] & 0xFFFF))[0]
+                y = struct.unpack('<h', struct.pack('<H', words[0] >> 16))[0]
+                z = struct.unpack('<h', struct.pack('<H', words[1] & 0xFFFF))[0]
+                trip0 = (x, y, z)
+            print(f"[MOVE] seq={seq} ts={ts} N={n_trip} decimM={decim_M} first={trip0}")
+            got += 1
+    except socket.timeout:
+        print(f"[MOVE] timeout after {got} blocks")
+    finally:
+        s.close()
+    return got
+
+
+# ---------------------------------------------------------------------------
 # Persistent LFP UDP sink (port 5001).
 #
 # An UNCONSUMED UDP port makes the host kernel reply ICMP "port unreachable" to
@@ -1794,7 +1853,7 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 288:
+    if len(data) != 308:
         print(f"[TCP] Invalid status response length: {len(data)} (expected 220)")
         return None
     
@@ -1859,6 +1918,11 @@ def get_status(sock):
      first_drop_pkt, last_drop_pkt, memp_num_pbuf) = \
         struct.unpack('<IIiIIiIII', data[220:256])
     drop_ring = struct.unpack('<8I', data[256:288])
+
+    # Movement accel-extract engine config + live estimate (20 bytes)
+    (move_enable, move_headstage, move_ema_shift, _move_rsv,
+     move_decim_M, move_overrun, move_blocks, move_speed, move_activity) = \
+        struct.unpack('<BBBBHHIff', data[288:308])
 
     status = {
         'version': version,
@@ -1944,6 +2008,15 @@ def get_status(sock):
         'chirp_stride': chirp_stride,
         'chirp_fspan': chirp_fspan,
         'chirp_rate': chirp_rate,
+        # Movement accel-extract engine
+        'move_enable': bool(move_enable),
+        'move_headstage': move_headstage,
+        'move_ema_shift': move_ema_shift,
+        'move_decim_M': move_decim_M,
+        'move_overrun': bool(move_overrun),
+        'move_blocks': move_blocks,
+        'move_speed': move_speed,
+        'move_activity': move_activity,
     }
 
     return status
