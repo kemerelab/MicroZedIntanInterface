@@ -88,6 +88,7 @@ module lfp_fir_decimator #(
     output logic [CH_W-1:0]             out_channel,    // lane*N_SLOTS + slot
     output logic [OUT_W-1:0]            out_data,       // decimated sample (signed)
     output logic                        out_frame_start,// pulse at the first output of a frame
+    output logic                        frame_tick,     // pulse on the decimation tick (start of a frame)
     output logic                        busy,           // compute pass in progress
     output logic                        compute_overrun // sticky: a frame was dropped (budget exceeded)
 );
@@ -354,5 +355,9 @@ module lfp_fir_decimator #(
             out_frame_start <= mac_out & frame_first;
         end
     end
+
+    // Decimation tick -> frame boundary (lead-in pulse, ahead of the first
+    // out_valid). The LFP block uses this to write the packet header.
+    assign frame_tick = start_pass;
 
 endmodule

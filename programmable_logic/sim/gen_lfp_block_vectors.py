@@ -64,25 +64,47 @@ lanes = [l for l in range(N_LANES) if (LANE_MASK >> l) & 1]
 def s_at(p, s, l):
     return sig[p][s][l] if p >= 0 else 0
 
-emit = []
+# The PL now builds the COMPLETE LFP wire packet in BRAM: a 6-word header AHEAD
+# of each frame's decimated samples. Header (matches lfp_dsp_block.sv + net.py):
+#   w0 = LFP_MAGIC_LOW (0x1F1FBEEF), w1 = 0xCAFEBABE
+#   w2/w3 = 64-bit master timestamp of the last contributing broadband sample.
+#           The decimation tick at packet p stamps master count p (the broadband
+#           timestamp of packet p), so the frame triggered at p carries ts = p.
+#   w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24); overrun=0
+#   w5 = PL frame sequence number (++ per emitted frame, 0-indexed)
+LFP_MAGIC_LOW  = 0x1F1FBEEF
+LFP_MAGIC_HIGH = 0xCAFEBABE
+CFG_WORD = (LANE_MASK & 0xFF) | ((DECIM_R & 0xFF) << 8) | ((NUM_TAPS & 0xFF) << 16)  # overrun=0
+
+words = []
+frame_seq = 0
 for p in range(K_PACKETS):
     if (p % DECIM_R) != (DECIM_R - 1):
         continue
+    # ---- header (6 words) ----
+    ts = p                                       # master count of the contributing packet
+    words.append(LFP_MAGIC_LOW)
+    words.append(LFP_MAGIC_HIGH)
+    words.append(ts & 0xFFFFFFFF)
+    words.append((ts >> 32) & 0xFFFFFFFF)
+    words.append(CFG_WORD)
+    words.append(frame_seq)
+    frame_seq += 1
+    # ---- decimated samples (signed -> offset binary, packed 2/word) ----
+    emit = []
     for l in lanes:                       # engine emit order: lane asc, slot asc
         for s in range(N_SLOTS):
             acc = sum(coef[j] * s_at(p - j, s, l) for j in range(NUM_TAPS))
             r = (acc + ROUND) >> COEF_FRAC
             r = SMAX if r > SMAX else SMIN if r < SMIN else r
             emit.append((r + OFFSET) & 0xFFFF)        # signed -> offset binary
-
-# pack 2x16-bit -> 32-bit {high, low}; frames have even counts so no straddle.
-words = []
-for i in range(0, len(emit), 2):
-    words.append((emit[i + 1] << 16) | emit[i])
+    # pack 2x16-bit -> 32-bit {high, low}; frames have even sample counts (no straddle).
+    for i in range(0, len(emit), 2):
+        words.append((emit[i + 1] << 16) | emit[i])
 
 with open(f"{OUT}/lfp_blk_exp_words.hex", "w") as f:
     for w in words:
         f.write(to_hex(w, 32) + "\n")
 
-print(f"taps={NUM_TAPS} packets={K_PACKETS} frames={K_PACKETS // DECIM_R} "
-      f"lanes={lanes} outputs={len(emit)} bram_words={len(words)}")
+print(f"taps={NUM_TAPS} packets={K_PACKETS} frames={frame_seq} "
+      f"lanes={lanes} bram_words={len(words)} (incl {frame_seq}x6 header words)")

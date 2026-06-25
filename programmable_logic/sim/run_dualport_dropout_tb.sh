@@ -9,6 +9,8 @@ cd "$WORK" || exit 99
 
 xvlog -sv "$SRC/data_generator_core.sv" "$SRC/aux_command_sequencer.sv" \
       "$SRC/override_layer.sv" "$SRC/fifo_bram_interface.sv" \
+      "$SRC/lfp_fir_decimator.sv" "$SRC/cic_decimator.sv" "$SRC/cic_to_halfband.sv" \
+      "$SRC/lfp_halfband.sv" "$SRC/lfp_dsp_block.sv" \
       "$HERE/dualport_dropout_tb.sv" || exit 1
 xvlog "$SRC/data_generator_wrapper.v" "$SRC/CIPO_phase_selector.v" || exit 1
 xelab -debug off -timescale 1ns/1ps work.dualport_dropout_tb -s tb_snap || exit 1

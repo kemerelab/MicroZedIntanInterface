@@ -20,6 +20,12 @@ domain = platform.get_domain(name='standalone_ps7_cortexa9_0')
 domain.set_config('lib', lib_name='xiltimer', param='XILTIMER_tick_timer', value='ps7_scutimer_0')
 domain.set_lib('lwip220')
 domain.set_config('lib', lib_name='lwip220', param='lwip220_no_sys_no_timers', value='false')
+# TX headroom: the zero-copy PBUF_REF send path takes one TX BD + a heap header-
+# pbuf per packet; the defaults (64 descriptors / 128 KB heap) were occasionally
+# exhausted during ISR-stall catch-up bursts, surfacing as rare udp_sendto ERR_MEM
+# drops (v1.6 instrumentation: pbuf_alloc never failed, so it is NOT memp_n_pbuf).
+domain.set_config('lib', lib_name='lwip220', param='lwip220_n_tx_descriptors', value='256')
+domain.set_config('lib', lib_name='lwip220', param='lwip220_mem_size', value='262144')
 
 
 domain = platform.add_domain(cpu = "ps7_cortexa9_1",os = "standalone",

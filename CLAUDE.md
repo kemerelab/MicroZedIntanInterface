@@ -91,8 +91,17 @@ changing the others:
   MOSI/COPI words start at reg offset 4.
 - Status regs: read back starting at offset `(PL_N_CTRL_REGS*4)` = `(25*4)` (grew from
   `22*4` when the aux control regs landed at 22–24); see `STATUS_REG_*_OFFSET`.
-- BRAM: base `0x80000000`, 16384 × 32-bit words (64 KB).
+- BRAM: base `0x80000000`, 16384 × 32-bit words (64 KB). LFP output BRAM: base
+  `0x84000000` (same size), in the `axi_cdma_0/Data` space.
 - Packet: 10 header words + 18..140 data words depending on `channel_enable` (8-bit mask).
+- **LFP packet (PL-built):** the PL builds the complete LFP wire packet in the LFP output
+  BRAM — a **6-word header** (`w0=0x1F1FBEEF`, `w1=0xCAFEBABE`, `w2/w3=`64-bit master
+  timestamp of the last contributing broadband sample, `w4=lane_mask|(decim_R<<8)|
+  (num_taps<<16)|(overrun<<24)`, `w5=`PL frame seq) then the decimated samples — and the PS
+  just CDMAs the whole frame into a pbuf and sends it. The **LFP lane mask MIRRORS the
+  broadband `channel_enable` mask** (single source of truth: `data_generator_core.sv` drives
+  it from `channel_enable_reg`); `lfp_cfg[15:8]` and `CMD_LFP_SET_CHANNELS` are deprecated.
+  Keep this header in sync across `lfp_dsp_block.sv`, `network.c`, and `net.py::receive_lfp`.
 - **Rule — `get_status` reports everything configurable.** Any setting the host can
   change (a CTRL register or a command that alters behavior) must also be surfaced in
   `status_response_t`, so the host can always read back the full device configuration.
@@ -157,6 +166,16 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 
 ## Conventions & gotchas
 
+- **PL-first: ask "can the fabric solve this?" before changing the protocol or PS software.**
+  The PS is a single, bare-metal, **fully-polled, run-to-completion** core (no interrupts —
+  `platform.c` sets up only caches+UART, the CDMA runs `XAxiCdma_IntrDisable`). So PS-software
+  fixes (e.g. batching UDP packets) are band-aids that still load that one core; the PL can
+  usually restructure the data so the bottleneck disappears, deterministically. Example: the
+  per-packet timing jitter and the LFP/wavelet contention come from doing **3 separate polled
+  CDMA transfers** (broadband/LFP/DWT BRAMs) + 3 sends per cycle — the PL fix is to assemble
+  **all PL→PS data into one shared BRAM stream** so the PS does a *single* DMA + demux-by-magic
+  to the right UDP port (LFP adds ~10% data, DWT a little at the LFP rate — negligible vs the
+  3-way poll contention). Reach for protocol/software changes only after ruling out a PL one.
 - `vivado_project/` and `vitis_workspace/` are **generated and gitignored** — never commit
   them. Regenerate from the `scripts/` tcl/py files.
 - The PL crosses two clock domains (131.25 MHz AXI fabric ↔ 84 MHz PL data path) via
@@ -167,13 +186,27 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 - The PL data path (`data_generator`, 84 MHz) must be reset from the **84 MHz**
   `proc_sys_reset_0_84M`, **not** the AXI/175-domain reset — a cross-domain reset fails
   timing on ~20k endpoints. (Root-caused in `docs/routing_report.md`.)
-- **PS↔BRAM bulk reads are a three-way tension — validate any new result-BRAM read path on
-  hardware.** The CPU's `M_AXI_GP` long burst reads corrupt the 0xFF broadband stream;
-  single-beat `Xil_In32` reads are **slow** and starve the core-0 loop (~2100 reads ≈ 0.5 ms
-  for one STFT spectrum); **CDMA (BRAM→DDR over HP0)** is the fast path for the capture BRAM —
-  but a CDMA read of the STFT *result* BRAM **hung on real hardware**, forcing a rate-limited
-  single-beat fallback. So CDMA-from-BRAM is **not** a guaranteed drop-in for a new
-  analysis-result BRAM; prove the read path on HW before relying on it.
+- **PL→PS bulk data ALWAYS moves by DMA — never loop the CPU over BRAM or staging.** This is
+  a hard rule, not a preference. The CPU's `M_AXI_GP` long burst reads corrupt the 0xFF stream,
+  and single-beat `Xil_In32` reads (or word-by-word reads of the non-cacheable DMA staging
+  buffer) are **slow** and starve the core-0 loop — the cost scales with payload, so it blows
+  the 33 µs/packet budget as channels/scales grow (an LFP `Xil_In32` loop pushed recv→transmit
+  to ~63 µs; a wavelet 2048-word uncached staging repack pushed it to **2.6 ms**, 80× over).
+  Move bulk data by **AXI CDMA landed straight into the pbuf payload**; the cleanest form is to
+  have the **PL build the whole wire packet (header + payload) in its result BRAM** and the PS
+  just DMA+send it — exactly as the broadband path does (the PL writes the 10-word header in
+  `data_generator_core.sv`). **The LFP path now does this**: `lfp_dsp_block.sv` builds the
+  complete LFP wire packet (6-word header + decimated samples) in the LFP output BRAM, and
+  `network.c::lfp_stream_service` CDMAs each frame into a non-cacheable staging buffer
+  (`pl_dma_read_addr`) and sends a `PBUF_REF` — no PS header math, no `Xil_In32` sample loop.
+  Result/analysis BRAMs must be in the `axi_cdma_0/Data` address space in the BD (the wavelet
+  @0x90000000 is; the LFP @0x84000000 **now is too** — added to `axi_cdma_0/Data` in
+  `design_1_bd.tcl`; it had been excluded). **`scripts/check_dma.sh` enforces this** (and the
+  `/check-dma` skill) — run it before declaring any PL↔PS data-path change done; annotate
+  genuinely-justified single-beat peeks (e.g. a 2-word magic/resync read) with
+  `// DMA-EXEMPT: <reason>`.
+  (History: an earlier "CDMA hung on the STFT result BRAM" turned out to be a missing
+  `axi_cdma_0/Data` address segment, not a CDMA limitation — see the wavelet DMA fix.)
 - **A compute pass that spans multiple acquisition packets must snapshot its inputs.** The
   next 30 kHz packet's data arrives *during* a long pass, so a single-buffered input gets
   overwritten mid-pass (this bit the CIC LFP path; the FIR decimator avoids it with a ring +

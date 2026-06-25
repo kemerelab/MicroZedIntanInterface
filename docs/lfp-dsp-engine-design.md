@@ -130,29 +130,63 @@ on-bench LFP test signal through this path.
 
 ### 4c. get_status (PL/PS → host) — "report everything configurable"
 
-Add to `status_response_t` (bump the `_Static_assert` + net.py length together, as usual):
+`status_response_t` carries (see `firmware/include/main.h`):
 
-- `lfp_enable`, `lfp_decimation_R`, `lfp_stream_mask`, `lfp_num_taps`, `lfp_udp_port`
-- `lfp_coef_crc` — a checksum/CRC of the loaded coefficient table, so the host can verify
-  *which* filter is live without dumping all N taps (honors the rule's intent without bloat;
-  full read-back is the optional `LFP_DUMP_COEF` command).
+- `lfp_enable`, `lfp_decim_R`, `lfp_lane_mask`, `lfp_num_taps`, `lfp_packets_sent`, `lfp_overrun`.
+- `lfp_lane_mask` is reported as the **broadband `channel_enable` mask** (the single source of
+  truth) — `network.c::collect_status_data` fills it from `pl_get_current_channel_enable()`,
+  not from a separate LFP mask register.
 
-### 4d. LFP UDP packet (board → host, port 5001)
+### 4d. LFP UDP packet (board → host, port 5001) — **PL-built, DMA'd into the pbuf**
 
-Compact, self-describing, its own magic so a misrouted packet is caught. Proposed layout
-(values marked *proposal* are arbitrary and finalized at implementation):
+Compact, self-describing, its own magic so a misrouted packet is caught. **The PL builds the
+complete wire packet (6-word header + decimated samples) in the LFP output BRAM** — exactly
+the broadband pattern where `data_generator_core.sv` writes the 10-word header into the
+capture BRAM. The PS then just **CDMAs the whole frame straight into a pbuf and sends it**
+(`network.c::lfp_stream_service` → `pl_dma_read_addr` from `0x84000000` into a non-cacheable
+LFP staging buffer → `udp_sendto` a `PBUF_REF`). **No PS-side header construction, no
+`Xil_In32` sample loop** (`scripts/check_dma.sh` enforces this — the LFP single-beat loop is
+gone). Implemented layout (one frame = one wire packet):
 
 | words | field | notes |
 |------:|-------|-------|
-| 0–1 | magic `0xCAFEBABE_1F1FBEEF` *(proposal)* | distinct low word vs broadband's `0xDEADBEEF` |
-| 2–3 | 64-bit timestamp | master count at the decimation instant (a subset of broadband stamps; every `R`-th) |
-| 4 | `[7:0]` stream mask · `[15:8]` decimation `R` · `[31:16]` flags | self-describing rate |
-| 5 | 32-bit sequence number | LFP-stream drop detection |
-| 6… | payload: enabled streams × 32 ch × 16-bit (2 per word) | `0xFF` → 256 ch = 128 words |
+| 0 | magic low `0x1F1FBEEF` | distinct low word vs broadband's `0xDEADBEEF` |
+| 1 | magic high `0xCAFEBABE` | |
+| 2–3 | 64-bit master **timestamp** | the master count of the **newest broadband sample in this output's decimation window** — i.e. the most recent broadband packet that was clocked into the filter bank for this output. The decimating filters are just FIR: when one emits an output, exactly one real, already-acquired broadband sample is the newest input in that output's support, and this is its master count (the *same* counter the broadband header stamps, word 1). For frame `m` at total decimation `R` it is broadband packet `R·m + (R−1)` (e.g. R=10 → `10m+9`). Causal, monotonic, `R` apart — an **absolute master timestamp**, not a frame index. (See "timestamp accounting" below for the CIC→halfband bookkeeping.) |
+| 4 | `[7:0]` lane_mask · `[15:8]` decim_R · `[23:16]` num_taps · `[31:24]` overrun | `lane_mask` = the **broadband `channel_enable` mask** (single source of truth; see below) |
+| 5 | 32-bit sequence number | PL-maintained LFP frame counter (++ per emitted frame), for drop detection |
+| 6… | payload: enabled lanes × 32 ch × 16-bit, offset-binary (2 per word) | `0xFF` → 256 ch = 128 words |
 
-Host alignment: LFP sample at timestamp `T` ↔ broadband frame `T`; the FIR group delay is a
-fixed documented offset. The plugin exposes this as a second 2 kHz DataStream
-(`A_LFP1…`, `B_LFP1…`), alongside the 30 kHz broadband stream.
+**Lane mask = broadband mask.** The LFP engine's `lane_mask` is driven from the broadband
+`channel_enable_reg` (`data_generator_core.sv` → `dsp_channel_enable` → `lfp_dsp_block`), **not**
+from `lfp_cfg[15:8]`. The LFP filters exactly the broadband-enabled lanes — one place to pick
+streams (`set_channels`). `CMD_LFP_SET_CHANNELS` is deprecated (firmware accepts-and-ignores).
+
+**Timestamp accounting (CIC→halfband).** The chain is CIC(/5) → halfband(/2) = /10, each a
+decimating FIR. Trace one output's *newest input* through the cascade:
+- The CIC emits an output frame on every 5th broadband `packet_tick` (`run_comb` when
+  `decim_cnt` wraps at R=5), so CIC output `k` has newest broadband packet `5k+4`.
+- The halfband ingests one sample per CIC output and emits on every 2nd one (`decim_phase`),
+  so halfband output `m` has newest CIC input = CIC output `2m+1`, i.e. newest broadband
+  packet `5·(2m+1)+4 = 10m+9`.
+
+`lfp_dsp_block` keeps a single register `ts_ingest`, updated to `(master_timestamp − 1)` on
+**every** broadband `packet_tick` (the live counter has already incremented to "just-finished
+packet + 1" on that edge, so `−1` is the count the broadband header carries for that packet).
+On `frame_tick` (the halfband's decimation tick / `start_pass`) it snapshots `ts_ingest` into
+the header. The cascade latency from "packet `10m+9` closes the window" to "`frame_tick` fires"
+(CIC comb pass + glue replay) is a few hundred clk — far less than the ~2800-clk broadband
+packet period — so **no new `packet_tick` arrives in between**, and the snapshot is exactly
+`10m+9`. (If the engine ever fell a frame behind under load, `compute_overrun` latches and is
+reported in header word 4 bit 24.)
+
+**Host alignment.** The stamp marks *which broadband sample is the newest one folded into this
+LFP value* — it is **not** the instant the LFP value represents. A linear-phase anti-alias
+filter's output is centered earlier than its newest input by the chain's **group delay** (a
+fixed, known number of broadband samples). To align an LFP sample with the broadband stream's
+*content*, subtract that group delay; to align with *which input data has been seen*, use the
+stamp directly. The plugin exposes this as a second ~3 kHz DataStream (`A_LFP1…`, `B_LFP1…`),
+alongside the 30 kHz broadband stream.
 
 ## 5. PL plumbing summary
 
@@ -164,8 +198,13 @@ Reuses proven parts; the only new RTL is the filter:
    `smartconnect_1` (2×2 → 2×3) — a copy of the existing pattern.
 3. **Reuse the one CDMA** — broadband transfer every 33.3 µs cycle (as today) + an LFP
    transfer on the 1-in-`R` cycle (different `SRCADDR`). Single engine, sequenced, no
-   contention (LFP duty 1/15, each transfer a few µs).
-4. **+1 `XAxiCdma_SimpleTransfer`** call + LFP packetize/send in the core-0 loop.
+   contention (LFP duty 1/decim, each transfer a few µs). The LFP output BRAM
+   (`0x84000000` / `axi_bram_ctrl_1`) is in the `axi_cdma_0/Data` address space
+   (`design_1_bd.tcl`) so the CDMA can read it; `pl_dma_read_addr(dst, src_addr, n)`
+   generalizes the read to an arbitrary BRAM source.
+4. **+1 `XAxiCdma_SimpleTransfer`** call (the whole PL-built packet, header + samples) →
+   zero-copy `udp_sendto` in the core-0 loop. The PS adds **no** header and copies **no**
+   samples on the CPU.
 
 ## 6. Out of scope for v1 (future engine modules)
 

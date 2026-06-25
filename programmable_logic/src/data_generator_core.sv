@@ -53,7 +53,15 @@ module data_generator_core (
     output logic        dsp_sample_valid,
     output logic [127:0] dsp_sample_data,
     output logic [5:0]  dsp_sample_slot,
-    output logic        dsp_packet_tick
+    output logic        dsp_packet_tick,
+    // Live 64-bit master sample count, exposed so the LFP engine can stamp each
+    // decimated frame with the master timestamp of the LAST broadband sample that
+    // contributed to it (latched in lfp_dsp_block on the decimation tick). This is
+    // the SAME counter the broadband packet header stamps (header word 1).
+    output logic [63:0] dsp_master_timestamp,
+    // Broadband channel-enable mask (single source of truth for the LFP lane
+    // mask -- the LFP filters exactly the broadband-enabled lanes).
+    output logic [7:0]  dsp_channel_enable
 );
 
 // Extract control bits
@@ -797,6 +805,13 @@ end
 
 // DSP tap data: the registered 128-bit data word (valid when dsp_sample_valid).
 assign dsp_sample_data = fifo_write_data;
+
+// Master timestamp + broadband channel-enable taps for the LFP engine. The LFP
+// engine latches dsp_master_timestamp on its decimation tick (so each LFP frame
+// carries the master count of the last contributing broadband sample) and drives
+// its lane_mask from dsp_channel_enable (mirror of the broadband mask).
+assign dsp_master_timestamp = timestamp;
+assign dsp_channel_enable   = channel_enable_reg;
 
 // Pack status signals
 // Status Register 0: Dynamic status and counters (locally generated)

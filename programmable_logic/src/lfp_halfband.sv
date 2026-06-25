@@ -64,6 +64,7 @@ module lfp_halfband #(
     output logic [CH_W-1:0]             out_channel,
     output logic [OUT_W-1:0]            out_data,
     output logic                        out_frame_start,
+    output logic                        frame_tick,     // pulse on the decimation tick (start of a frame)
     output logic                        busy,
     output logic                        compute_overrun
 );
@@ -115,6 +116,9 @@ module lfp_halfband #(
                 if (decim_phase) begin
                     decim_phase <= 1'b0;
                     if (en) begin head_snap <= wr_pos; start_pass <= 1'b1; end
+                    // (start_pass is exposed as frame_tick below -- the decimation
+                    //  tick that begins a new output frame; the LFP block latches
+                    //  the master timestamp here.)
                 end else begin
                     decim_phase <= 1'b1;
                 end
@@ -224,4 +228,8 @@ module lfp_halfband #(
             out_frame_start <= mac_out & frame_first;
         end
     end
+
+    // Decimation tick -> frame boundary (lead-in pulse, ~num_taps clk ahead of the
+    // first out_valid). The LFP block uses this to write the packet header.
+    assign frame_tick = start_pass;
 endmodule
