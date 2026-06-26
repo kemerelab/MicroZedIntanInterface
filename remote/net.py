@@ -66,6 +66,7 @@ CMD_WAV_SET_PARAMS = 0x89   # param1 = [3:0]n_oct [7:4]n_voices [15:8]n_taps; pa
 CMD_WAV_SET_CHANNELS = 0x8A # param1 = [0] clear-ptr-first; param2 = channel index (one lane)
 CMD_WAV_WRITE_COEF = 0x8B   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef (re,im interleaved)
 CMD_WAV_WRITE_HB = 0x8C     # param1 = [0] clear-ptr-first; param2 = 18-bit signed halfband tap
+CMD_WAV_SET_MONITOR_LANES = 0x8D  # param1 = N lanes to stream on the UDP monitor (1..WAV_K)
 CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
 
@@ -1808,6 +1809,26 @@ def wavelet_enable(sock, on=True):
     send_binary_command(sock, CMD_WAV_ENABLE, 1 if on else 0)
     print(f"[WAV] {'ENABLED' if on else 'disabled'}")
 
+def set_wav_monitor_lanes(sock, n):
+    """Limit the UDP monitor (5004) to the first N of WAV_K lanes. The engine
+    still COMPUTES all WAV_K lanes; only the streamed packet is shortened to a
+    prefix (lanes are contiguous in the result BRAM, lane 0 first). Kills the
+    K=176 monitor firehose that fragments/drops + saturates the GEM TX path."""
+    n = int(n)
+    send_binary_command(sock, CMD_WAV_SET_MONITOR_LANES, n)
+    print(f"[WAV] monitor lanes = {n}")
+
+def set_wav_channels(sock, channels):
+    """Selector-only update of which source channels feed the wavelet lanes.
+    Does NOT re-upload coeffs, so it preserves the current frequency grid (use
+    this to repoint the monitor at specific channels). Leaves the engine
+    disabled -- the caller does wav_on afterwards."""
+    send_binary_command(sock, CMD_WAV_ENABLE, 0)
+    chans = list(channels)[:WAV_K]
+    for i, ch in enumerate(chans):
+        send_binary_command(sock, CMD_WAV_SET_CHANNELS, 1 if i == 0 else 0, ch & 0xFF)
+    print(f"[WAV] selector channels = {chans} (engine left disabled; run wav_on)")
+
 def receive_wavelet(n_packets=100, bind_port=WAV_UDP_PORT):
     """Bind the wavelet UDP port and parse scalogram surfaces. Payload is, per
     lane, n_scales complex int32 (re,im). Reference receiver for the host /
@@ -2128,7 +2149,7 @@ def get_status(sock):
 
     # Wavelet (Tier-3) scalogram engine config + status (20 bytes) -- follows chirp.
     (wav_enable, wav_n_octaves, wav_n_voices, wav_n_taps,
-     wav_K, wav_overrun, wav_busy, _wav_rsv) = struct.unpack('<8B', data[168:176])
+     wav_K, wav_overrun, wav_busy, wav_monitor_lanes) = struct.unpack('<8B', data[168:176])
     (wav_gain, wav_frame_seq, wav_packets_sent) = struct.unpack('<III', data[176:188])
 
     # recv->transmit spike instrumentation (52 bytes) -- follows the wavelet block,
@@ -2241,6 +2262,7 @@ def get_status(sock):
         'wav_K': wav_K,
         'wav_overrun': wav_overrun,
         'wav_busy': wav_busy,
+        'wav_monitor_lanes': wav_monitor_lanes,
         'wav_gain': wav_gain,
         'wav_frame_seq': wav_frame_seq,
         'wav_packets_sent': wav_packets_sent,
@@ -2380,6 +2402,7 @@ def print_status(status):
     print(f"  gain word=0x{status['wav_gain']:08X}  columns={status['wav_frame_seq']}  "
           f"busy={'yes' if status['wav_busy'] else 'no'}  "
           f"overrun={'YES' if status['wav_overrun'] else 'no'}  "
+          f"monitor_lanes={status['wav_monitor_lanes']}  "
           f"packets sent={status['wav_packets_sent']}")
     print("=" * 50)
 
@@ -2587,6 +2610,7 @@ def tcp_control():
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], lfp_sink  (5001 auto-drained)")
         print(f"  Wavelet (Tier-3): wav_config [oct] [V] [taps], wav_on, wav_off, wav_recv [n], wav_sink  (5004 auto-drained)")
+        print(f"         wav_lanes N - stream first N of K lanes (default 32); wav_monitor <ch...> - pick exact channels then size prefix")
         print(f"         wav_ridge [n] [lane] - ASCII time-freq heatmap; watch the ridge track a swept input")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
@@ -2761,6 +2785,23 @@ def tcp_control():
                     wavelet_enable(sock, True)
                 elif cmd == "wav_off":
                     wavelet_enable(sock, False)
+                elif cmd == "wav_lanes" or cmd.startswith("wav_lanes "):
+                    # wav_lanes N  -- stream only the first N of WAV_K lanes on UDP 5004
+                    parts = cmd.split()
+                    if len(parts) > 1:
+                        set_wav_monitor_lanes(sock, int(parts[1]))
+                    else:
+                        print("usage: wav_lanes N  (1..%d; default 32)" % WAV_K)
+                elif cmd == "wav_monitor" or cmd.startswith("wav_monitor "):
+                    # wav_monitor <ch...>  -- point the monitor at exactly these channels,
+                    # then size the monitor prefix to match (run wav_on afterwards)
+                    parts = cmd.split()
+                    if len(parts) > 1:
+                        chans = [int(x) for x in parts[1:]]
+                        set_wav_channels(sock, chans)
+                        set_wav_monitor_lanes(sock, len(chans))
+                    else:
+                        print("usage: wav_monitor <ch0> [ch1 ...]  (then wav_on)")
                 elif cmd == "wav_recv" or cmd.startswith("wav_recv "):
                     # bind UDP 5004 and print decoded scalogram surfaces
                     parts = cmd.split()
@@ -2860,6 +2901,8 @@ def tcp_control():
                     print("   with set_channels; run lfp_config + set_channels BEFORE lfp_on)")
                     print("  wav_config [oct] [V] [taps] - upload Morse voice bank + halfband (Tier-3)")
                     print("  wav_on / wav_off    - enable / disable the wavelet scalogram engine")
+                    print("  wav_lanes N         - stream only the first N of K lanes on UDP 5004 (default 32; kills the K=176 firehose)")
+                    print("  wav_monitor <ch...> - point the monitor at exactly these channels, then size the prefix (then wav_on)")
                     print("  wav_recv [n]        - capture + print decoded scalogram surfaces (UDP 5004)")
                     print("Aux sequencer (bank-programmable aux commands):")
                     print("  aux_demo            - load default slot programs + enable")

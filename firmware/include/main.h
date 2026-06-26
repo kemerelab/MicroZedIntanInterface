@@ -385,7 +385,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  wav_K;             // selected channels (build param)
     uint8_t  wav_overrun;       // sticky compute-overrun flag
     uint8_t  wav_busy;          // a compute pass is in progress
-    uint8_t  wav_reserved;
+    uint8_t  wav_monitor_lanes; // first N of WAV_K lanes streamed on the UDP monitor (host-set)
     uint32_t wav_gain;          // per-octave output gain word (4 bits/octave)
     uint32_t wav_frame_seq;     // completed scalogram columns (PL counter)
     uint32_t wav_packets_sent;  // wavelet monitor UDP packets emitted
@@ -656,6 +656,7 @@ void wav_stream_service(void);   // call from the core-0 maintenance loop
 
 // Tracked config / counters (mirrored into status_response_t).
 extern uint8_t  wav_cfg_enable, wav_cfg_n_octaves, wav_cfg_n_voices, wav_cfg_n_taps;
+extern uint8_t  wav_monitor_lanes;
 extern uint32_t wav_cfg_gain;
 extern uint32_t wav_udp_packets_sent;
 extern uint32_t wav_dma_errors;    // diagnostic: CDMA read failures (not on the wire)

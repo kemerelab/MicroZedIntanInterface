@@ -79,6 +79,7 @@ ID   | Command          | Param1              | Param2
 #define CMD_WAV_SET_CHANNELS 0x8A  // param1 = [0] clear-ptr-first; param2 = channel index (one lane)
 #define CMD_WAV_WRITE_COEF   0x8B  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef (re,im interleaved)
 #define CMD_WAV_WRITE_HB     0x8C  // param1 = [0] clear-ptr-first; param2 = 18-bit signed halfband tap
+#define CMD_WAV_SET_MONITOR_LANES 0x8D  // param1 = N lanes to stream on the UDP monitor (1..WAV_K)
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
 #define CMD_PERF_RESET       0x91  // clear recv->transmit sticky maxes + histogram + counts
 
@@ -319,7 +320,7 @@ void collect_status_data(status_response_t* status) {
     status->wav_K            = WAV_K;
     status->wav_overrun      = (wav_st >> 31) & 1;
     status->wav_busy         = (wav_st >> 30) & 1;
-    status->wav_reserved     = 0;
+    status->wav_monitor_lanes = wav_monitor_lanes;
     status->wav_gain         = wav_cfg_gain;
     status->wav_frame_seq    = wav_st & 0x3FFFFFFF;
     status->wav_packets_sent = wav_udp_packets_sent;
@@ -616,6 +617,15 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             pl_wav_hb_push((int32_t)(cmd->param2 << 14) >> 14);    // sign-extend 18-bit
             break;
 
+        case CMD_WAV_SET_MONITOR_LANES: {
+            uint8_t n = (uint8_t)(cmd->param1 & 0xFF);
+            if (n == 0) n = 1;
+            if (n > WAV_K) n = WAV_K;
+            wav_monitor_lanes = n;
+            send_message("Binary Command: WAV_SET_MONITOR_LANES %u\r\n", n);
+            break;
+        }
+
         case CMD_UDP_BENCH:
             udp_bench_blast(cmd->param1, cmd->param2);
             break;
@@ -891,6 +901,7 @@ static struct udp_pcb *wav_pcb = NULL;
 static uint32_t wav_last_seq = 0xFFFFFFFF;
 uint32_t wav_udp_packets_sent = 0;
 uint32_t wav_dma_errors = 0;
+uint8_t  wav_monitor_lanes = 32;   // monitor prefix: stream the first N of WAV_K lanes (host-settable)
 
 // DDR staging for the CDMA: a sub-region of the non-cacheable pl_dma_staging
 // 1 MB section (see pl_dma.h). Placed 512 KB in, disjoint from the broadband
@@ -921,7 +932,12 @@ void wav_stream_service(void) {
     // scale count (n_octaves*n_voices); the PL writes the same compacted stride.
     uint32_t nscales = (uint32_t)wav_cfg_n_octaves * wav_cfg_n_voices;
     if (nscales > WAV_N_SCALES) nscales = WAV_N_SCALES;
-    uint32_t frame_words = WAV_HDR_WORDS + (uint32_t)WAV_K * nscales * 2;
+    // Monitor lane-limit: ship only the first mlanes of WAV_K. Lanes are
+    // contiguous in the result BRAM (lane 0 first), so the first mlanes = the
+    // first mlanes*nscales*2 payload words after the header -- a clean prefix.
+    uint32_t mlanes = wav_monitor_lanes;
+    if (mlanes == 0 || mlanes > WAV_K) mlanes = WAV_K;
+    uint32_t frame_words = WAV_HDR_WORDS + mlanes * nscales * 2;
     if (frame_words > (WAV_HDR_WORDS + (uint32_t)WAV_K * WAV_N_SCALES * 2))
         return;                                     // config guard
 
@@ -939,6 +955,12 @@ void wav_stream_service(void) {
     // stamps the same seq in the header (w2/w5), so the host can cross-check.
     if ((pl_wav_read_status() & 0x3FFFFFFF) != seq) return;
     wav_last_seq = seq;
+
+    // DMA-EXEMPT: patch the single header lane-count word (not bulk payload) so the
+    // host parses the shortened monitor prefix; staging is non-cacheable.
+    // Header word index 4 = w4 = n_octaves|(n_voices<<8)|(K<<16)|(overrun<<24);
+    // rewriting the K field to mlanes makes receive_wavelet see K=mlanes.
+    wav_dma_staging[4] = (wav_dma_staging[4] & ~(0xFFu << 16)) | ((mlanes & 0xFFu) << 16);
 
     // Zero-copy send: the pbuf references the staging buffer directly. The PL
     // built the whole packet, so we send exactly what the PL wrote (no header
