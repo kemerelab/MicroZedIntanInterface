@@ -1853,6 +1853,82 @@ def receive_wavelet(n_packets=100, bind_port=WAV_UDP_PORT):
     print(f"[WAV] received {got} surfaces, {bad} non-wavelet/short datagrams")
     return got
 
+def receive_wavelet_ridge(n_packets=3000, lane=0, bind_port=WAV_UDP_PORT,
+                          fs=3000.0, fc_top=0.34, rows=60):
+    """Capture scalogram surfaces and render an ASCII time x frequency heatmap
+    for ONE lane, so you can watch the ridge track a swept input across octaves.
+    Columns = that lane's scales sorted by center frequency (low->high, i.e.
+    left->right); rows = time (downsampled to ~`rows` lines); cell brightness ~
+    |coefficient| (global-normalized). Each row also prints the peak (ridge)
+    frequency + magnitude. Works on the full-K monitor despite fragment loss --
+    dropped surfaces just thin the time axis; the ones that arrive are intact.
+    NOTE: the frequency axis assumes the default Morse grid (fc_top=0.34,
+    fs=3000); pass fs/fc_top if you reconfigured them."""
+    r = _LfpReader(port=bind_port, timeout=3.0).open()    # reads the 5004 sink
+    surf = []                          # list of (seq, [mag per scale])
+    n_oct = n_voc = nscales = 0
+    got = bad = gaps = span = 0
+    last_seq = None
+    try:
+        while got < n_packets:
+            data = r.recv()
+            if len(data) < 32:
+                bad += 1; continue
+            (mlo, mhi, _ts, _th, w4, seq, w6, _g) = struct.unpack('<IIIIIIII', data[:32])
+            if mlo != WAV_MAGIC_LOW or mhi != WAV_MAGIC_HIGH:
+                bad += 1; continue
+            n_oct = w4 & 0xFF; n_voc = (w4 >> 8) & 0xFF
+            K = (w4 >> 16) & 0xFF; nscales = w6 & 0xFFFF
+            if lane >= K:
+                print(f"[RIDGE] lane {lane} >= K={K} -- pick a smaller lane"); break
+            pay = data[32:]; nints = len(pay) // 4
+            if nscales == 0 or (lane + 1) * nscales * 2 > nints:
+                bad += 1; continue
+            v = struct.unpack(f'<{nints}i', pay)
+            b = lane * nscales * 2
+            mags = [(v[b + 2*s]**2 + v[b + 2*s + 1]**2) ** 0.5 for s in range(nscales)]
+            surf.append((seq, mags))
+            if last_seq is not None:
+                d = (seq - last_seq) & 0x3FFFFFFF
+                span += d
+                if d != 1: gaps += 1
+            else:
+                span += 1
+            last_seq = seq; got += 1
+    except socket.timeout:
+        print("[RIDGE] timeout (engine on? chirp on? wav_on?)")
+    finally:
+        r.close()
+    if not surf or nscales == 0:
+        print("[RIDGE] no surfaces captured"); return 0
+
+    # the engine packs scale index s = octave*n_voc + voice -> center freq (Hz)
+    nv = max(1, n_voc)
+    def center(s):
+        return fc_top * (2.0 ** (-(s % nv) / float(nv))) * (fs / (2.0 ** (s // nv)))
+    freqs = [center(s) for s in range(nscales)]
+    order = sorted(range(nscales), key=lambda s: freqs[s])   # low -> high freq
+    gmax = max((m for _, ms in surf for m in ms), default=1.0) or 1.0
+    ramp = " .:-=+*#%@"
+
+    print(f"[RIDGE] lane={lane}  surfaces={len(surf)}  n_oct={n_oct} n_voc={n_voc} "
+          f"scales={nscales}  peak|coef|={gmax:.0f}")
+    print(f"[RIDGE] columns span {freqs[order[0]]:.1f} .. {freqs[order[-1]]:.1f} Hz (low->high)")
+    step = max(1, len(surf) // rows)
+    pkmin, pkmax = 1e18, 0.0
+    for i in range(0, len(surf), step):
+        _seq, ms = surf[i]
+        line = ''.join(ramp[max(0, min(len(ramp) - 1,
+                       int(ms[s] / gmax * (len(ramp) - 1) + 0.5)))] for s in order)
+        pk = max(range(nscales), key=lambda s: ms[s])
+        pkmin = min(pkmin, freqs[pk]); pkmax = max(pkmax, freqs[pk])
+        print(f"  |{line}|  ridge~{freqs[pk]:7.1f} Hz |{ms[pk]:7.0f}|")
+    pos = [0, len(order) // 3, 2 * len(order) // 3, len(order) - 1]
+    print("  legend:", "  ".join(f"col{p}~{freqs[order[p]]:.1f}Hz" for p in pos))
+    print(f"[RIDGE] ridge swept {pkmin:.1f}..{pkmax:.1f} Hz | {got} rcvd, {gaps} seq-gaps over "
+          f"{span} produced ({100.0 * (span - got) / max(1, span):.1f}% dropped in transit), {bad} bad")
+    return got
+
 # ============================================================================
 # UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
 # replacing the ~18 MB/s small-packet broadband assumption with a measured
@@ -2511,6 +2587,7 @@ def tcp_control():
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], lfp_sink  (5001 auto-drained)")
         print(f"  Wavelet (Tier-3): wav_config [oct] [V] [taps], wav_on, wav_off, wav_recv [n], wav_sink  (5004 auto-drained)")
+        print(f"         wav_ridge [n] [lane] - ASCII time-freq heatmap; watch the ridge track a swept input")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2689,6 +2766,12 @@ def tcp_control():
                     parts = cmd.split()
                     n = int(parts[1]) if len(parts) > 1 else 100
                     receive_wavelet(n)
+                elif cmd == "wav_ridge" or cmd.startswith("wav_ridge "):
+                    # ASCII time x frequency heatmap of one lane's scalogram
+                    parts = cmd.split()
+                    n  = int(parts[1]) if len(parts) > 1 else 3000
+                    ln = int(parts[2]) if len(parts) > 2 else 0
+                    receive_wavelet_ridge(n, ln)
                 elif cmd == "lfp_sink":
                     if LFP_SINK is not None and LFP_SINK._running:
                         print(f"[LFP-SINK] draining UDP {LFP_SINK.port}: {LFP_SINK.pkts} pkts, "
