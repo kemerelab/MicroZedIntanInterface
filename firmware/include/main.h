@@ -38,14 +38,46 @@
 #define BRAM_SIZE_WORDS         16384       // 16384 x 32-bit words (64KB)
 #define BRAM_SIZE_BYTES         (BRAM_SIZE_WORDS * BYTES_PER_WORD)   // 64KB
 
+// ============================================================================
+// UNIFIED PACKET FORMAT (docs/unified-packet-format.md)
+// ----------------------------------------------------------------------------
+// Every PL stream (broadband + LFP) emits the SAME 8 x 32-bit little-endian
+// common header, then a stream-specific payload, all on ONE UDP port (5000).
+// The host demuxes by stream_type. The PL builds the whole header in its BRAM;
+// the PS does NO header math (DMA-into-pbuf rule). Keep this in sync with the
+// PL builders (data_generator_core.sv / lfp_dsp_block.sv) and net.py.
+//
+//   word 0  MAGIC      = 0xCAFEBABE
+//   word 1  TYPE_VER   = stream_type[7:0] | version[15:8] | flags[31:16]
+//   word 2  TS_LO      | word 3 TS_HI  (64-bit master timestamp)
+//   word 4  SEQ        per-stream packet sequence (+1/packet; the loss check)
+//   word 5  AUX0       stream-specific
+//   word 6  AUX1       stream-specific
+//   word 7  RSVD       0
+#define UNIFIED_MAGIC           0xCAFEBABE
+#define UNIFIED_VERSION         1
+#define UNIFIED_HEADER_WORDS    8
+#define STREAM_TYPE_BROADBAND   1
+#define STREAM_TYPE_LFP         2
+#define STREAM_TYPE_WAVELET     3   // reserved for the follow-on branch
+
 // Packet size calculation based on channel_enable bits.
 // channel_enable is now 8 bits: [3:0] = port 0 streams, [7:4] = port 1 (dual
 // cable). Max = 8 streams x 35 cycles / 2 = 140 data words.
-#define PACKET_HEADER_WORDS     10           // Magic number + timestamp
+//
+// BROADBAND framing (stream_type=1): the 8-word common header + a 6-word
+// broadband sub-block = 14 header words ahead of the data. The sub-block
+// carries the previous-packet aux echoes + the 8 external-ADC breadcrumbs --
+// every field of the legacy 10-word header is preserved; the DATA words are
+// byte-identical to before (see docs/unified-packet-format.md, NO DATA LOSS).
+//   AUX0 (w5) = channel_enable[7:0] | num_data_words[23:8]
+//   AUX1 (w6) = digital_in[7:0] | aux_flags[15:8] | echo0[31:16]
+#define BB_SUBBLOCK_WORDS       6
+#define PACKET_HEADER_WORDS     (UNIFIED_HEADER_WORDS + BB_SUBBLOCK_WORDS) // 14
 #define MAX_PACKET_DATA_WORDS   140         // Maximum data words (all 8 streams = both ports)
 #define MIN_PACKET_DATA_WORDS   18          // Minimum data words (1 stream enabled)
-#define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 150 words
-#define MIN_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MIN_PACKET_DATA_WORDS) // 28 words
+#define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 154 words
+#define MIN_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MIN_PACKET_DATA_WORDS) // 32 words
 
 // ============================================================================
 // AXI LITE CONTROL INTERFACE
@@ -90,7 +122,9 @@
 // LFP output BRAM (decimated stream, PS read via 2nd axi_bram_ctrl)
 #define LFP_BRAM_BASE_ADDR          0x84000000
 #define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
-#define LFP_UDP_PORT                5001       // separate UDP stream for the LFP band
+// Unified-port format: the LFP band now streams on the SAME UDP port as
+// broadband (UDP_PORT / udp_dest_port, default 5000), demuxed host-side by
+// stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 #define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
@@ -566,7 +600,8 @@ void pl_lfp_coef_push(int32_t coef);                      // write one 18-bit Q1
 void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
 uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 
-// Streaming (network.c): drain the LFP output BRAM -> UDP on LFP_UDP_PORT.
+// Streaming (network.c): drain the LFP output BRAM -> UDP on the unified port
+// (udp_dest_port, default 5000), demuxed host-side by stream_type=2.
 void lfp_stream_init(void);
 void lfp_stream_service(void);   // call from the core-0 maintenance loop
 

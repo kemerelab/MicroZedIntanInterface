@@ -36,7 +36,7 @@ volatile int cable_test_flag = 0;
 
 // BRAM state tracking
 uint32_t ps_read_address = 0;              // Current PS read position (word address)
-uint32_t current_packet_size = 74;         // Current expected packet size in 32-bit words (default to max)
+uint32_t current_packet_size = 84;         // 14-word header + 70 data words (0x0F default); recomputed on start
 uint32_t current_channel_enable = 0x0F;    // Current channel enable setting (default all channels)
 
 // Packet validation tracking
@@ -215,26 +215,29 @@ static int packets_available(void) {
 // Read and validate one packet directly from BRAM with UDP transmission
 static int process_packet_from_bram(void) {
   XTime t_loop0; XTime_GetTime(&t_loop0);   // perf: receive->transmit timer
-  // Calculate BRAM address (no copying - read directly)
-  uint32_t magic_low_offset = ps_read_address; // should always be smaller than BRAM_SIZE_WORDS!!!
-  uint32_t magic_high_offset = (ps_read_address + 1) % BRAM_SIZE_WORDS;
+  // Unified packet format: header word 0 = MAGIC (0xCAFEBABE), word 1 = TYPE_VER
+  // with stream_type=1 (broadband), version=1 in the low 16 bits. The capture
+  // BRAM only ever holds broadband packets (the LFP stream lives in its own
+  // BRAM), so we validate both the magic AND the broadband stream_type/version.
+  uint32_t magic_offset    = ps_read_address; // should always be < BRAM_SIZE_WORDS
+  uint32_t typever_offset  = (ps_read_address + 1) % BRAM_SIZE_WORDS;
 
-  // Read packet header from BRAM
-  uint32_t magic_low = Xil_In32(BRAM_BASE_ADDR + (magic_low_offset * 4));   // DMA-EXEMPT: 2-word magic peek (clean 1-beat reads; bulk payload moves by CDMA below)
-  uint32_t magic_high = Xil_In32(BRAM_BASE_ADDR + (magic_high_offset * 4)); // DMA-EXEMPT: 2-word magic peek (clean 1-beat reads; bulk payload moves by CDMA below)
+  uint32_t magic_word   = Xil_In32(BRAM_BASE_ADDR + (magic_offset * 4));   // DMA-EXEMPT: 2-word header peek (clean 1-beat reads; bulk payload moves by CDMA below)
+  uint32_t typever_word = Xil_In32(BRAM_BASE_ADDR + (typever_offset * 4)); // DMA-EXEMPT: 2-word header peek (clean 1-beat reads; bulk payload moves by CDMA below)
 
-  // Reconstruct 64-bit magic number
-  uint64_t magic = ((uint64_t)magic_high << 32) | magic_low;
+  uint32_t expected_typever =
+      (uint32_t)STREAM_TYPE_BROADBAND | ((uint32_t)UNIFIED_VERSION << 8);
 
-  // Validate magic number
-  if (magic != 0xCAFEBABEDEADBEEF) {
-    // Invalid magic - could be BRAM overflow, corruption, or misalignment
-    // Jump directly to write pointer to sync with fresh data
+  // Validate the unified header (magic + broadband type/version, low 16 bits)
+  if (magic_word != UNIFIED_MAGIC ||
+      (typever_word & 0xFFFFu) != (expected_typever & 0xFFFFu)) {
+    // Invalid header - could be BRAM overflow, corruption, or misalignment.
+    // Jump directly to write pointer to sync with fresh data.
     uint32_t pl_write_addr = pl_get_bram_write_address();
     ps_read_address = pl_write_addr;
     error_count++; // ERROR TO TRACK
-    send_message("Magic validation failed (0x%016llX), jumping to write position %u\r\n",
-                 magic, pl_write_addr);
+    send_message("Header validation failed (magic=0x%08X type_ver=0x%08X), jumping to write position %u\r\n",
+                 magic_word, typever_word, pl_write_addr);
     return 0; // Packet validation failed, now synced to fresh data
   }
 
@@ -379,22 +382,25 @@ void handle_enable_streaming(void) {
   stream_enabled = 1;
   pl_set_transmission(1);
 
-  // Re-sync ps_read to a REAL packet boundary by scanning for the magic.
+  // Re-sync ps_read to a REAL packet boundary by scanning for the header.
   // A stop can interrupt the datapath mid-packet; since write_address, the
   // packet boundary, and the (intentionally unreset) FIFO are only cleared by
-  // the hardware reset -- not by stop/restart -- the fresh magic on restart can
+  // the hardware reset -- not by stop/restart -- the fresh header on restart can
   // land a few words off packet_boundary_address. Setting ps_read to the
-  // pointer then mis-aligns and the magic check loops forever. So: let the PL
+  // pointer then mis-aligns and the header check loops forever. So: let the PL
   // write several packets, then walk back from the write pointer to the nearest
-  // 0xDEADBEEF/0xCAFEBABE and align to it (single Xil_In32 reads are clean).
+  // unified header (word0=MAGIC, word1=broadband TYPE_VER) and align to it
+  // (single Xil_In32 reads are clean).
   usleep(3000);  // ~90 packets @30ksps -- guarantees fresh complete packets
   uint32_t wp = pl_get_bram_write_address();
+  uint32_t expected_typever =
+      (uint32_t)STREAM_TYPE_BROADBAND | ((uint32_t)UNIFIED_VERSION << 8);
   int synced = 0;
   for (uint32_t back = 0; back < 2 * current_packet_size + 16; back++) {
     uint32_t a = (wp + BRAM_SIZE_WORDS - back) % BRAM_SIZE_WORDS;
     uint32_t b = (a + 1) % BRAM_SIZE_WORDS;
-    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == 0xDEADBEEF &&     // magic low  // DMA-EXEMPT: 2-word resync magic peek (clean 1-beat reads while re-aligning ps_read)
-        Xil_In32(BRAM_BASE_ADDR + b * 4) == 0xCAFEBABE) {     // magic high // DMA-EXEMPT: 2-word resync magic peek (clean 1-beat reads while re-aligning ps_read)
+    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == UNIFIED_MAGIC &&                       // word0 MAGIC  // DMA-EXEMPT: 2-word resync header peek (clean 1-beat reads while re-aligning ps_read)
+        (Xil_In32(BRAM_BASE_ADDR + b * 4) & 0xFFFFu) == (expected_typever & 0xFFFFu)) { // word1 TYPE_VER // DMA-EXEMPT: 2-word resync header peek (clean 1-beat reads while re-aligning ps_read)
       ps_read_address = a;
       synced = 1;
       break;
@@ -688,7 +694,7 @@ int main() {
   
   // Initialize UDP (always enabled)
   udp_stream_init();
-  lfp_stream_init();   // separate UDP stream for the LFP band (port 5001)
+  lfp_stream_init();   // LFP band shares the unified UDP port (5000), stream_type=2
 
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
   
