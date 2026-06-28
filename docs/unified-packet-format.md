@@ -44,10 +44,38 @@ each stream's `SEQ` independent so broadband's integrity is unaffected by the ot
   10-word-header content into the new header + a small broadband sub-block — lose nothing.**
 - Already ≤ 1 datagram (≤140 data words + header ≈ 600 B). Fits trivially.
 
+**As implemented (claude/unified-ports):** the broadband frame is the 8-word common
+header **+ a 6-word broadband sub-block = 14 header words** ahead of the data (the PL
+writes these as 7 × 64-bit FIFO header writes). Word map (32-bit LE):
+
+| word | contents |
+|------|----------|
+| 0 | `MAGIC` = 0xCAFEBABE |
+| 1 | `TYPE_VER` = 1 \| version<<8 \| flags<<16 |
+| 2 / 3 | 64-bit master timestamp |
+| 4 | `SEQ` (broadband per-stream, +1/packet; resets to 0 on START) |
+| 5 | `AUX0` = `channel_enable[7:0]` \| `num_data_words[23:8]` |
+| 6 | `AUX1` = `digital_in[7:0]` \| `aux_flags[15:8]` \| `echo0[31:16]` (old header w4) |
+| 7 | `RSVD` = 0 |
+| 8 | sub-block: prev-packet slot-2/3 aux echoes (old header w5) |
+| 9..12 | sub-block: the 8 external-ADC breadcrumbs (currently 0) |
+| 13 | sub-block: reserved (0) |
+| 14.. | DATA words — **byte-identical** to the legacy format |
+
+Verified in `programmable_logic/sim/dualport_dropout_tb.sv`: the data words still match
+the legacy sine reference EXACTLY (content preserved) and SEQ/timestamp advance by 1 per
+packet (the loss check). Max packet = 14 + 140 = 154 words = 616 B (≤ 1 datagram).
+
 ### LFP (type 2)
 - `AUX0` = `lane_mask[7:0]` · `decim_R[15:8]` · `num_taps[23:16]` · `overrun[24]`
 - `AUX1` = `num_samples`
 - Payload = the decimated samples (int16, as today). One frame ≤ 1 datagram. Fits.
+
+**As implemented (claude/unified-ports):** the LFP frame is exactly the 8-word common
+header (no sub-block) then the decimated samples. `num_samples` = `popcount(lane_mask)·32`
+(`lane_mask` mirrors the broadband `channel_enable`). The PL builds the whole frame
+(header + samples) in its output BRAM; the PS DMAs it and sends it on UDP 5000 with
+stream_type=2. Verified in `programmable_logic/sim/lfp_dsp_block_tb.sv`.
 
 ### WAVELET (type 3) — one octave per packet, rate-aligned
 - **One packet = one octave.** `AUX0` = `octave[3:0]` · `n_octaves[7:4]` · `n_voices[11:8]`
