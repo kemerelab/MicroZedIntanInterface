@@ -87,8 +87,9 @@
 #define PL_CTRL_BASE_ADDR 0x40000000
 
 // Number of PL control registers (must match axi_lite_registers N_CTRL --
-// the status registers are read back starting right after the control block)
-#define PL_N_CTRL_REGS      28
+// the status registers are read back starting right after the control block).
+// 22 legacy + 3 aux-seq + 3 LFP/DSP + 4 wavelet (regs 28..31) = 32.
+#define PL_N_CTRL_REGS      32
 
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
@@ -127,6 +128,43 @@
 // stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 #define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
+
+// ============================================================================
+// Wavelet (Tier-3) scalogram engine control registers (PL regs 28..31; see
+// wavelet_dsp_block.sv). The v2 4-MAC + work-spread engine is unchanged
+// (bit-exact); only the packetizer differs on this branch (octave-split,
+// unified per-octave wire packets -- see docs/unified-packet-format.md).
+// ============================================================================
+#define CTRL_REG_WAV_CFG_OFFSET     (28 * 4)  // [0]en [7:4]n_oct [11:8]n_voices [19:12]n_taps
+#define CTRL_REG_WAV_GAIN_OFFSET    (29 * 4)  // 4 bits/octave: gain[4*o +: 4] = left-shift
+#define CTRL_REG_WAV_DATA_OFFSET    (30 * 4)  // upload payload (target-dependent, [17:0] coef / [7:0] chan)
+#define CTRL_REG_WAV_STROBE_OFFSET  (31 * 4)  // [0] write toggle, [1] ptr clear, [3:2] target
+#define WAV_STROBE_TOGGLE           (1u << 0)
+#define WAV_STROBE_PTR_CLR          (1u << 1)
+#define WAV_TARGET_VOICE_COEF       (0u << 2)  // interleaved re,im
+#define WAV_TARGET_HALFBAND         (1u << 2)
+#define WAV_TARGET_SELECTOR         (2u << 2)
+// Wavelet build dimensions (must match the wavelet_dsp_block instantiation in
+// data_generator_wrapper.v). K is bounded so a SINGLE octave packet always fits
+// ONE standard datagram: 32 + n_channels*n_voices*8 <= 1472 -> n*v <= 180.
+// At V=4 the build cap K=40 fits (40*4 = 160 <= 180). Want more channels than
+// fit? REDUCE the channel count (the no-loss rule); do not fragment.
+#define WAV_K                       40
+#define WAV_N_OCTAVES               8
+#define WAV_V                       4
+#define WAV_N_TAPS                  24
+#define WAV_HB_TAPS                 7
+#define WAV_N_SCALES                (WAV_N_OCTAVES * WAV_V)   // 32 scales (build max)
+// Wavelet results BRAM (PS read via 3rd axi_bram_ctrl). For STEP 2 the PL builds
+// ONE unified per-octave wire packet here (8-word common header + this octave's
+// n_channels*n_voices complex bins). The PS CDMAs the fresh octave packet into a
+// pbuf and sends it on the unified UDP port (stream_type=3). No PS repack.
+#define WAV_HDR_WORDS               UNIFIED_HEADER_WORDS   // 8-word common header
+#define WAV_BRAM_BASE_ADDR          0x90000000
+#define WAV_BRAM_SIZE_WORDS         16384      // 64 KB
+// Max one-datagram payload guard: n_channels*n_voices complex int32 (re,im) +
+// the 8-word header must fit 1472 bytes -> n_channels*n_voices <= 180.
+#define WAV_MAX_BINS_PER_PACKET     180
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
@@ -183,6 +221,7 @@
 #define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 #define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
+#define STATUS_REG_14_OFFSET (STATUS_REG_BASE + 14 * 4)  // WAV: [29:0] emitted-packet count, [30] busy, [31] overrun
 
 // STATUS_REG_11 bit fields
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
@@ -401,6 +440,22 @@ typedef struct __attribute__((packed)) {
     uint32_t memp_num_pbuf;       // = MEMP_NUM_PBUF (shared zero-copy pool size)
     uint32_t drop_ring[8];        // last 8 broadband drop packet indices (clustering)
 
+    // Wavelet (Tier-3) scalogram engine config + status (CTRL_REG_WAV_* +
+    // STATUS_REG_14). Per the "get_status reports everything configurable" rule.
+    // 24 bytes (keep net.py + the _Static_assert in sync).
+    uint8_t  wav_enable;        // engine enabled
+    uint8_t  wav_n_octaves;     // active octaves
+    uint8_t  wav_n_voices;      // active voices/octave
+    uint8_t  wav_n_taps;        // active complex taps/voice
+    uint8_t  wav_n_channels;    // active streamed channels (lanes); bounds packet to 1 datagram
+    uint8_t  wav_K;             // build channel cap
+    uint8_t  wav_overrun;       // sticky compute-overrun flag
+    uint8_t  wav_busy;          // a compute pass is in progress
+    uint32_t wav_gain;          // per-octave output gain word (4 bits/octave)
+    uint32_t wav_frame_seq;     // global emitted-packet count (PL counter)
+    uint32_t wav_packets_sent;  // wavelet UDP packets emitted (all octaves)
+    uint32_t wav_dma_errors;    // CDMA read failures (diagnostic; not on the wire)
+
 } status_response_t;
 
 // recv->transmit histogram bucket count (keep in sync with loop_hist[] + net.py)
@@ -609,5 +664,34 @@ void lfp_stream_service(void);   // call from the core-0 maintenance loop
 // the broadband channel_enable (reported via pl_get_current_channel_enable()).
 extern uint8_t  lfp_cfg_enable, lfp_cfg_decim_R, lfp_cfg_num_taps;
 extern uint32_t lfp_udp_packets_sent;
+
+// ============================================================================
+// WAVELET SCALOGRAM ENGINE (Tier-3) -- control + streaming
+// ============================================================================
+// Control (pl_control.c): config/coeffs latch while the engine is disabled.
+void pl_wav_set_enable(uint8_t enable);
+void pl_wav_set_params(uint8_t n_octaves, uint8_t n_voices, uint8_t n_taps, uint32_t gain);
+void pl_wav_set_n_channels(uint8_t n_channels); // active lanes streamed (<= WAV_K)
+void pl_wav_sel_begin(void);                  // clear the upload pointer, target = selector
+void pl_wav_sel_push(uint8_t channel);        // write one selector lane
+void pl_wav_coef_begin(void);                 // clear ptr, target = voice coef RAM
+void pl_wav_coef_push(int32_t coef);          // write one Q1.17 tap (re,im interleaved)
+void pl_wav_hb_begin(void);                   // clear ptr, target = halfband RAM
+void pl_wav_hb_push(int32_t coef);            // write one halfband Q1.17 tap
+uint32_t pl_wav_read_status(void);            // STATUS_REG_14
+
+// Streaming (network.c): the PL builds ONE unified per-octave wire packet in the
+// results BRAM (0x90000000) on each fresh octave; the PS CDMAs it into a pbuf
+// and sends it on the unified UDP port (udp_dest_port, default 5000) with
+// stream_type=3, demuxed host-side. (STEP 2 -- octave-split rate-aligned.)
+void wav_stream_init(void);
+void wav_stream_service(void);   // call from the core-0 maintenance loop
+
+// Tracked config / counters (mirrored into status_response_t).
+extern uint8_t  wav_cfg_enable, wav_cfg_n_octaves, wav_cfg_n_voices, wav_cfg_n_taps;
+extern uint8_t  wav_cfg_n_channels;
+extern uint32_t wav_cfg_gain;
+extern uint32_t wav_udp_packets_sent;
+extern uint32_t wav_dma_errors;    // diagnostic: CDMA read failures (not on the wire)
 
 #endif // MAIN_H

@@ -702,3 +702,74 @@ void pl_lfp_upload_coeffs(const int32_t *coeffs, int n) {
 uint32_t pl_lfp_read_status(void) {
     return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_13_OFFSET);
 }
+
+// ============================================================================
+// Wavelet (Tier-3) scalogram engine control (CTRL_REG_WAV_*; see
+// wavelet_dsp_block.sv). Mirrors the LFP indirect-upload pattern, with a
+// 2-bit target selector ([3:2] of the strobe reg) choosing which RAM the
+// auto-incrementing pointer addresses (voice coef / halfband / selector).
+// The engine math is unchanged from the v2 port; only the packetizer differs.
+// ============================================================================
+uint8_t  wav_cfg_enable = 0, wav_cfg_n_octaves = WAV_N_OCTAVES,
+         wav_cfg_n_voices = WAV_V, wav_cfg_n_taps = WAV_N_TAPS;
+uint8_t  wav_cfg_n_channels = WAV_K;   // active channels (lanes); <= WAV_K build cap
+uint32_t wav_cfg_gain = 0;
+
+void pl_wav_set_enable(uint8_t enable) {
+    uint32_t cfg = ((uint32_t)(enable & 0x1))
+                 | ((uint32_t)(wav_cfg_n_octaves  & 0xF)  << 4)
+                 | ((uint32_t)(wav_cfg_n_voices   & 0xF)  << 8)
+                 | ((uint32_t)(wav_cfg_n_taps     & 0xFF) << 12)
+                 | ((uint32_t)(wav_cfg_n_channels & 0xFF) << 20);  // streamed lanes
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_WAV_CFG_OFFSET, cfg);
+    wav_cfg_enable = enable;
+}
+
+void pl_wav_set_params(uint8_t n_octaves, uint8_t n_voices, uint8_t n_taps, uint32_t gain) {
+    wav_cfg_n_octaves = n_octaves; wav_cfg_n_voices = n_voices; wav_cfg_n_taps = n_taps;
+    wav_cfg_gain = gain;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_WAV_GAIN_OFFSET, gain);
+    // re-emit the cfg reg with the new dims (keeps the current enable state)
+    pl_wav_set_enable(wav_cfg_enable);
+}
+
+void pl_wav_set_n_channels(uint8_t n_channels) {
+    if (n_channels == 0 || n_channels > WAV_K) n_channels = WAV_K;
+    wav_cfg_n_channels = n_channels;
+    pl_wav_set_enable(wav_cfg_enable);   // re-emit cfg so n_channels takes effect
+}
+
+// Upload window: the strobe reg carries the toggle, ptr-clear, and 2-bit
+// target. We keep the target stable across the begin (ptr-clear) and each
+// push (toggle edge) so the edge writes into the selected RAM.
+static uint32_t wav_strobe = 0;
+static uint32_t wav_target = WAV_TARGET_VOICE_COEF;
+
+static void wav_begin(uint32_t target) {
+    wav_target = target;
+    wav_strobe = 0;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_WAV_STROBE_OFFSET, WAV_STROBE_PTR_CLR | target);
+    usleep(2);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_WAV_STROBE_OFFSET, target);  // release ptr-clear
+    usleep(2);
+}
+
+static void wav_push(uint32_t data) {
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_WAV_DATA_OFFSET, data);
+    wav_strobe ^= WAV_STROBE_TOGGLE;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_WAV_STROBE_OFFSET, wav_strobe | wav_target);
+    usleep(2);
+}
+
+void pl_wav_sel_begin(void)  { wav_begin(WAV_TARGET_SELECTOR); }
+void pl_wav_sel_push(uint8_t channel) { wav_push((uint32_t)channel & 0xFF); }
+
+void pl_wav_coef_begin(void) { wav_begin(WAV_TARGET_VOICE_COEF); }
+void pl_wav_coef_push(int32_t coef) { wav_push((uint32_t)(coef & 0x3FFFF)); }
+
+void pl_wav_hb_begin(void)   { wav_begin(WAV_TARGET_HALFBAND); }
+void pl_wav_hb_push(int32_t coef) { wav_push((uint32_t)(coef & 0x3FFFF)); }
+
+uint32_t pl_wav_read_status(void) {
+    return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_14_OFFSET);
+}

@@ -1,0 +1,1057 @@
+// =====================================================================
+// wavelet_cqt_engine.sv  --  Tier-3 multirate wavelet (constant-Q / Morse)
+// scalogram engine. A time-shared MAC computes both the octave-cascade
+// halfband ÷2 decimations and the V complex bandpass voices per octave,
+// producing a real-time scalogram of K selected channels over N_OCTAVES
+// octaves x V complex voices.
+//
+// v2 STEP 1 -- TWO MAC LANES. The voice MAC uses two real multipliers: lane A
+// multiplies the ring sample by the RE coefficient and lane B by the IM
+// coefficient of the SAME tap in the SAME cycle (both lanes share one ring read;
+// the voice coef RAM is replicated two ways with independent read addresses, the
+// lfp_fir_decimator N_MAC precedent). A voice tap therefore costs ONE MAC cycle
+// instead of the old re/im 2-phase pair -- this halves the worst-case
+// (all-octaves-coincide) pass from ~1758*K to ~990*K clocks. The scalogram
+// VALUES are bit-identical to the single-MAC engine (only the issue order
+// changed; re and im now accumulate in lockstep instead of alternating). The
+// halfband ÷2 still uses lane A only (lane B idle during HB). Two MAC lanes
+// alone reach K=16 real-time-clean.
+//
+// v2 STEP 2 -- LAZY WORK-SPREAD (the big win). The old engine ran the WHOLE
+// voice MAC for every advancing octave inside the single coincidence-frame pass
+// (peak = all octaves at fcount=0). STEP 2 keeps octave 0 (and the cheap HB
+// cascade) EAGER each frame but DEFERS each slower octave's voice column into a
+// persistent, deadline-monotonic drain that spreads it across the octave's
+// 2^o-frame window. The peak per-frame compute collapses from ~990*K (peak)
+// toward ~2x octave-0's cost (~198*K average), so the real-time-clean ceiling
+// rises to K=96 (busy duty 80%) / K=112 (94%, tight); K=128 overruns (99%).
+// Each deferred voice column reads the ring at a head-pointer snapshot pinned at
+// the octave's enqueue deadline (head_snap[o]) -- the octave's ring is written
+// only at its own deadlines and RING_DEPTH (64) >> N_TAPS (24), so the
+// newest-N_TAPS window stays intact for the whole deferred drain (the
+// snapshot-across-frames rule, satisfied by a pointer snapshot, no BRAM copy).
+// The arithmetic is the identical datapath, so the VALUES stay bit-exact;
+// only WHEN each column is emitted changes. See the FSM block below for detail.
+//
+// v2 STEP 2b -- FOUR MAC LANES (two voices per cycle). The voice MAC computes
+// TWO voices at once: lane A/B = re/im of voice v, lane C/D = re/im of voice
+// v+1, all four sharing ONE ring read (both voices use the same octave sample).
+// The voice coef RAM is replicated four ways (independent read addresses); the
+// expensive per-(lane,octave) ring BRAM stays SINGLE-copy. A voice-PAIR column
+// then takes N_TAPS cycles (half the 2-MAC cost), emitted SEQUENTIALLY through
+// the same emit -> results-BRAM writer (the two complex bins go out two cycles
+// apart so the writer's re/im serialisation doesn't collide). Odd voice counts
+// emit the lone last voice on lanes A/B only. With work-spread this lifts the
+// real-time-clean ceiling to K=176 (82% busy duty; K=184 = 86%, K=192 overruns
+// -- the per-voice emit overhead caps it before K=256). Still BIT-EXACT.
+//
+// Generalizes lfp_fir_decimator.sv (time-shared MAC, shared coef RAM,
+// per-channel delay-line BRAM, compute-overrun guard) to:
+//   * COMPLEX voice coefficients (Q1.17 re/im). The LFP input is real, so a
+//     complex tap is just acc_re += cre*x and acc_im += cim*x -- 2 real MACs
+//     per tap sharing the same sample.
+//   * V voices per octave sharing N_TAPS-long complex shapes (constant-Q):
+//     the SAME V shapes are reused at every octave (the octave sample rate
+//     halves, so each band's center freq in Hz halves -- a dyadic cascade).
+//   * a multirate à-trous octave cascade: octave o runs at fs/2^o, fed by a
+//     halfband ÷2 of octave o-1's stream. Per-(lane,octave) sample rings.
+//
+// MAC-bus discipline: the engine owns one ring read port (shared by both MAC
+// lanes), TWO voice-coef read ports (re on lane A, im on lane B), one halfband-
+// coef read port, and a 2-lane MAC pipeline. The FSM sequences (a) HALFBAND
+// passes -- HB_TAPS real MACs (lane A) producing one ÷2 sample stored back into
+// the next octave's ring, and (b) VOICE passes -- n_taps cycles, each producing
+// the re AND im product of one tap (lanes A+B), accumulating a complex bin
+// written to the results BRAM. A standalone wavelet_halfband.sv exists as the
+// reusable ÷2 primitive (+ its own unit TB); the engine integrates the same
+// arithmetic for clean single-bus scheduling.
+//
+// Scheduling (K=32 first build = single MAC, naive per-base-frame pass):
+//   On every base-rate LFP frame: stage each lane's new octave-0 sample,
+//   then run one pass that (1) commits octave-0 samples, (2) cascades the
+//   halfband for every octave that advances this frame (octave o advances
+//   iff fcount mod 2^o == 0), (3) runs the V voices for every advanced
+//   octave and writes its complex column to the results BRAM. Worst case
+//   (octave 0, every frame): K*(V*2*N_TAPS) MAC cycles + a little overhead
+//   -- tiny vs the ~28000-clock base-frame budget at 3 kHz. `overrun`
+//   latches if a fresh frame arrives mid-pass (late frame dropped, never
+//   corrupted) -- exactly lfp_fir_decimator's guarantee.
+//
+// Results BRAM layout -- STEP 2 UNIFIED OCTAVE-SPLIT (per docs/unified-packet-
+// format.md). The compute is the v2 engine (bit-exact VALUES); the PACKETIZER
+// builds ONE unified wire packet per advancing octave, each in its OWN region:
+//   region(o) = o * OCT_STRIDE_WORDS   (word address; byte = word<<2)
+// so the PS DMAs a fresh octave region into a pbuf and sends it (stream_type=3).
+//
+//   region(o) = [ 8-word unified header | this octave's K*n_voc re/im bins ]
+//
+//   Unified common header (identical across streams; only type+AUX differ):
+//     w0 = MAGIC = 0xCAFEBABE
+//     w1 = TYPE_VER = stream_type(3) | version(1)<<8 | flags<<16
+//     w2/w3 = 64-bit master timestamp (of the frame that enqueued this octave)
+//     w4 = SEQ -- this octave's OWN per-octave packet sequence (+1 per emit)
+//     w5 = AUX0 = octave[3:0] | n_octaves[7:4] | n_voices[11:8] | overrun[24]
+//     w6 = AUX1 = n_channels[7:0] | lane_start[23:8]  (lane_start = 0)
+//     w7 = RSVD = 0
+//   Payload (PER-OCTAVE, row stride = n_voc):
+//     word(lane,voice) = HDR_WORDS + (lane*n_voc + voice)*2 ; +0=re,+1=im.
+//     Values signed OUT_W, sign-extended to 32. lane_start = 0; the firmware
+//     sends the first n_channels lanes (n_channels*n_voc bins) so the packet
+//     fits ONE datagram (32 + n_channels*n_voc*8 <= 1472 -> n*v <= 180).
+//
+//   RATE-ALIGNED: region o is rebuilt ONLY when octave o advances (its column
+//   completes), so octave 0 streams at the base rate and octave 7 at base/128 --
+//   no redundant re-sending of slow bands.
+//
+// Voice coef RAM: V*N_TAPS complex pairs interleaved -- word
+//   2*(v*N_TAPS+j)+0 = re, +1 = im.
+// =====================================================================
+module wavelet_cqt_engine #(
+    parameter int N_CH      = 256,
+    parameter int K         = 4,
+    parameter int N_OCTAVES = 4,
+    parameter int V         = 4,
+    parameter int N_TAPS    = 24,
+    parameter int HB_TAPS   = 7,
+    parameter int DATA_W    = 16,
+    parameter int COEF_W    = 18,
+    parameter int COEF_FRAC = 17,
+    parameter int ACC_W     = 48,
+    parameter int OUT_W     = 18,
+    parameter int RING_DEPTH= 64,   // >= max(N_TAPS, HB_TAPS+1), power of 2
+    parameter int RES_AW    = 14,
+    // derived
+    localparam int CH_W   = (N_CH <= 1) ? 1 : $clog2(N_CH),
+    localparam int LANE_W = (K    <= 1) ? 1 : $clog2(K),
+    localparam int OCT_W  = (N_OCTAVES <= 1) ? 1 : $clog2(N_OCTAVES),
+    localparam int VOICE_W= (V    <= 1) ? 1 : $clog2(V),
+    localparam int TAP_W  = (N_TAPS<= 1) ? 1 : $clog2(N_TAPS),
+    localparam int HBTAP_W= (HB_TAPS<=1) ? 1 : $clog2(HB_TAPS),
+    localparam int RING_AW= $clog2(RING_DEPTH),
+    localparam int COEFN  = V * N_TAPS,
+    localparam int COEF_AW= $clog2(2*COEFN)
+) (
+    input  logic clk,
+    input  logic rstn,
+
+    // ---- Tier-1 LFP output stream tap (signed, from lfp_dsp_block) ----
+    input  logic                 lfp_out_valid,
+    input  logic [CH_W-1:0]      lfp_out_channel,
+    input  logic signed [DATA_W-1:0] lfp_out_data,
+    input  logic                 lfp_frame_start,
+    // ---- live 64-bit master timestamp (for the unified per-octave header) ----
+    input  logic [63:0]          master_timestamp,
+    // ---- active streamed channel count (host config; bounds the per-octave
+    //      packet to one datagram; clamped to K) ----
+    input  logic [LANE_W:0]      n_channels_cfg,
+
+    // ---- configuration (host, latched while disabled) ----
+    input  logic                 wav_en,
+    input  logic [OCT_W:0]       n_octaves_cfg,
+    input  logic [VOICE_W:0]     n_voices_cfg,
+    input  logic [TAP_W:0]       n_taps_cfg,
+    input  logic [4*N_OCTAVES-1:0] gain_cfg,      // 4 bits/octave (left-shift)
+
+    // ---- channel selector write ----
+    input  logic                 sel_wr_en,
+    input  logic [LANE_W-1:0]    sel_wr_lane,
+    input  logic [CH_W-1:0]      sel_wr_ch,
+
+    // ---- voice coef write (interleaved re,im) ----
+    input  logic                 coef_wr_en,
+    input  logic [COEF_AW-1:0]   coef_wr_addr,
+    input  logic signed [COEF_W-1:0] coef_wr_data,
+
+    // ---- halfband coef write ----
+    input  logic                 hb_wr_en,
+    input  logic [HBTAP_W-1:0]   hb_wr_addr,
+    input  logic signed [COEF_W-1:0] hb_wr_data,
+
+    // ---- results BRAM port A ----
+    output logic                 res_bram_clk,
+    output logic                 res_bram_rst,
+    output logic [RES_AW-1:0]    res_bram_addr,
+    output logic [31:0]          res_bram_din,
+    input  logic [31:0]          res_bram_dout,
+    output logic                 res_bram_en,
+    output logic [3:0]           res_bram_we,
+
+    // ---- status ----
+    output logic [31:0]          frame_seq,
+    output logic                 busy,
+    output logic                 overrun
+);
+    localparam int PROD_W  = DATA_W + COEF_W;
+    localparam int RES_WAW = RES_AW - 2;
+
+    // =================================================================
+    // STEP 2 -- UNIFIED OCTAVE-SPLIT PACKETIZATION.
+    //
+    // The engine COMPUTE is unchanged from the v2 port (bit-exact (re,im)
+    // values). What changed is the results-BRAM WRITER: instead of one big
+    // whole-surface packet, the PL now builds ONE unified per-octave wire
+    // packet per advancing octave, each in its OWN region of the results BRAM:
+    //   region(o) = o * OCT_STRIDE_WORDS  (word address)
+    // Each region holds the 8-word unified common header then THIS octave's
+    // n_channels*n_voices complex bins (re,im int32), lane-major / voice-minor:
+    //   word(lane,voice) = HDR_WORDS + (lane*n_voices + voice)*2 ; +0=re,+1=im.
+    //
+    // Unified common header (docs/unified-packet-format.md WAVELET section):
+    //   w0 = MAGIC = 0xCAFEBABE
+    //   w1 = TYPE_VER = stream_type(3) | version(1)<<8 | flags<<16
+    //   w2/w3 = 64-bit master timestamp (of the frame that enqueued this octave)
+    //   w4 = SEQ -- this octave's OWN per-octave packet sequence (+1/emit)
+    //   w5 = AUX0 = octave[3:0] | n_octaves[7:4] | n_voices[11:8] | overrun[24]
+    //   w6 = AUX1 = n_channels[7:0] | lane_start[23:8]   (lane_start = 0 here)
+    //   w7 = RSVD = 0
+    //
+    // RATE-ALIGNED: a region is (re)built ONLY when its octave advances
+    // (fcount mod 2^o == 0 -- the work-spread scheduler's per-octave deadline),
+    // so octave 0 updates at the base rate, octave 7 at base/128. The host holds
+    // each octave's last value between its updates.
+    //
+    // The PS polls each region's SEQ (a 1-word peek, DMA-EXEMPT) and, when it
+    // advances, CDMAs that ONE region (header+payload, <= one datagram) and
+    // sends it on the unified UDP port with stream_type=3.
+    // =================================================================
+    localparam int          HDR_WORDS      = 8;   // unified common header
+    localparam logic [31:0] UNIFIED_MAGIC  = 32'hCAFEBABE;
+    localparam logic [7:0]  STREAM_TYPE_WAV= 8'd3;
+    localparam logic [7:0]  UNIFIED_VERSION= 8'd1;
+    localparam logic [31:0] WAV_TYPE_VER   = {16'd0, UNIFIED_VERSION, STREAM_TYPE_WAV};
+    // Per-octave region stride (words). Must hold HDR_WORDS + K*V*2 and keep
+    // all N_OCTAVES regions inside the BRAM (N_OCTAVES*OCT_STRIDE_WORDS <= 2^RES_WAW).
+    // K=40,V=4 -> 8 + 320 = 328; round to 512 (8*512 = 4096 words = 16 KB <= 64 KB).
+    localparam int          OCT_STRIDE_WORDS = 512;
+    localparam signed [OUT_W:0]  OUT_MAX =  (1 <<< (OUT_W-1)) - 1;
+    localparam signed [OUT_W:0]  OUT_MIN = -(1 <<< (OUT_W-1));
+    localparam signed [DATA_W:0] DAT_MAX =  (1 <<< (DATA_W-1)) - 1;
+    localparam signed [DATA_W:0] DAT_MIN = -(1 <<< (DATA_W-1));
+    localparam signed [ACC_W-1:0] RND_FRAC = ACC_W'(1) <<< (COEF_FRAC-1);
+
+    // =================================================================
+    // Channel selector + reverse map.
+    // =================================================================
+    logic [CH_W-1:0]   sel_ch  [0:K-1];
+    logic [LANE_W-1:0] ch_lane [0:N_CH-1];
+    logic              ch_sel  [0:N_CH-1];
+    integer ci;
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            for (ci=0; ci<N_CH; ci++) ch_sel[ci] <= 1'b0;
+        end else if (sel_wr_en) begin
+            sel_ch[sel_wr_lane] <= sel_wr_ch;
+            ch_lane[sel_wr_ch]  <= sel_wr_lane;
+            ch_sel[sel_wr_ch]   <= 1'b1;
+        end
+    end
+
+    // =================================================================
+    // Coef RAMs (voice complex interleaved + halfband).
+    //
+    // v2 STEP 1 -- 2 MAC lanes. The voice coef RAM is REPLICATED two ways
+    // (identical contents, independent read addresses) so MAC lane A can read
+    // the RE coefficient and MAC lane B the IM coefficient of the SAME tap in
+    // the SAME cycle. This is the lfp_fir_decimator N_MAC precedent (replicate
+    // is cheaper than a true dual-port BRAM and keeps each read single-cycle).
+    // Both copies see every write, so they stay identical. Lane A's copy
+    // (coef_rd_a) also serves the halfband path is NOT needed -- HB has its own
+    // hb_ram -- so during HB only lane A's ring/coef are exercised.
+    // =================================================================
+    // v2 STEP 2b -- FOUR MAC LANES (2 voices/cycle). The coef RAM is replicated
+    // FOUR ways: a=RE(voice v), b=IM(v), c=RE(v+1), d=IM(v+1). All four reads +
+    // one shared ring read happen in ONE cycle, so a tap of TWO voices costs one
+    // MAC cycle -> a voice-PAIR column takes N_TAPS cycles (half the 2-MAC cost).
+    // The expensive ring BRAM stays SINGLE-copy (all 4 lanes share one ring read
+    // -- the two voices use the same octave sample); only the tiny coef RAM grows.
+    logic signed [COEF_W-1:0] coef_ram_a [0:2*COEFN-1];  // RE, voice v
+    logic signed [COEF_W-1:0] coef_ram_b [0:2*COEFN-1];  // IM, voice v
+    logic signed [COEF_W-1:0] coef_ram_c [0:2*COEFN-1];  // RE, voice v+1
+    logic signed [COEF_W-1:0] coef_ram_d [0:2*COEFN-1];  // IM, voice v+1
+    logic signed [COEF_W-1:0] coef_rd_a, coef_rd_b, coef_rd_c, coef_rd_d;
+    logic [COEF_AW-1:0]       coef_rd_addr_a, coef_rd_addr_b, coef_rd_addr_c, coef_rd_addr_d;
+    initial for (int ii=0; ii<2*COEFN; ii++) begin
+        coef_ram_a[ii]='0; coef_ram_b[ii]='0; coef_ram_c[ii]='0; coef_ram_d[ii]='0;
+    end
+    always_ff @(posedge clk) begin
+        if (coef_wr_en) begin
+            coef_ram_a[coef_wr_addr] <= coef_wr_data;
+            coef_ram_b[coef_wr_addr] <= coef_wr_data;
+            coef_ram_c[coef_wr_addr] <= coef_wr_data;
+            coef_ram_d[coef_wr_addr] <= coef_wr_data;
+        end
+        coef_rd_a <= coef_ram_a[coef_rd_addr_a];
+        coef_rd_b <= coef_ram_b[coef_rd_addr_b];
+        coef_rd_c <= coef_ram_c[coef_rd_addr_c];
+        coef_rd_d <= coef_ram_d[coef_rd_addr_d];
+    end
+
+    logic signed [COEF_W-1:0] hb_ram [0:HB_TAPS-1];
+    logic signed [COEF_W-1:0] hb_rd;
+    logic [HBTAP_W-1:0]       hb_rd_addr;
+    initial for (int ii=0; ii<HB_TAPS; ii++) hb_ram[ii]='0;
+    always_ff @(posedge clk) begin
+        if (hb_wr_en) hb_ram[hb_wr_addr] <= hb_wr_data;
+        hb_rd <= hb_ram[hb_rd_addr];
+    end
+
+    // =================================================================
+    // Per-(lane,octave) decimated sample ring buffer (one unified BRAM).
+    //   addr = ((lane*N_OCTAVES + octave)*RING_DEPTH) + ring_pos
+    // head[lane*N_OCTAVES+octave] = ring pos of the NEWEST sample.
+    // =================================================================
+    localparam int RING_N     = K * N_OCTAVES * RING_DEPTH;
+    localparam int RING_MEMAW = $clog2(RING_N);
+    logic signed [DATA_W-1:0] ring [0:RING_N-1];
+    initial for (int ii=0; ii<RING_N; ii++) ring[ii]='0;
+    logic [RING_MEMAW-1:0]    ring_wr_addr, ring_rd_addr;
+    logic                     ring_we;
+    logic signed [DATA_W-1:0] ring_wr_data, ring_rd;
+    always_ff @(posedge clk) begin
+        if (ring_we) ring[ring_wr_addr] <= ring_wr_data;
+        ring_rd <= ring[ring_rd_addr];
+    end
+    logic [RING_AW-1:0] head [0:K*N_OCTAVES-1];
+
+    function automatic [RING_MEMAW-1:0] ridx
+        (input int ln, input int oc, input [RING_AW-1:0] pos);
+        ridx = (((ln*N_OCTAVES) + oc) * RING_DEPTH) + pos;
+    endfunction
+
+    // =================================================================
+    // Frame staging + dyadic schedule.
+    // =================================================================
+    logic signed [DATA_W-1:0] stage [0:K-1];
+    logic signed [DATA_W-1:0] snap  [0:K-1];
+    logic [K-1:0]             stage_vld;
+    logic [31:0]              fcount;
+    logic                     start_pass;
+
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            stage_vld <= '0; start_pass <= 1'b0;
+        end else begin
+            start_pass <= 1'b0;
+            if (lfp_out_valid & lfp_frame_start) begin
+                // the just-completed frame lives in stage[]; snapshot it so the
+                // next frame's writes (this cycle's lane0 + the rest) can't clobber
+                // the compute window. NB-assign reads OLD stage[] this cycle.
+                if (wav_en && (|stage_vld)) begin
+                    start_pass <= 1'b1;
+                    for (int l=0;l<K;l++) snap[l] <= stage[l];
+                end
+                stage_vld <= '0;
+            end
+            if (lfp_out_valid && ch_sel[lfp_out_channel]) begin
+                stage[ch_lane[lfp_out_channel]]     <= lfp_out_data;
+                stage_vld[ch_lane[lfp_out_channel]] <= 1'b1;
+            end
+        end
+    end
+
+    logic [N_OCTAVES-1:0] oct_adv;
+    always_comb begin
+        for (int o=0; o<N_OCTAVES; o++)
+            oct_adv[o] = ((fcount & ((32'd1<<o)-1)) == 0);
+    end
+    logic [N_OCTAVES-1:0] oct_adv_snap;
+
+    // active config (guarded)
+    wire [OCT_W:0]   n_oct = (n_octaves_cfg==0) ? (OCT_W+1)'(1) :
+                             (n_octaves_cfg>N_OCTAVES) ? (OCT_W+1)'(N_OCTAVES) : n_octaves_cfg;
+    wire [VOICE_W:0] n_voc = (n_voices_cfg==0) ? (VOICE_W+1)'(1) :
+                             (n_voices_cfg>V) ? (VOICE_W+1)'(V) : n_voices_cfg;
+    wire [TAP_W:0]   n_tap = (n_taps_cfg==0) ? (TAP_W+1)'(1) :
+                             (n_taps_cfg>N_TAPS) ? (TAP_W+1)'(N_TAPS) : n_taps_cfg;
+    // active streamed channel count (clamped to K). This bounds the per-octave
+    // packet to one datagram; the firmware/host guard enforces n_chan*n_voc<=180.
+    wire [LANE_W:0]  n_chan = (n_channels_cfg==0) ? (LANE_W+1)'(K) :
+                             (n_channels_cfg>K) ? (LANE_W+1)'(K) : n_channels_cfg;
+
+    // =================================================================
+    // FSM state.
+    //
+    // v2 STEP 2 -- LAZY WORK-SPREAD. The old engine ran the WHOLE voice MAC for
+    // every advancing octave inside the single coincidence-frame pass (peak =
+    // all 8 octaves at fcount=0). STEP 2 splits the per-frame work into:
+    //   (1) an EAGER phase per frame: commit octave-0's new sample, run the HB
+    //       cascade for every advancing octave (cheap), and ENQUEUE each
+    //       advancing octave's voice column (set pend[o], snapshot its ring head
+    //       head_snap[o]); and
+    //   (2) a persistent VOICE DRAIN that, in deadline-monotonic order (octave 0
+    //       first -- it is due every frame -- then 1,2,...), computes ONE pending
+    //       octave's full K*V voice column and clears its pend bit, then re-picks.
+    // The drain CONTINUES ACROSS FRAME BOUNDARIES: a new frame's eager phase
+    // preempts it (at a voice-column boundary), then the drain resumes. So slow
+    // octaves' columns are spread over their 2^o-frame windows and the PEAK
+    // per-frame busy collapses toward the AVERAGE (~2x octave-0's cost) instead
+    // of the all-octaves-coincide sum.
+    //
+    // BIT-EXACT: each voice column reads the ring at head_snap[o] -- the head
+    // pinned when octave o was enqueued. octave o's ring is written ONLY at its
+    // own deadlines (every 2^o frames) and RING_DEPTH (64) >> N_TAPS (24), so the
+    // newest-N_TAPS window stays intact for the whole deferred drain (the
+    // snapshot-across-frames rule -- a head-pointer snapshot suffices, no BRAM
+    // copy). The arithmetic is the identical 2-MAC datapath; only WHEN each
+    // column is emitted changes, not its value. When real-time-clean every
+    // octave drains before its next deadline, so head_snap is always its own
+    // deadline's head -> identical to the eager engine.
+    // =================================================================
+    typedef enum logic [3:0] {
+        S_IDLE, S_COMMIT0, S_HB_NEXT, S_HB_RUN, S_HB_STORE,
+        S_V_PICK, S_V_RUN, S_V_EMIT
+    } st_t;
+    st_t st;
+
+    logic [LANE_W-1:0]  cur_lane;
+    logic [OCT_W:0]     cur_oct;     // voice octave being computed
+    logic [VOICE_W:0]   cur_voice;   // first voice of the in-flight PAIR
+    logic [TAP_W:0]     cur_tap;
+    logic [LANE_W-1:0]  commit_lane;
+    logic               emit_wait2;  // S_V_EMIT owes a 2nd emit (the pair partner)
+
+    // ---- work-spread bookkeeping ----
+    // pend[o] : octave o has a voice column enqueued (computed from head_snap[o])
+    //           that has not yet been fully emitted.
+    // head_snap[o] : ring head pinned for octave o's pending column. All lanes
+    //           share one octave head (they advance together), so one snap/octave.
+    // frame_req : a new frame's eager phase is owed (start_pass latched). Serviced
+    //           at the next voice-column boundary (or immediately if idle).
+    // oct0_was_pending_at_frame : tracks whether octave 0 missed its deadline.
+    logic [N_OCTAVES-1:0] pend;
+    logic [RING_AW-1:0]   head_snap [0:N_OCTAVES-1];
+    logic                 frame_req;
+    logic [N_OCTAVES-1:0] frame_adv;   // oct_adv latched for the owed eager phase
+    logic [31:0]          seq_inc;     // pending frame_seq increments (one per frame)
+
+    // lowest set bit of pend = the most-urgent pending octave (deadline-monotonic)
+    logic [OCT_W:0] pick_oct;
+    logic           pick_vld;
+    always_comb begin
+        pick_vld = 1'b0;
+        pick_oct = '0;
+        for (int o=N_OCTAVES-1; o>=0; o--) begin
+            if (pend[o]) begin pick_oct = (OCT_W+1)'(o); pick_vld = 1'b1; end
+        end
+    end
+
+    // -----------------------------------------------------------------
+    // STEP 2 per-octave packet bookkeeping. The payload of octave o's packet is
+    // addressed in region(o); the header writer stamps the unified header when
+    // octave o's column COMPLETES. We keep:
+    //   nvoc_snap  : active voices/octave (the per-octave payload row stride).
+    //   frame_ts   : master timestamp latched at frame arrival -> snapshotted
+    //                per octave (ts_snap[o]) at that octave's enqueue, stamped
+    //                into its header at completion (the truthful "this octave's
+    //                update time").
+    //   oct_seq[o] : octave o's OWN per-octave packet sequence (+1 per emit).
+    // -----------------------------------------------------------------
+    logic [VOICE_W:0] nvoc_snap;     // voices/octave (payload row stride)
+    logic [3:0]       noct_snap;     // raw n_octaves for the header AUX0 field
+    logic [3:0]       nvoc4_snap;    // raw n_voices  for the header AUX0 field
+    logic [7:0]       nchan_snap;    // raw n_channels for the header AUX1 field
+    logic             ov_snap;       // overrun snapshot
+    logic [63:0]      frame_ts;      // master timestamp of the in-progress frame
+    logic [63:0]      ts_snap [0:N_OCTAVES-1];   // per-octave enqueue timestamp
+    logic [31:0]      oct_seq [0:N_OCTAVES-1];   // per-octave packet sequence
+
+    // header-write micro-sequence (runs when an octave column completes)
+    logic [2:0]       hdr_idx;       // 0..7 while writing the 8-word header
+    logic             hdr_busy;
+    logic             hdr_kick;      // FSM->BRAM-writer: start the header now
+    logic [OCT_W:0]   hdr_oct;       // which octave's region the header targets
+    logic [63:0]      hdr_ts;        // timestamp stamped in this packet's header
+    logic [31:0]      hdr_seq;       // this octave's per-octave seq for the header
+    // AUX0 (w5) = octave[3:0] | n_octaves[7:4] | n_voices[11:8] | overrun[24]
+    // (hdr_oct is OCT_W+1 bits wide; zero-extend to 32 before masking the nibble)
+    wire  [31:0]      hdr_aux0 = (32'(hdr_oct) & 32'hF) | ({32'(noct_snap)} << 4)
+                              | ({32'(nvoc4_snap)} << 8) | ({31'd0, ov_snap} << 24);
+    // AUX1 (w6) = n_channels[7:0] | lane_start[23:8]  (lane_start = 0)
+    wire  [31:0]      hdr_aux1 = {24'd0, nchan_snap};
+    // region base word for octave o
+    function automatic [RES_WAW-1:0] oct_region (input [OCT_W:0] o);
+        oct_region = RES_WAW'(o * OCT_STRIDE_WORDS);
+    endfunction
+
+    // halfband pass bookkeeping
+    logic [LANE_W-1:0]  hb_lane;
+    logic [OCT_W:0]     hb_oct;      // octave being PRODUCED (source = hb_oct-1)
+    logic [HBTAP_W:0]   hb_tap;
+    logic               hb_run_last; // last tap issued
+
+    logic [2:0]         drain;
+
+    // =================================================================
+    // MAC address generation (single shared ring read + TWO coef read buses).
+    // The "mode" selects which read window the FSM drives.
+    //   HB mode  : ring = octave (hb_oct-1) of hb_lane, newest..oldest;
+    //              coef = hb_ram[hb_tap]   (lane A only; lane B idle)
+    //   VOICE mode: ring = octave cur_oct of cur_lane, newest..oldest (ONE
+    //               read, shared by both MAC lanes -- they consume the same
+    //               sample); coef A = coef_ram_a[2*(voice*N_TAPS+tap)+0] (RE),
+    //               coef B = coef_ram_b[2*(voice*N_TAPS+tap)+1] (IM). Both
+    //               coef reads + the shared ring read happen in ONE cycle, so a
+    //               tap now costs ONE MAC cycle instead of the old re/im 2-phase
+    //               pair. This is the v2 STEP-1 2x.
+    // =================================================================
+    wire in_hb    = (st == S_HB_RUN);
+    wire in_voice = (st == S_V_RUN);
+
+    // TIMING (see 2-MAC engine): latch the source/dest octave heads into small
+    // registers so the ring address path doesn't carry the big head[] mux.
+    logic [RING_AW-1:0] hb_src_head, hb_dst_head;
+    logic [RING_AW-1:0] oct0_head, commit_pos;
+    // VOICE reads the PINNED head (head_snap), not the live head -- the deferred
+    // column must see octave cur_oct's ring as of its enqueue deadline.
+    wire [RING_AW-1:0] v_head   = head_snap[cur_oct];
+
+    // voice v+1 index (the second voice of the pair). If cur_voice is the last
+    // active voice (cur_voice+1 >= n_voc) there is NO pair partner -- lanes C/D
+    // are computed but their emit is suppressed (pair2 = 0).
+    wire [VOICE_W:0] cur_voice2 = cur_voice + 1'b1;
+
+    always_comb begin
+        // defaults
+        ring_rd_addr   = '0;
+        hb_rd_addr     = '0;
+        coef_rd_addr_a = '0;
+        coef_rd_addr_b = '0;
+        coef_rd_addr_c = '0;
+        coef_rd_addr_d = '0;
+        if (in_hb) begin
+            ring_rd_addr   = ridx(hb_lane, hb_oct-1,
+                                  (hb_src_head - RING_AW'(hb_tap)) & (RING_DEPTH-1));
+            hb_rd_addr     = hb_tap[HBTAP_W-1:0];
+        end else begin // voice -- all 4 lanes read the SAME ring slot
+            ring_rd_addr   = ridx(cur_lane, cur_oct,
+                                  (v_head - RING_AW'(cur_tap)) & (RING_DEPTH-1));
+            coef_rd_addr_a = COEF_AW'(2*(cur_voice *N_TAPS + cur_tap) + 0); // RE v
+            coef_rd_addr_b = COEF_AW'(2*(cur_voice *N_TAPS + cur_tap) + 1); // IM v
+            coef_rd_addr_c = COEF_AW'(2*(cur_voice2*N_TAPS + cur_tap) + 0); // RE v+1
+            coef_rd_addr_d = COEF_AW'(2*(cur_voice2*N_TAPS + cur_tap) + 1); // IM v+1
+        end
+    end
+
+    // =================================================================
+    // MAC markers (s0 -> registered, valid alongside the 1-cyc RAM reads).
+    // v2 STEP 1: no more re/im phase -- each VOICE tap produces re AND im
+    // products in one cycle (lane A = re, lane B = im). ag_is_hb selects the
+    // halfband single-MAC path (lane A only).
+    // =================================================================
+    logic        ag_v, ag_first, ag_last, ag_is_hb, ag_pair2;
+    logic [3:0]  ag_gain;
+    // (output routing for VOICE: which lane/scale to write)
+    logic [LANE_W-1:0] ag_lane;
+    logic [OCT_W:0]    ag_oct;
+    logic [VOICE_W:0]  ag_voice;   // first voice of the pair (v); v+1 is implicit
+
+    // s1: products + markers. 4 MAC lanes: a=RE(v), b=IM(v), c=RE(v+1), d=IM(v+1).
+    // For the halfband, only lane A (prod1_a, coef=hb_rd) is meaningful. pair2_1
+    // says the v+1 voice is a real, in-range voice (else lanes C/D are ignored).
+    logic signed [PROD_W-1:0] prod1_a, prod1_b, prod1_c, prod1_d;
+    logic        v1, first1, last1, is_hb1, pair2_1;
+    logic [3:0]  gain1;
+    logic [LANE_W-1:0] lane1;
+    logic [OCT_W:0]    oct1;
+    logic [VOICE_W:0]  voice1;
+
+    // coef select for lane A MUST use the s1-stage marker ag_is_hb -- it is
+    // registered ONCE (from the FSM), so it is valid alongside the RAM reads in
+    // this same cycle. (is_hb1 is the s2 copy, one cycle too late for the
+    // product, used only by the accumulate stage below.)
+    wire signed [COEF_W-1:0] coef_sel_a = ag_is_hb ? hb_rd : coef_rd_a;
+
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            prod1_a<='0; prod1_b<='0; prod1_c<='0; prod1_d<='0;
+            v1<=0; first1<=0; last1<=0; is_hb1<=0; pair2_1<=0;
+            gain1<='0; lane1<='0; oct1<='0; voice1<='0;
+        end else begin
+            prod1_a <= ring_rd * coef_sel_a;   // RE(v) (or HB) product
+            prod1_b <= ring_rd * coef_rd_b;    // IM(v)
+            prod1_c <= ring_rd * coef_rd_c;    // RE(v+1)
+            prod1_d <= ring_rd * coef_rd_d;    // IM(v+1)
+            v1      <= ag_v; first1<=ag_first; last1<=ag_last; is_hb1<=ag_is_hb;
+            pair2_1 <= ag_pair2;
+            gain1   <= ag_gain; lane1<=ag_lane; oct1<=ag_oct; voice1<=ag_voice;
+        end
+    end
+
+    // =================================================================
+    // s2: accumulate. Voice has re + im accumulators; halfband uses acc_re.
+    // first1 clears the relevant accumulator. On the last tap of a VOICE
+    // (im phase) both re/im are complete -> emit a complex pair. On a HB
+    // last tap, the result feeds back into the ring.
+    // =================================================================
+    logic signed [ACC_W-1:0] acc_re,  acc_im,  acc_hb;
+    logic signed [ACC_W-1:0] acc_re2, acc_im2;            // voice v+1 accumulators
+    logic signed [ACC_W-1:0] vre_sum, vim_sum, hb_sum;
+    logic signed [ACC_W-1:0] vre_sum2, vim_sum2;
+
+    // first1 (tap0) clears the voice accumulators. 4 MAC lanes: voice v on
+    // a(re)/b(im), voice v+1 on c(re)/d(im). All advance every voice cycle.
+    always_comb begin
+        vre_sum  = (first1) ? $signed(prod1_a) : (acc_re  + prod1_a);
+        vim_sum  = (first1) ? $signed(prod1_b) : (acc_im  + prod1_b);
+        vre_sum2 = (first1) ? $signed(prod1_c) : (acc_re2 + prod1_c);
+        vim_sum2 = (first1) ? $signed(prod1_d) : (acc_im2 + prod1_d);
+        hb_sum   = (first1) ? $signed(prod1_a) : (acc_hb  + prod1_a);
+    end
+
+    // round/shift helpers
+    function automatic signed [OUT_W-1:0] vshift_sat
+        (input signed [ACC_W-1:0] a, input [3:0] g);
+        int eff; logic signed [ACC_W-1:0] r;
+        eff = COEF_FRAC - g;
+        if (eff <= 0) r = a <<< (-eff);
+        else          r = (a + (ACC_W'(1) <<< (eff-1))) >>> eff;
+        if (r > OUT_MAX)      vshift_sat = OUT_MAX[OUT_W-1:0];
+        else if (r < OUT_MIN) vshift_sat = OUT_MIN[OUT_W-1:0];
+        else                  vshift_sat = r[OUT_W-1:0];
+    endfunction
+
+    function automatic signed [DATA_W-1:0] hbshift_sat (input signed [ACC_W-1:0] a);
+        logic signed [ACC_W-1:0] r;
+        r = (a + RND_FRAC) >>> COEF_FRAC;
+        if (r > DAT_MAX)      hbshift_sat = DAT_MAX[DATA_W-1:0];
+        else if (r < DAT_MIN) hbshift_sat = DAT_MIN[DATA_W-1:0];
+        else                  hbshift_sat = r[DATA_W-1:0];
+    endfunction
+
+    // emit signals from the accumulate stage back to the FSM
+    logic                     v_emit;          // a complex voice pair is ready
+    logic signed [OUT_W-1:0]  v_emit_re, v_emit_im;
+    logic [LANE_W-1:0]        v_emit_lane;
+    logic [OCT_W:0]           v_emit_oct;
+    logic [VOICE_W:0]         v_emit_voice;
+    logic                     hb_emit;         // a halfband ÷2 sample is ready
+    logic signed [DATA_W-1:0] hb_emit_data;
+
+    // ---- emit pipeline (timing): on the last tap, register the RAW
+    // accumulators + routing; apply the round/variable-shift/saturate in the
+    // NEXT cycle. This breaks the DSP-add -> barrel-shift-round-saturate carry
+    // chain that otherwise failed setup at 84 MHz on the v_emit_im path. The
+    // FSM (S_V_EMIT / S_HB_STORE) already waits for the *_emit pulse, so the
+    // extra cycle is free in the per-frame budget. ----
+    logic                     v_raw;           // voice v raw captured, shift/sat pending
+    logic signed [ACC_W-1:0]  v_raw_re, v_raw_im;
+    logic [3:0]               v_raw_gain;
+    logic [LANE_W-1:0]        v_raw_lane;
+    logic [OCT_W:0]           v_raw_oct;
+    logic [VOICE_W:0]         v_raw_voice;
+    // SECOND-voice (v+1) emit slot. When a pair completes, voice v emits first
+    // (v_raw) and voice v+1 is held in these regs, then fired (v_raw2) the NEXT
+    // cycle so the two complex bins go out SEQUENTIALLY through the same emit ->
+    // BRAM-writer path (which serialises re,im per emit). Only fired if pair2.
+    logic                     v_raw2_pend, v_raw2_pend_d, v_raw2;
+    logic signed [ACC_W-1:0]  v_raw2_re, v_raw2_im;
+    logic [3:0]               v_raw2_gain;
+    logic [LANE_W-1:0]        v_raw2_lane;
+    logic [OCT_W:0]           v_raw2_oct;
+    logic [VOICE_W:0]         v_raw2_voice;
+    logic                     hb_raw;
+    logic signed [ACC_W-1:0]  hb_raw_sum;
+
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            acc_re<='0; acc_im<='0; acc_hb<='0; acc_re2<='0; acc_im2<='0;
+            v_emit<=0; hb_emit<=0; v_emit_re<='0; v_emit_im<='0;
+            v_emit_lane<='0; v_emit_oct<='0; v_emit_voice<='0; hb_emit_data<='0;
+            v_raw<=0; v_raw_re<='0; v_raw_im<='0; v_raw_gain<='0;
+            v_raw_lane<='0; v_raw_oct<='0; v_raw_voice<='0; hb_raw<=0; hb_raw_sum<='0;
+            v_raw2_pend<=0; v_raw2_pend_d<=0; v_raw2<=0; v_raw2_re<='0; v_raw2_im<='0; v_raw2_gain<='0;
+            v_raw2_lane<='0; v_raw2_oct<='0; v_raw2_voice<='0;
+        end else begin
+            v_emit  <= 1'b0;
+            hb_emit <= 1'b0;
+            v_raw   <= 1'b0;
+            hb_raw  <= 1'b0;
+            v_raw2  <= 1'b0;
+            v_raw2_pend_d <= 1'b0;
+
+            // stage 2: shift/saturate voice v. If a pair2 is pending, queue it to
+            // fire TWO cycles after voice v's emit -- the results-BRAM writer
+            // takes 2 cycles per emit (re then im), so the second voice's v_emit
+            // must not land while the writer is still serialising voice v.
+            if (v_raw) begin
+                v_emit       <= 1'b1;
+                v_emit_re    <= vshift_sat(v_raw_re, v_raw_gain);
+                v_emit_im    <= vshift_sat(v_raw_im, v_raw_gain);
+                v_emit_lane  <= v_raw_lane;
+                v_emit_oct   <= v_raw_oct;
+                v_emit_voice <= v_raw_voice;
+                if (v_raw2_pend) v_raw2_pend_d <= 1'b1;  // delay one more cycle
+            end
+            if (v_raw2_pend_d) v_raw2 <= 1'b1;            // emit voice v+1 now
+            // stage 2b: shift/saturate voice v+1 (the pair partner)
+            if (v_raw2) begin
+                v_emit       <= 1'b1;
+                v_emit_re    <= vshift_sat(v_raw2_re, v_raw2_gain);
+                v_emit_im    <= vshift_sat(v_raw2_im, v_raw2_gain);
+                v_emit_lane  <= v_raw2_lane;
+                v_emit_oct   <= v_raw2_oct;
+                v_emit_voice <= v_raw2_voice;
+            end
+            if (hb_raw) begin
+                hb_emit      <= 1'b1;
+                hb_emit_data <= hbshift_sat(hb_raw_sum);
+            end
+
+            if (v1) begin
+                if (is_hb1) begin
+                    acc_hb <= hb_sum;
+                    if (last1) begin   // capture the raw sum; saturate next cycle
+                        hb_raw     <= 1'b1;
+                        hb_raw_sum <= hb_sum;
+                    end
+                end else begin
+                    // voice pair: v on a/b, v+1 on c/d; all advance every cycle.
+                    acc_re  <= vre_sum;
+                    acc_im  <= vim_sum;
+                    acc_re2 <= vre_sum2;
+                    acc_im2 <= vim_sum2;
+                    if (last1) begin   // last tap -> the voice pair is done
+                        // voice v -> v_raw (emits first)
+                        v_raw        <= 1'b1;
+                        v_raw_re     <= vre_sum;
+                        v_raw_im     <= vim_sum;
+                        v_raw_gain   <= gain1;
+                        v_raw_lane   <= lane1;
+                        v_raw_oct    <= oct1;
+                        v_raw_voice  <= voice1;
+                        // voice v+1 -> held, emitted the cycle after v (if real)
+                        v_raw2_pend  <= pair2_1;
+                        v_raw2_re    <= vre_sum2;
+                        v_raw2_im    <= vim_sum2;
+                        v_raw2_gain  <= gain1;
+                        v_raw2_lane  <= lane1;
+                        v_raw2_oct   <= oct1;
+                        v_raw2_voice <= voice1 + 1'b1;
+                    end
+                end
+            end
+        end
+    end
+
+    // =================================================================
+    // FSM.
+    // =================================================================
+    // helper: do the per-frame EAGER phase setup (header + config snapshot + the
+    // oct_adv latch). Called when a frame_req is serviced.
+    // (inlined below; kept as a comment marker for readability)
+
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            st<=S_IDLE; busy<=0; overrun<=0; frame_seq<='0; fcount<='0;
+            cur_lane<='0; cur_oct<='0; cur_voice<='0; cur_tap<='0; emit_wait2<=0;
+            commit_lane<='0; hb_lane<='0; hb_oct<='0; hb_tap<='0; hb_run_last<=0;
+            ring_we<=0; drain<='0; oct_adv_snap<='0;
+            ag_v<=0; ag_first<=0; ag_last<=0; ag_is_hb<=0; ag_pair2<=0; ag_gain<='0;
+            ag_lane<='0; ag_oct<='0; ag_voice<='0;
+            nvoc_snap<='0; noct_snap<='0; nvoc4_snap<='0; nchan_snap<='0;
+            hdr_seq<='0; ov_snap<=0; hdr_kick<=0; hdr_oct<='0; hdr_ts<='0;
+            frame_ts<='0;
+            pend<='0; frame_req<=0; frame_adv<='0; seq_inc<='0;
+            hb_src_head<='0; hb_dst_head<='0; oct0_head<='0; commit_pos<='0;
+            for (int i=0;i<K*N_OCTAVES;i++) head[i]<='0;
+            for (int i=0;i<N_OCTAVES;i++) head_snap[i]<='0;
+            for (int i=0;i<N_OCTAVES;i++) ts_snap[i]<='0;
+            for (int i=0;i<N_OCTAVES;i++) oct_seq[i]<='0;
+        end else begin
+            ring_we  <= 1'b0;
+            ag_v     <= 1'b0;
+            ag_first <= 1'b0; ag_last<=1'b0; ag_is_hb<=1'b0; ag_pair2<=1'b0;
+            hdr_kick <= 1'b0;
+
+            // ---- frame arrival: latch a frame request. The eager phase is owed
+            // and will be serviced at the next voice-column boundary (S_V_PICK)
+            // or immediately if idle. OVERRUN = octave 0 still pending from the
+            // previous frame when a new frame arrives (oct0 missed its deadline),
+            // OR an eager phase is still owed (frame_req already set = the engine
+            // never got to service the previous frame). Latch (sticky).
+            if (start_pass) begin
+                if (frame_req || pend[0]) overrun <= 1'b1;
+                frame_req <= 1'b1;
+                frame_adv <= oct_adv;        // capture this frame's advancing set
+                fcount    <= fcount + 1'b1;  // one fcount tick per frame
+                frame_ts  <= master_timestamp;  // stamp time of THIS frame
+            end
+
+            case (st)
+            // -----------------------------------------------------------
+            // IDLE: nothing pending. Service an owed frame immediately.
+            S_IDLE: begin
+                busy <= 1'b0;
+                if (frame_req || start_pass) begin
+                    busy <= 1'b1;
+                    // begin the eager phase (config snapshot below; per-octave
+                    // headers are kicked when each octave column COMPLETES).
+                    st <= S_COMMIT0;
+                    commit_lane  <= '0;
+                    commit_pos   <= (oct0_head + 1'b1) & (RING_DEPTH-1);
+                    oct0_head    <= (oct0_head + 1'b1) & (RING_DEPTH-1);
+                    oct_adv_snap <= start_pass ? oct_adv : frame_adv;
+                    nvoc_snap    <= n_voc;
+                    noct_snap    <= 4'(n_oct);
+                    nvoc4_snap   <= 4'(n_voc);
+                    nchan_snap   <= 8'(n_chan);
+                    ov_snap      <= overrun;
+                    frame_req    <= 1'b0;               // consuming the request
+                end
+            end
+
+            // commit each lane's new octave-0 sample, then enqueue octave 0's
+            // voice column (pend[0]=1, head_snap[0] = oct0's new head). Snapshot
+            // octave 0's enqueue timestamp (this frame's) for its packet header.
+            S_COMMIT0: begin
+                head[(commit_lane*N_OCTAVES)+0] <= commit_pos;
+                ring_wr_addr <= ridx(commit_lane, 0, commit_pos);
+                ring_wr_data <= snap[commit_lane];
+                ring_we      <= 1'b1;
+                if (commit_lane + 1 >= K) begin
+                    head_snap[0] <= commit_pos;
+                    pend[0]      <= 1'b1;
+                    ts_snap[0]   <= frame_ts;
+                    hb_lane <= '0; hb_oct <= (OCT_W+1)'(1);
+                    st <= S_HB_NEXT;
+                end else commit_lane <= commit_lane + 1'b1;
+            end
+
+            // -----------------------------------------------------------
+            // Halfband cascade: for each (advancing octave 1..n_oct-1, each lane)
+            // produce one ÷2 sample. After an octave's HB finishes for all lanes,
+            // pin its head + enqueue its voice column (pend[o]=1).
+            S_HB_NEXT: begin
+                if (hb_oct >= n_oct) begin
+                    st <= S_V_PICK;       // eager phase done -> (re)enter the drain
+                end else if (!oct_adv_snap[hb_oct[OCT_W-1:0]]) begin
+                    hb_oct <= hb_oct + 1'b1; hb_lane <= '0;
+                end else begin
+                    hb_src_head <= head[(hb_lane*N_OCTAVES) + (hb_oct-1)];
+                    hb_dst_head <= head[(hb_lane*N_OCTAVES) + hb_oct];
+                    hb_tap <= '0; hb_run_last <= 1'b0;
+                    st <= S_HB_RUN;
+                end
+            end
+
+            // issue HB_TAPS taps into the MAC (lane A)
+            S_HB_RUN: begin
+                ag_v     <= 1'b1;
+                ag_is_hb <= 1'b1;
+                ag_first <= (hb_tap == 0);
+                ag_last  <= (hb_tap == HB_TAPS-1);
+                if (hb_tap == HB_TAPS-1) st <= S_HB_STORE;
+                else                     hb_tap <= hb_tap + 1'b1;
+            end
+
+            // wait for hb_emit, store the ÷2 sample into octave hb_oct ring
+            S_HB_STORE: begin
+                if (hb_emit) begin
+                    head[(hb_lane*N_OCTAVES)+hb_oct] <=
+                        (hb_dst_head + 1'b1) & (RING_DEPTH-1);
+                    ring_wr_addr <= ridx(hb_lane, hb_oct,
+                                     (hb_dst_head + 1'b1) & (RING_DEPTH-1));
+                    ring_wr_data <= hb_emit_data;
+                    ring_we      <= 1'b1;
+                    if (hb_lane + 1 >= K) begin
+                        head_snap[hb_oct] <= (hb_dst_head + 1'b1) & (RING_DEPTH-1);
+                        pend[hb_oct]      <= 1'b1;
+                        ts_snap[hb_oct]   <= frame_ts;
+                        hb_lane <= '0; hb_oct <= hb_oct + 1'b1;
+                    end else hb_lane <= hb_lane + 1'b1;
+                    st <= S_HB_NEXT;
+                end
+            end
+
+            // -----------------------------------------------------------
+            // VOICE DRAIN (persistent, deadline-monotonic). Pick the lowest
+            // pending octave; if a frame's eager phase is owed, service it FIRST
+            // (preempt at this column boundary). If nothing pending and no frame
+            // owed -> go idle.
+            S_V_PICK: begin
+                if (frame_req) begin
+                    // a new frame arrived; do its eager phase before more voices
+                    busy <= 1'b1;
+                    st <= S_COMMIT0;
+                    commit_lane  <= '0;
+                    commit_pos   <= (oct0_head + 1'b1) & (RING_DEPTH-1);
+                    oct0_head    <= (oct0_head + 1'b1) & (RING_DEPTH-1);
+                    oct_adv_snap <= frame_adv;
+                    nvoc_snap    <= n_voc;
+                    noct_snap    <= 4'(n_oct);
+                    nvoc4_snap   <= 4'(n_voc);
+                    nchan_snap   <= 8'(n_chan);
+                    ov_snap      <= overrun;
+                    frame_req    <= 1'b0;
+                end else if (pick_vld) begin
+                    busy      <= 1'b1;
+                    cur_oct   <= pick_oct;
+                    cur_lane  <= '0;
+                    cur_voice <= '0;
+                    cur_tap   <= '0;
+                    st <= S_V_RUN;
+                end else begin
+                    busy <= 1'b0;
+                    st   <= S_IDLE;
+                end
+            end
+
+            // walk taps: ONE cycle per tap. 4 MAC lanes compute TWO voices
+            // (cur_voice, cur_voice+1) at once. ag_pair2 says voice v+1 is a real
+            // in-range voice (so its emit is produced); if cur_voice is the last
+            // voice, lanes C/D are computed but their result is dropped.
+            S_V_RUN: begin
+                ag_v     <= 1'b1;
+                ag_is_hb <= 1'b0;
+                ag_first <= (cur_tap==0);
+                ag_last  <= (cur_tap==n_tap-1);
+                ag_pair2 <= ((cur_voice + 1) < n_voc);   // is v+1 a real voice?
+                ag_gain  <= gain_cfg[4*cur_oct +: 4];
+                ag_lane  <= cur_lane;
+                ag_oct   <= cur_oct;
+                ag_voice <= cur_voice;
+                if (cur_tap + 1 >= n_tap) begin
+                    st <= S_V_EMIT;
+                    emit_wait2 <= ((cur_voice + 1) < n_voc);  // wait for 2 emits?
+                end
+                else cur_tap <= cur_tap + 1'b1;
+            end
+
+            // wait for the voice pair to emit (voice v, then v+1 if real), then
+            // advance by TWO voices within the octave column. emit_wait2 tracks
+            // whether a second emit is still owed.
+            S_V_EMIT: begin
+                if (v_emit && emit_wait2) begin
+                    // first of two emits seen; wait for the second next cycle
+                    emit_wait2 <= 1'b0;
+                end else if (v_emit && !emit_wait2) begin
+                    // last (or only) emit of this voice pair seen -> advance by 2
+                    if (cur_voice + 2 >= n_voc) begin
+                        cur_voice <= '0; cur_tap <= '0;
+                        if (cur_lane + 1 >= K) begin
+                            // octave column complete -> kick THIS octave's per-octave
+                            // unified packet header into region(cur_oct), bump its own
+                            // per-octave SEQ + the global emitted-packet count. The
+                            // payload words were written into the region as each
+                            // (lane,voice) emitted.
+                            pend[cur_oct] <= 1'b0;
+                            hdr_oct       <= cur_oct;
+                            hdr_ts        <= ts_snap[cur_oct];
+                            hdr_seq       <= oct_seq[cur_oct] + 1'b1;
+                            oct_seq[cur_oct] <= oct_seq[cur_oct] + 1'b1;
+                            frame_seq     <= frame_seq + 1'b1;   // global emitted count
+                            hdr_kick      <= 1'b1;
+                            st <= S_V_PICK;
+                        end else begin
+                            cur_lane <= cur_lane + 1'b1;
+                            st <= S_V_RUN;
+                        end
+                    end else begin
+                        cur_voice <= cur_voice + 2'd2;
+                        cur_tap <= '0;
+                        st <= S_V_RUN;
+                    end
+                end
+            end
+
+            default: st <= S_IDLE;
+            endcase
+        end
+    end
+
+    // =================================================================
+    // Results BRAM write -- STEP 2 UNIFIED PER-OCTAVE PACKETS. The PL builds, in
+    // each octave's OWN region, the complete unified wire packet so the PS just
+    // CDMAs the fresh octave region and sends it (mirrors lfp_dsp_block). One
+    // write port, shared by:
+    //   (a) the 8-word UNIFIED HEADER micro-sequence (kicked when an octave's
+    //       column COMPLETES, one word/clk into region(hdr_oct)+0..7), and
+    //   (b) the per-(lane,voice) PAYLOAD writes (on v_emit, re then im) into
+    //       region(v_emit_oct)+HDR_WORDS+(lane*n_voc+voice)*2.
+    // Header and payload never race WITHIN an octave (the header is kicked only
+    // after that octave's last payload write); across octaves they target
+    // different regions and the header completes (8 clk) long before the next
+    // octave's first payload (a full HB cascade + voice MAC run later).
+    //
+    // PER-OCTAVE payload addressing (row stride = n_voc, the active voice count):
+    //   word(lane,voice) = region(oct) + HDR_WORDS + (lane*n_voc + voice)*2
+    //   +0 = re, +1 = im. lane_start = 0; the firmware sends the first n_chan
+    //   lanes (n_chan*n_voc complex bins) so the packet fits one datagram.
+    // =================================================================
+    logic              we_r, em_phase;
+    logic [RES_WAW-1:0] addr_r;
+    logic [31:0]       din_r;
+    logic [31:0]       im_hold;
+    logic [RES_WAW-1:0] base_word;
+
+    // header field snapshots, latched at hdr_kick (region base + unified fields)
+    logic [RES_WAW-1:0] hdr_base;
+    logic [63:0]        hdr_ts_r;
+    logic [31:0]        hdr_seq_r, hdr_aux0_r, hdr_aux1_r;
+
+    // per-octave payload base word for the in-flight complex bin (re slot)
+    wire [RES_WAW-1:0] pay_word = RES_WAW'(oct_region(v_emit_oct) + HDR_WORDS +
+        (((v_emit_lane*nvoc_snap) + v_emit_voice) << 1));
+
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            we_r<=0; em_phase<=0; addr_r<='0; din_r<='0; im_hold<='0; base_word<='0;
+            hdr_idx<=3'd0; hdr_busy<=1'b0; hdr_base<='0; hdr_ts_r<='0;
+            hdr_seq_r<='0; hdr_aux0_r<='0; hdr_aux1_r<='0;
+        end else begin
+            we_r <= 1'b0;
+
+            if (hdr_kick) begin
+                // start the unified header micro-sequence for octave hdr_oct.
+                // Latch the region base + the header field values now (they are
+                // valid this cycle alongside hdr_kick).
+                hdr_busy   <= 1'b1;
+                hdr_idx    <= 3'd0;
+                hdr_base   <= oct_region(hdr_oct);
+                hdr_ts_r   <= hdr_ts;
+                hdr_seq_r  <= hdr_seq;
+                hdr_aux0_r <= hdr_aux0;
+                hdr_aux1_r <= hdr_aux1;
+            end
+
+            if (hdr_busy) begin
+                // emit one unified header word per clock into region+0..HDR_WORDS-1
+                we_r   <= 1'b1;
+                addr_r <= hdr_base + RES_WAW'(hdr_idx);
+                case (hdr_idx)
+                    3'd0: din_r <= UNIFIED_MAGIC;        // w0 MAGIC
+                    3'd1: din_r <= WAV_TYPE_VER;         // w1 TYPE_VER (type=3)
+                    3'd2: din_r <= hdr_ts_r[31:0];       // w2 TS_LO
+                    3'd3: din_r <= hdr_ts_r[63:32];      // w3 TS_HI
+                    3'd4: din_r <= hdr_seq_r;            // w4 SEQ (per-octave)
+                    3'd5: din_r <= hdr_aux0_r;           // w5 AUX0
+                    3'd6: din_r <= hdr_aux1_r;           // w6 AUX1
+                    default: din_r <= 32'd0;             // w7 RSVD
+                endcase
+                if (hdr_idx == 3'(HDR_WORDS-1)) hdr_busy <= 1'b0;
+                else                            hdr_idx  <= hdr_idx + 1'b1;
+            end else if (!em_phase) begin
+                if (v_emit) begin
+                    base_word <= pay_word;
+                    addr_r    <= pay_word;
+                    din_r     <= {{(32-OUT_W){v_emit_re[OUT_W-1]}}, v_emit_re};
+                    im_hold   <= {{(32-OUT_W){v_emit_im[OUT_W-1]}}, v_emit_im};
+                    we_r      <= 1'b1;
+                    em_phase  <= 1'b1;
+                end
+            end else begin
+                addr_r   <= base_word | 1'b1;
+                din_r    <= im_hold;
+                we_r     <= 1'b1;
+                em_phase <= 1'b0;
+            end
+        end
+    end
+
+    assign res_bram_clk  = clk;
+    assign res_bram_rst  = ~rstn;
+    assign res_bram_en   = 1'b1;
+    assign res_bram_we   = we_r ? 4'hF : 4'h0;
+    assign res_bram_addr = {addr_r, 2'b00};
+    assign res_bram_din  = din_r;
+endmodule

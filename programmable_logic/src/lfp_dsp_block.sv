@@ -96,7 +96,17 @@ module lfp_dsp_block #(
 
     // ---- status ----
     output logic [LFP_BRAM_AW-1:0] lfp_wr_addr,  // current write byte address (PS read ptr)
-    output logic                   lfp_overrun   // engine compute overrun (sticky)
+    output logic                   lfp_overrun,  // engine compute overrun (sticky)
+
+    // ---- decimated LFP output stream tap (signed) -> downstream DSP (the
+    //      Tier-3 wavelet engine). Same stream the BRAM packer consumes,
+    //      exposed for consumers that want the signed samples directly. The
+    //      unified-ports refactor dropped these ports; the wavelet branch
+    //      re-adds them (the internal out_* signals already exist). ----
+    output logic                   lfp_out_valid,
+    output logic [$clog2(N_LANES*N_SLOTS)-1:0] lfp_out_channel,
+    output logic signed [OUT_W-1:0] lfp_out_data,
+    output logic                   lfp_out_frame_start
 );
 
     localparam int RING_AW = $clog2(RING_DEPTH);
@@ -385,5 +395,13 @@ module lfp_dsp_block #(
     assign bram_addr   = {bram_word_r, 2'b00};               // word -> byte address
     assign bram_din    = bram_din_r;
     assign lfp_wr_addr = {wr_word, 2'b00};
+
+    // Decimated LFP output stream tap (signed) -> the Tier-3 wavelet engine.
+    // out_data holds the signed decimated sample in 2's complement; pass it
+    // through as a signed bus (same bit pattern).
+    assign lfp_out_valid       = out_valid;
+    assign lfp_out_channel     = out_channel;
+    assign lfp_out_data        = $signed(out_data);
+    assign lfp_out_frame_start = out_frame_start;
 
 endmodule

@@ -31,8 +31,8 @@ module dualport_dropout_tb;
 logic clk = 0, rstn = 0;
 always #5 clk = ~clk;
 
-logic [32*25-1:0] ctrl = '0;
-wire  [32*13-1:0] status;
+logic [32*32-1:0] ctrl = '0;     // N_CTRL=32 (incl. wavelet regs 28..31, held 0)
+wire  [32*15-1:0] status;        // N_STATUS=15 (incl. wavelet status 14)
 wire [15:0] bram_addr; wire [31:0] bram_din; wire bram_en; wire [3:0] bram_we;
 wire bram_clk, bram_rst;
 

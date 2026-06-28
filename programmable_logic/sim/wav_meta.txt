@@ -1,0 +1,8 @@
+FS=3000.0 K=4 N_OCTAVES=4 V=4 N_TAPS=24 HB_TAPS=7 DATA_W=16 COEF_W=18 COEF_FRAC=17 OUT_W=18 N_FRAMES=256
+GAMMA=3.0 BETA=3.0 OUT_GAIN_SHIFT=[3, 2, 1, 0]
+ACTIVE: oct=3 V=3 taps=24 nscales=9 (compacted wire stride)
+center frequencies (Hz):
+  oct0 @ 3000.0 Hz: 1020.0 857.7 721.2 606.5 
+  oct1 @ 1500.0 Hz: 510.0 428.9 360.6 303.2 
+  oct2 @ 750.0 Hz: 255.0 214.4 180.3 151.6 
+  oct3 @ 375.0 Hz: 127.5 107.2 90.2 75.8 

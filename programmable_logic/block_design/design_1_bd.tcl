@@ -635,7 +635,8 @@ proc create_root_design { parentCell } {
   # { axi_bram_ctrl_0/S_AXI (BRAM read), processing_system7/S_AXI_HP0 (DDR write) } (2 MI)
   set smartconnect_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_1 ]
   # 3rd MI (M02) -> axi_bram_ctrl_1 (the LFP/DSP engine output BRAM @0x84000000)
-  set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {3}] $smartconnect_1
+  # 4th MI (M03) -> axi_bram_ctrl_2 (the Tier-3 wavelet results BRAM @0x90000000)
+  set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {4}] $smartconnect_1
 
 
   # Create instance: simple_dual_port_bram, and set properties
@@ -668,6 +669,29 @@ proc create_root_design { parentCell } {
   # Create instance: axi_bram_ctrl_1 -- PS read port for the LFP output BRAM
   set axi_bram_ctrl_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_1 ]
   set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_1
+
+  # Create instance: simple_dual_port_bram_wav -- the Tier-3 wavelet results BRAM.
+  # PL write side = data_generator/WAV_BRAM; PS read side = axi_bram_ctrl_2.
+  # 64 KB result BRAM (16-bit byte address, 16384 32-bit words = the wrapper
+  # default, MEM_SIZE 65536). One unified per-octave wire packet is at most
+  # 8 hdr + 40*4*2 = 328 words, so 64 KB is ample; the PS reads whichever octave
+  # packet the PL has just built (the result BRAM is a snapshot, not a ring).
+  set block_name simple_dual_port_bram_wrapper
+  set block_cell_name simple_dual_port_bram_wav
+  if { [catch {set simple_dual_port_bram_wav [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>."}
+     return 1
+   } elseif { $simple_dual_port_bram_wav eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>."}
+     return 1
+   }
+
+  # Create instance: axi_bram_ctrl_2 -- PS read port for the wavelet results BRAM.
+  # MEM_DEPTH auto-derives from the connected BRAM's MEM_SIZE (64 KB = 16384
+  # words), same as axi_bram_ctrl_0/_1 -- it is read-only and must NOT be set
+  # explicitly (a stale value breaks validate_bd_design).
+  set axi_bram_ctrl_2 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_2 ]
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_2
 
   # Create instance: axi_cdma_0 -- memory-to-memory DMA that copies a packet from
   # the capture BRAM (0x80000000) to a DDR buffer (via S_AXI_HP0), taking the PS
@@ -762,6 +786,10 @@ proc create_root_design { parentCell } {
   connect_bd_intf_net -intf_net axi_bram_ctrl_1_BRAM_PORTA [get_bd_intf_pins axi_bram_ctrl_1/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram_lfp/BRAM_PORTB]
   connect_bd_intf_net -intf_net data_generator_LFP_BRAM [get_bd_intf_pins data_generator/LFP_BRAM] [get_bd_intf_pins simple_dual_port_bram_lfp/BRAM_PORTA]
   connect_bd_intf_net -intf_net smartconnect_1_M02_AXI [get_bd_intf_pins smartconnect_1/M02_AXI] [get_bd_intf_pins axi_bram_ctrl_1/S_AXI]
+  # Wavelet results BRAM: PL write side (data_generator/WAV_BRAM) + PS read side (axi_bram_ctrl_2)
+  connect_bd_intf_net -intf_net axi_bram_ctrl_2_BRAM_PORTA [get_bd_intf_pins axi_bram_ctrl_2/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram_wav/BRAM_PORTB]
+  connect_bd_intf_net -intf_net data_generator_WAV_BRAM [get_bd_intf_pins data_generator/WAV_BRAM] [get_bd_intf_pins simple_dual_port_bram_wav/BRAM_PORTA]
+  connect_bd_intf_net -intf_net smartconnect_1_M03_AXI [get_bd_intf_pins smartconnect_1/M03_AXI] [get_bd_intf_pins axi_bram_ctrl_2/S_AXI]
 
   # Create port connections
   connect_bd_net -net UART1_RX_0_1  [get_bd_ports UART1_RX_0] \
@@ -783,6 +811,7 @@ proc create_root_design { parentCell } {
   [get_bd_pins axi_cdma_0/m_axi_aclk] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aclk] \
   [get_bd_pins axi_bram_ctrl_1/s_axi_aclk] \
+  [get_bd_pins axi_bram_ctrl_2/s_axi_aclk] \
   [get_bd_pins proc_sys_reset_175MHz/slowest_sync_clk] \
   [get_bd_pins axi_lite_registers/s_axi_aclk]
   connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M_175M/locked] \
@@ -807,6 +836,7 @@ proc create_root_design { parentCell } {
   [get_bd_pins axi_cdma_0/s_axi_lite_aresetn] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn] \
   [get_bd_pins axi_bram_ctrl_1/s_axi_aresetn] \
+  [get_bd_pins axi_bram_ctrl_2/s_axi_aresetn] \
   [get_bd_pins axi_lite_registers/s_axi_aresetn]
   connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
   [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
@@ -824,6 +854,8 @@ proc create_root_design { parentCell } {
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
   # LFP output BRAM, PS read view (small GP reads -- below the long-burst threshold)
   assign_bd_address -offset 0x84000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
+  # Wavelet (Tier-3) results BRAM, PS read view @ 0x90000000 -- 64 KB.
+  assign_bd_address -offset 0x90000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
   assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers/s_axi/reg0] -force
   # CDMA control registers in the PS GP address space
   assign_bd_address -offset 0x44A00000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_cdma_0/S_AXI_LITE/Reg] -force
@@ -832,6 +864,12 @@ proc create_root_design { parentCell } {
   # CDMAs it straight into the pbuf), and DDR via HP0 (write dst).
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
   assign_bd_address -offset 0x84000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
+  # Wavelet results BRAM (0x90000000) into the CDMA master address space too, so a
+  # CDMA read of WAV_BRAM_BASE_ADDR reaches the results BRAM (the crossbar path
+  # axi_cdma_0/M_AXI -> smartconnect_1/S01 -> M03 -> axi_bram_ctrl_2 exists, but
+  # without this segment the read decodes to a hole and the CDMA stalls -- this is
+  # the same "missing axi_cdma_0/Data segment" that caused the old STFT CDMA hang).
+  assign_bd_address -offset 0x90000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
   assign_bd_address -offset 0x00000000 -range 0x40000000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
   # The PS GP masters can reach HP0 through the smartconnect_1 crossbar but never
   # address DDR that way -- exclude it so processing_system7_0/Data is clean.

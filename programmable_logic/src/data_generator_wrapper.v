@@ -6,6 +6,10 @@ module data_generator #(
     parameter integer BRAM_ADDR_WIDTH = 16,        // Byte address width  
     parameter integer BRAM_DATA_WIDTH = 32,        // Data width
     parameter integer BRAM_DEPTH_WORDS = 16384,   // BRAM depth in words (64KB / 4 = 16K words)
+    // Wavelet (Tier-3) results BRAM: 64 KB = 16384 words -> 16-bit byte address.
+    // Holds the unified per-octave wire packet (32-byte common header + up to
+    // n_channels*n_voices*8 payload bytes), built by the PL.
+    parameter integer WAV_BRAM_ADDR_WIDTH = 16,    // 64 KB wavelet result BRAM
     parameter integer FIFO_DEPTH = 256,           // FIFO depth (64-bit entries)
     parameter integer BUFFER_DEPTH = 16           // Segment buffer depth for selective copying
 )(
@@ -17,12 +21,13 @@ module data_generator #(
     input  wire        rstn,
     
     // Control and status interfaces
-    // Widths must match axi_lite_registers (N_CTRL=28, N_STATUS=13). Control
+    // Widths must match axi_lite_registers (N_CTRL=32, N_STATUS=15). Control
     // regs 0..21 are the legacy map; 22..24 configure the aux command
-    // sequencer / override layer; 25..27 configure the LFP/DSP engine. Status
-    // 11 = aux status, 12 = read result.
-    input  wire [32*28-1:0] ctrl_regs_pl,
-    output wire [32*14-1:0]  status_regs_pl,
+    // sequencer / override layer; 25..27 configure the LFP/DSP engine; 28..31
+    // configure the Tier-3 wavelet scalogram engine. Status 11 = aux status,
+    // 12 = read result, 13 = LFP, 14 = wavelet.
+    input  wire [32*32-1:0] ctrl_regs_pl,
+    output wire [32*15-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
     input  wire [7:0]  digital_in,
@@ -59,6 +64,23 @@ module data_generator #(
     output wire            lfp_bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM WE" *)
     output wire [3:0]      lfp_bram_we,
+
+    // Wavelet (Tier-3) results BRAM Port A (PL writes the per-octave wire
+    // packets; PS reads via a third axi_bram_ctrl mapped at 0x90000000).
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM CLK" *)
+    output wire            wav_bram_clk,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM RST" *)
+    output wire            wav_bram_rst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM ADDR" *)
+    output wire [WAV_BRAM_ADDR_WIDTH-1:0] wav_bram_addr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM DIN" *)
+    output wire [BRAM_DATA_WIDTH-1:0] wav_bram_din,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM DOUT" *)
+    input  wire [BRAM_DATA_WIDTH-1:0] wav_bram_dout,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM EN" *)
+    output wire            wav_bram_en,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 WAV_BRAM WE" *)
+    output wire [3:0]      wav_bram_we,
 
     // Serial interface signals
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
@@ -137,7 +159,16 @@ module data_generator #(
     wire [15:0]  lfp_wr_addr;
     wire         lfp_overrun;
 
-    // Data generator status (only 10 registers - wrapper adds 11th..13th)
+    // Decimated LFP output stream tap -> the Tier-3 wavelet engine.
+    wire         lfp_out_valid;
+    wire [7:0]   lfp_out_channel;     // $clog2(8*32) = 8
+    wire signed [15:0] lfp_out_data;
+    wire         lfp_out_frame_start;
+    // Wavelet engine status
+    wire [31:0]  wav_frame_seq;
+    wire         wav_busy, wav_overrun;
+
+    // Data generator status (only 10 registers - wrapper adds 11th..14th)
     wire [32*10-1:0] data_gen_status;
     wire [31:0] aux_status;
     wire [31:0] aux_read_result;
@@ -206,7 +237,51 @@ module data_generator #(
         .bram_en(lfp_bram_en),
         .bram_we(lfp_bram_we),
         .lfp_wr_addr(lfp_wr_addr),
-        .lfp_overrun(lfp_overrun)
+        .lfp_overrun(lfp_overrun),
+        // decimated output stream tap (signed) -> wavelet engine
+        .lfp_out_valid(lfp_out_valid),
+        .lfp_out_channel(lfp_out_channel),
+        .lfp_out_data(lfp_out_data),
+        .lfp_out_frame_start(lfp_out_frame_start)
+    );
+
+    // Instantiate the Tier-3 on-PL wavelet scalogram engine (control regs
+    // 28..31; writes its own results BRAM read by the PS via a 3rd
+    // axi_bram_ctrl mapped at 0x90000000). The engine taps the decimated LFP
+    // output stream and emits, per advancing octave, ONE unified per-octave
+    // wire packet into the results BRAM (octave-split rate-aligned format --
+    // see docs/unified-packet-format.md). The v2 4-MAC + work-spread engine is
+    // unchanged (bit-exact); only the packetizer differs.
+    //
+    // K bounded so a single octave packet always fits ONE datagram
+    // (32 + n_channels*n_voices*8 <= 1472 -> n_channels*n_voices <= 180). At
+    // V=4 the build cap of K=40 fits (40*4 = 160 <= 180); the firmware/host
+    // config guard rejects any runtime config that would exceed one datagram.
+    wavelet_dsp_block #(
+        .N_CH(256), .K(40), .N_OCTAVES(8), .V(4), .N_TAPS(24), .HB_TAPS(7),
+        .RES_AW(WAV_BRAM_ADDR_WIDTH)
+    ) wav_dsp_inst (
+        .clk(clk),
+        .rstn(rstn),
+        .lfp_out_valid(lfp_out_valid),
+        .lfp_out_channel(lfp_out_channel),
+        .lfp_out_data(lfp_out_data),
+        .lfp_frame_start(lfp_out_frame_start),
+        .master_timestamp(dsp_master_timestamp),
+        .wav_cfg(ctrl_regs_pl[28*32 +: 32]),
+        .wav_gain(ctrl_regs_pl[29*32 +: 32]),
+        .wav_data(ctrl_regs_pl[30*32 +: 32]),
+        .wav_strobe(ctrl_regs_pl[31*32 +: 32]),
+        .bram_clk(wav_bram_clk),
+        .bram_rst(wav_bram_rst),
+        .bram_addr(wav_bram_addr),
+        .bram_din(wav_bram_din),
+        .bram_dout(wav_bram_dout),
+        .bram_en(wav_bram_en),
+        .bram_we(wav_bram_we),
+        .wav_frame_seq(wav_frame_seq),
+        .wav_busy(wav_busy),
+        .wav_overrun(wav_overrun)
     );
 
     // Instantiate the FIFO-BRAM interface
@@ -259,6 +334,11 @@ module data_generator #(
     // LFP engine status: [15:0] output-BRAM write byte-address (PS read pointer),
     // [16] sticky compute-overrun flag.
     assign status_regs_pl[13*32 +: 32] = {15'd0, lfp_overrun, lfp_wr_addr};
+
+    // Wavelet (Tier-3) engine status: [29:0] emitted-packet count (the PS polls
+    // this to detect a freshly-built octave packet), [30] busy, [31] sticky
+    // compute-overrun flag.
+    assign status_regs_pl[14*32 +: 32] = {wav_overrun, wav_busy, wav_frame_seq[29:0]};
 
     // Port-B master outputs are the same broadcast commands as port A.
     assign csn_b  = csn;
