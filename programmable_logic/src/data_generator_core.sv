@@ -205,14 +205,44 @@ logic [6:0] state_counter;
 logic [5:0] cycle_counter;
 
 // Constants
+// Legacy split-magic kept for reference; the unified packet format uses a single
+// 0xCAFEBABE magic in header word 0 (see docs/unified-packet-format.md).
 localparam logic [31:0] MAGIC_NUMBER_LOW  = 32'hDEADBEEF;
 localparam logic [31:0] MAGIC_NUMBER_HIGH = 32'hCAFEBABE;
+// Unified common-header constants (identical across all PL streams).
+localparam logic [31:0] UNIFIED_MAGIC       = 32'hCAFEBABE;  // header word 0
+localparam logic [7:0]  STREAM_TYPE_BROADBAND = 8'd1;
+localparam logic [7:0]  UNIFIED_VERSION     = 8'd1;
+// TYPE_VER (header word 1) = stream_type[7:0] | version[15:8] | flags[31:16].
+// Broadband sets no flags (0).
+localparam logic [31:0] BB_TYPE_VER =
+    {16'd0, UNIFIED_VERSION, STREAM_TYPE_BROADBAND};
 logic [63:0] timestamp;
 
 // Status tracking (transmission_active is declared near the top of the module)
 logic [31:0] packets_sent;
 logic        loop_limit_reached;
 logic [31:0] loop_counter;
+
+// Per-stream broadband sequence number (header word 4). Monotonic +1 per emitted
+// broadband packet so the host can prove zero loss. Independent of packets_sent
+// (a status counter); this one is stamped into the wire header. It is sampled at
+// the packet start (state 0/cycle 0 of the FIFO header write) and advanced at the
+// packet end, so each packet carries a unique, gap-free value.
+logic [31:0] bb_seq;          // value stamped into the current packet's header
+logic [31:0] bb_seq_next;     // running counter (advances at packet end)
+
+// num_data_words for header AUX0[23:8]: number of 32-bit DATA words in this
+// packet = ceil(35 * popcount(channel_enable) / 2). Derived combinationally from
+// the (transmission-stable) channel_enable_reg.
+logic [3:0]  ce_popcount;
+always_comb begin
+    ce_popcount = 4'd0;
+    for (int b = 0; b < 8; b++)
+        ce_popcount = ce_popcount + {3'd0, channel_enable_reg[b]};
+end
+// 35 * popcount fits in 9 bits (max 35*8 = 280); +1 then >>1 = round-up /2.
+wire [15:0] bb_num_data_words = (16'(35 * ce_popcount) + 16'd1) >> 1;
 
 // Debug mode sine wave table index
 logic [8:0] dummy_data_index;
@@ -647,6 +677,8 @@ always_ff @(posedge clk) begin
         fifo_write_data <= 128'h0;
         fifo_channel_mask <= 8'h0;
         packets_sent <= 32'd0;
+        bb_seq      <= 32'd0;
+        bb_seq_next <= 32'd0;
         fifo_packet_end_flag <= 1'b0;
 
         dummy_data_index <= 9'd0;
@@ -664,38 +696,68 @@ always_ff @(posedge clk) begin
         dsp_packet_tick  <= 1'b0;
 
         if (transmission_active && !fifo_full) begin
-            // Header writes (first cycle only) - always fully valid
-            if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3, 7'd4}) begin
+            // ---- Unified packet header (broadband, stream_type=1) -------------
+            // The 8-word common header + a 6-word broadband sub-block are written
+            // as 7 x 64-bit FIFO writes (states 0..6 of cycle 0), one 64-bit value
+            // per state -> 14 BRAM words ahead of the data. See
+            // docs/unified-packet-format.md. Every field of the OLD 10-word header
+            // is preserved (timestamp, digital_in/aux_flags/echo metadata, analog
+            // breadcrumbs); the DATA words below are byte-identical to before.
+            //
+            // BRAM word layout (LE), per 64-bit write {high32, low32}:
+            //   write0 (w0/w1):  MAGIC=0xCAFEBABE        | TYPE_VER=1|ver<<8|flags<<16
+            //   write1 (w2/w3):  TS_LO                   | TS_HI
+            //   write2 (w4/w5):  SEQ (broadband)         | AUX0=ce|num_data_words<<8
+            //   write3 (w6/w7):  AUX1=digital/aux/echo0  | RSVD=0
+            //   write4 (w8/w9):  echo1/echo2_prev        | analog ch0-1   (sub-block)
+            //   write5 (w10/w11):analog ch2-3            | analog ch4-5
+            //   write6 (w12/w13):analog ch6-7            | reserved=0
+            // Latch the per-packet broadband seq at the packet start, before it is
+            // stamped into header word 4 (FIFO state 2). bb_seq_next advances at
+            // the packet end below, so consecutive packets get +1 with no gap.
+            if (is_first_cycle && state_counter == 7'd0)
+                bb_seq <= bb_seq_next;
+
+            if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3, 7'd4, 7'd5, 7'd6}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
                     // Header is one 64-bit value -> exactly the low 4 segments,
                     // upper 4 masked off (port-2 streams never appear in the
-                    // header). Bit-identical to the single-port header.
+                    // header).
                     fifo_channel_mask <= 8'b0000_1111;
                     fifo_packet_end_flag <= 1'b0;  // Header words are never at the end
                     case (state_counter)
-                        7'd0: fifo_write_data <= {MAGIC_NUMBER_HIGH, MAGIC_NUMBER_LOW}; // magic number
-                        7'd1: fifo_write_data <= timestamp;
-                        // Digital inputs + aux flags + command-echo identity:
-                        //   [7:0]   digital_in, [15:8] aux_flags (0 when seq off),
-                        //   [31:16] this packet's slot-1 command (result @ word 34),
-                        //   [47:32] prev packet's slot-2 command (result @ word 0),
-                        //   [63:48] prev packet's slot-3 command (result @ word 1).
-                        // With aux_seq_en==0 everything above [7:0] is 0 -> the
-                        // word is bit-identical to the legacy header.
+                        // ---- common 8-word header (words 0..7) ----
+                        7'd0: fifo_write_data <= {BB_TYPE_VER, UNIFIED_MAGIC};
+                        7'd1: fifo_write_data <= timestamp;             // TS_LO | TS_HI
+                        // SEQ (w4) | AUX0 (w5) = channel_enable | num_data_words<<8
                         7'd2: fifo_write_data <= {
-                            aux_seq_en_pkt ? echo_slot3_prev      : 16'h0,
-                            aux_seq_en_pkt ? echo_slot2_prev      : 16'h0,
-                            aux_seq_en_pkt ? aux_cmds_final[15:0] : 16'h0,
-                            aux_flags,
-                            digital_in_latched};
-                        7'd3: fifo_write_data <= 64'h0;  // BREADCRUMB: Future analog channels 0-3 (4x16-bit values)
-                        7'd4: fifo_write_data <= 64'h0;  // BREADCRUMB: Future analog channels 4-7 (4x16-bit values)                        // TODO: Add another state here to transmit 64 bits of non-neural input and other sample-specific metadata
-                        // Metadata - value of the current "extra" register read from this cycle
-                        // Metadata - value of fast settle
+                            {8'd0, bb_num_data_words[15:0], channel_enable_reg}, // w5 AUX0
+                            bb_seq};                                            // w4 SEQ
+                        // AUX1 (w6) = digital inputs + aux flags + command-echo
+                        // identity (the OLD header word 4):
+                        //   [7:0] digital_in, [15:8] aux_flags (0 when seq off),
+                        //   [31:16] this packet's slot-1 command (result @ data 34).
+                        // RSVD (w7) = 0.
+                        7'd3: fifo_write_data <= {
+                            32'h0,                                              // w7 RSVD
+                            (aux_seq_en_pkt ? aux_cmds_final[15:0] : 16'h0),    // w6[31:16] echo0
+                            aux_flags,                                          // w6[15:8]
+                            digital_in_latched};                                // w6[7:0]
+                        // ---- broadband sub-block (words 8..13) ----
+                        // w8 = the OLD header word 5 (prev-packet slot-2/3 echoes,
+                        //      0 when aux seq off); w9 = analog ch0-1 breadcrumb (0).
+                        // w10..w13 = the rest of the 8 external-ADC breadcrumbs
+                        // (currently 0) + a reserved word. Every old field preserved.
+                        7'd4: fifo_write_data <= {
+                            32'h0,                                              // w9 analog ch0-1 (breadcrumb)
+                            (aux_seq_en_pkt ? echo_slot3_prev : 16'h0),         // w8[31:16] echo3_prev
+                            (aux_seq_en_pkt ? echo_slot2_prev : 16'h0)};        // w8[15:0]  echo2_prev
+                        7'd5: fifo_write_data <= 64'h0;  // w10 analog ch2-3 | w11 analog ch4-5
+                        7'd6: fifo_write_data <= 64'h0;  // w12 analog ch6-7 | w13 reserved
                     endcase
                 end
-            end 
+            end
             
             // Data writes - Pack both ports' CIPO lines into one 128-bit write
             // with the 8-bit channel mask. Segment order (low->high):
@@ -773,6 +835,7 @@ always_ff @(posedge clk) begin
             if (is_last_cycle) begin
                 if (is_last_state) begin
                     packets_sent <= packets_sent + 1;
+                    bb_seq_next  <= bb_seq_next + 1;  // per-stream broadband seq
                     // Increment dummy data index for continuous sine wave across packets
                     dummy_data_index <= dummy_data_index + 9'd1;
 
@@ -799,6 +862,12 @@ always_ff @(posedge clk) begin
                 end
             end
 
+        end else if (!transmission_active) begin
+            // Reset the broadband sequence at the start of every streaming session
+            // (mirrors the host clearing its expected-seq on START), so the first
+            // packet of a fresh stream is always SEQ=0. fifo_full does NOT clear it.
+            bb_seq      <= 32'd0;
+            bb_seq_next <= 32'd0;
         end
     end
 end

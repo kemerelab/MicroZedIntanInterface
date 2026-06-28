@@ -135,28 +135,63 @@ task automatic aux_inject(input logic [15:0] cmd);
 endtask
 
 // ---------------------------------------------------------------------------
-// TEST 1: cycle-exact equivalence with aux_seq_en = 0
+// TEST 1: equivalence with aux_seq_en = 0.
+//
+// The unified packet format (this branch) intentionally re-frames the broadband
+// HEADER (new 14-word header vs the legacy 10-word one): different magic, more
+// header FIFO writes, and the digital/aux metadata moved within the header. So
+// the header FIFO writes legitimately DIFFER from the legacy core and are NOT
+// compared. What MUST stay identical -- and is asserted here -- is:
+//   * the SPI wire (csn/sclk/copi) every clock -- the command path is unchanged,
+//   * the DATA FIFO writes (the broadband samples) -- byte-identical content,
+//   * the status registers.
+// Header writes are excluded by counting FIFO writes from the packet start: the
+// legacy core emits 5 header writes/packet, the new core 7; the DATA writes are
+// everything after the header in each core, and those must match in order.
 // ---------------------------------------------------------------------------
+localparam int N_HDR_NEW = 7;   // new common header (8w) + sub-block (6w) = 7 x 64b
+localparam int N_HDR_LEG = 5;   // legacy 10-word header = 5 x 64b
+
 bit identity_checking = 0;
+int  n_widx = 0, l_widx = 0;          // FIFO-write index within the current packet
+logic [63:0] n_data_q [$], l_data_q [$];  // captured DATA writes, in order
+
 always @(posedge clk) begin
     if (identity_checking) begin
+        // SPI wire + status: compared every clock (framing-independent).
         n_checks++;
-        // Single-port path: SPI pins, write-enable, packet-end, and the LOW
-        // nibble of the mask must match the legacy 64-bit core exactly; the
-        // port-1 upper nibble + upper 64 data bits must be zero (port-1 off).
-        if ({n_csn, n_sclk, n_copi, n_fifo_we, n_pkt_end, n_mask[3:0]} !==
-            {l_csn, l_sclk, l_copi, l_fifo_we, l_pkt_end, l_mask})
-            err($sformatf("identity: pin/mask mismatch new={%b%b%b %b %b %h} leg={%b%b%b %b %b %h}",
-                n_csn, n_sclk, n_copi, n_fifo_we, n_pkt_end, n_mask[3:0],
-                l_csn, l_sclk, l_copi, l_fifo_we, l_pkt_end, l_mask));
-        if (n_mask[7:4] !== 4'h0)
-            err($sformatf("identity: port-1 mask not zero (%h)", n_mask[7:4]));
-        if (n_fifo_we && (n_fifo_wd[63:0] !== l_fifo_wd))
-            err($sformatf("identity: fifo data new=%016h leg=%016h", n_fifo_wd[63:0], l_fifo_wd));
-        if (n_fifo_we && (n_fifo_wd[127:64] !== 64'h0))
-            err($sformatf("identity: port-1 data not zero (%016h)", n_fifo_wd[127:64]));
+        if ({n_csn, n_sclk, n_copi} !== {l_csn, l_sclk, l_copi})
+            err($sformatf("identity: SPI pin mismatch new={%b%b%b} leg={%b%b%b}",
+                n_csn, n_sclk, n_copi, l_csn, l_sclk, l_copi));
         if (n_status !== l_status)
             err("identity: status regs mismatch");
+
+        // Capture DATA FIFO writes (those after the header) from each core, in
+        // order, and compare the two queues. Header writes (indices < N_HDR_*)
+        // are skipped. port-1 must be off (upper mask/data zero) in this TB.
+        if (n_fifo_we) begin
+            if (n_widx >= N_HDR_NEW) begin
+                n_data_q.push_back(n_fifo_wd[63:0]);
+                if (n_mask[7:4] !== 4'h0)
+                    err($sformatf("identity: port-1 mask not zero (%h)", n_mask[7:4]));
+                if (n_fifo_wd[127:64] !== 64'h0)
+                    err($sformatf("identity: port-1 data not zero (%016h)", n_fifo_wd[127:64]));
+            end
+            n_widx <= n_pkt_end ? 0 : (n_widx + 1);
+        end
+        if (l_fifo_we) begin
+            if (l_widx >= N_HDR_LEG) l_data_q.push_back(l_fifo_wd);
+            l_widx <= l_pkt_end ? 0 : (l_widx + 1);
+        end
+
+        // Drain matched pairs and compare (data words must be byte-identical).
+        while (n_data_q.size() > 0 && l_data_q.size() > 0) begin
+            logic [63:0] nd = n_data_q.pop_front();
+            logic [63:0] ld = l_data_q.pop_front();
+            n_checks++;
+            if (nd !== ld)
+                err($sformatf("identity: DATA word new=%016h leg=%016h", nd, ld));
+        end
     end
 end
 
@@ -203,14 +238,23 @@ task automatic next_packet_words(output logic [15:0] words [0:34]);
     for (int i = 0; i < 35; i++) words[i] = copi_frame[i];
 endtask
 
-// capture header word 2 (3rd header write of each packet)
+// Capture the aux command-echo metadata. In the unified header it is split:
+//   header FIFO write 4 (state 3) low 32 bits = {echo0[15:0], flags[7:0],
+//       digital_in[7:0]}   (the OLD header word 4),
+//   header FIFO write 5 (state 4) low 32 bits = {echo3_prev[15:0],
+//       echo2_prev[15:0]}  (the OLD header word 5).
+// Reassemble the legacy 64-bit "header word 2" view so the TEST 2 echo checks
+// below are unchanged: {echo3_prev, echo2_prev, echo0, flags, digital_in}.
 int hdr_cnt = 0;
-logic [63:0] hdr_word2 = '0;
-bit in_packet_hdr = 0;
+logic [31:0] hdr_meta_lo = '0;   // {echo0, flags, digital_in}
+logic [31:0] hdr_meta_hi = '0;   // {echo3_prev, echo2_prev}
+logic [63:0] hdr_word2;
+assign hdr_word2 = {hdr_meta_hi, hdr_meta_lo};
 always @(posedge clk) begin
     if (n_fifo_we && n_mask == 8'h0F) begin   // header writes are low-4-segment valid
         hdr_cnt++;
-        if (hdr_cnt == 3) hdr_word2 <= n_fifo_wd[63:0];
+        if (hdr_cnt == 4) hdr_meta_lo <= n_fifo_wd[31:0];  // 4th write = digital/flags/echo0
+        if (hdr_cnt == 5) hdr_meta_hi <= n_fifo_wd[31:0];  // 5th write = echo2/echo3_prev
     end
     if (n_pkt_end && n_fifo_we) hdr_cnt <= 0;
 end

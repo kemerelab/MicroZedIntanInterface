@@ -8,17 +8,18 @@
 //   * convert Intan offset-binary -> two's-complement signed on the way IN
 //     and signed -> offset-binary on the way OUT (symmetric ^0x8000),
 //   * decode the host coefficient-upload window (aux-style strobe CDC),
-//   * BUILD THE COMPLETE LFP WIRE PACKET in the output BRAM: a 6-word header
-//     (magic, 64-bit timestamp, lane_mask/decim_R/num_taps/overrun, seq) AHEAD
-//     of each frame's decimated sample words, so the PS just DMAs the whole
-//     packet into a pbuf and sends it (no PS-side header math or Xil_In32 loop).
+//   * BUILD THE COMPLETE LFP WIRE PACKET in the output BRAM: the unified 8-word
+//     common header (docs/unified-packet-format.md) AHEAD of each frame's
+//     decimated sample words, so the PS just DMAs the whole packet into a pbuf
+//     and sends it (no PS-side header math or Xil_In32 loop).
 //   * pack the decimated outputs 2x16-bit per 32-bit word and write them after
 //     the header (PS reads the whole packet via a 2nd axi_bram_ctrl over CDMA).
 //
-// LFP output BRAM layout, per frame: [6 header words | sample words].
-// Header (matches remote/net.py receive_lfp + the firmware wire format):
-//   w0 = LFP_MAGIC_LOW (0x1F1FBEEF)
-//   w1 = 0xCAFEBABE
+// LFP output BRAM layout, per frame: [8 common-header words | sample words].
+// Header (the UNIFIED common header, stream_type=2; matches remote/net.py
+// receive_lfp + the firmware wire format + the broadband header):
+//   w0 = MAGIC = 0xCAFEBABE
+//   w1 = TYPE_VER = stream_type(2) | version(1)<<8 | flags<<16  (flags=0)
 //   w2/w3 = 64-bit master timestamp = the master count of the NEWEST broadband
 //           sample in this output's decimation window (these are FIR filters, so
 //           one real, already-acquired broadband sample is the newest input in
@@ -26,8 +27,10 @@
 //           broadband packet R*m+(R-1) (R=10 -> 10m+9); the same master count the
 //           broadband header stamps, latched on the decimation tick. NB: newest
 //           *input*, not the represented instant (host subtracts the group delay).
-//   w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24)
-//   w5 = PL-maintained LFP frame sequence number (++ per emitted frame)
+//   w4 = SEQ = PL-maintained LFP frame sequence number (++ per emitted frame)
+//   w5 = AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24)
+//   w6 = AUX1 = num_samples (popcount(lane_mask) * N_SLOTS)
+//   w7 = RSVD = 0
 //
 // The LFP lane mask MIRRORS the broadband channel-enable mask (dsp_channel_enable
 // from data_generator_core) -- single source of truth; the LFP filters exactly
@@ -103,10 +106,15 @@ module lfp_dsp_block #(
     localparam int LFP_WORD_AW = LFP_BRAM_AW - 2;          // 32-bit word address width
     localparam logic [DATA_W-1:0] OFFSET = {1'b1, {(DATA_W-1){1'b0}}};  // 0x8000
 
-    // LFP wire-packet header magic (matches net.py receive_lfp + firmware).
-    localparam int HDR_WORDS = 6;
-    localparam logic [31:0] LFP_MAGIC_LOW  = 32'h1F1FBEEF;
-    localparam logic [31:0] LFP_MAGIC_HIGH = 32'hCAFEBABE;
+    // Unified common-header constants (matches net.py + the broadband header).
+    // The whole 8-word header is identical across streams; only stream_type and
+    // the AUX words differ. See docs/unified-packet-format.md.
+    localparam int HDR_WORDS = 8;
+    localparam logic [31:0] UNIFIED_MAGIC = 32'hCAFEBABE;     // header word 0
+    localparam logic [7:0]  STREAM_TYPE_LFP = 8'd2;
+    localparam logic [7:0]  UNIFIED_VERSION = 8'd1;
+    // TYPE_VER (word 1) = stream_type[7:0] | version[15:8] | flags[31:16]; flags=0.
+    localparam logic [31:0] LFP_TYPE_VER = {16'd0, UNIFIED_VERSION, STREAM_TYPE_LFP};
 
     // -----------------------------------------------------------------
     // Control unpack (with min-1 guards on the rate/length).
@@ -294,11 +302,20 @@ module lfp_dsp_block #(
     logic [LFP_WORD_AW-1:0] bram_word_r;
 
     // header-write micro-sequence
-    logic [2:0]            hdr_idx;        // 0..5 while writing the header
+    logic [3:0]            hdr_idx;        // 0..7 while writing the 8-word header
     logic                  hdr_busy;
-    // cfg = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24). decim_r8/
+    // AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24). decim_r8/
     // numtaps8 are the raw 8-bit host-configured fields (the wire-format values).
     wire  [31:0]           cfg_word = {ov_frame, 7'd0, numtaps8, decim_r8, lane_mask};
+    // AUX1 = num_samples = popcount(lane_mask) * N_SLOTS (the count of int16
+    // decimated samples that follow the header). N_SLOTS=32 -> <<5.
+    logic [3:0]            lane_popcount;
+    always_comb begin
+        lane_popcount = 4'd0;
+        for (int b = 0; b < N_LANES; b++)
+            lane_popcount = lane_popcount + {3'd0, lane_mask[b]};
+    end
+    wire  [31:0]           num_samples_word = {24'd0, lane_popcount} * N_SLOTS;
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
@@ -306,7 +323,7 @@ module lfp_dsp_block #(
             pack_low   <= '0;
             wr_word    <= '0;
             bram_we_r  <= 1'b0;
-            hdr_idx    <= 3'd0;
+            hdr_idx    <= 4'd0;
             hdr_busy   <= 1'b0;
             ts_frame   <= 64'd0;
             ov_frame   <= 1'b0;
@@ -319,23 +336,26 @@ module lfp_dsp_block #(
                 // and start a fresh frame on the low pack half.
                 ts_frame   <= ts_ingest;
                 ov_frame   <= lfp_overrun;
-                hdr_idx    <= 3'd0;
+                hdr_idx    <= 4'd0;
                 hdr_busy   <= 1'b1;
                 pack_phase <= 1'b0;
             end else if (hdr_busy) begin
-                // Emit one header word per clock at the frame base.
+                // Emit one header word per clock at the frame base -- the unified
+                // 8-word common header (stream_type=2). See docs/unified-packet-format.md.
                 bram_word_r <= wr_word;
                 bram_we_r   <= 1'b1;
                 case (hdr_idx)
-                    3'd0: bram_din_r <= LFP_MAGIC_LOW;
-                    3'd1: bram_din_r <= LFP_MAGIC_HIGH;
-                    3'd2: bram_din_r <= ts_frame[31:0];
-                    3'd3: bram_din_r <= ts_frame[63:32];
-                    3'd4: bram_din_r <= cfg_word;
-                    default: bram_din_r <= frame_seq;       // 3'd5
+                    4'd0: bram_din_r <= UNIFIED_MAGIC;       // w0 MAGIC
+                    4'd1: bram_din_r <= LFP_TYPE_VER;        // w1 TYPE_VER
+                    4'd2: bram_din_r <= ts_frame[31:0];      // w2 TS_LO
+                    4'd3: bram_din_r <= ts_frame[63:32];     // w3 TS_HI
+                    4'd4: bram_din_r <= frame_seq;           // w4 SEQ
+                    4'd5: bram_din_r <= cfg_word;            // w5 AUX0
+                    4'd6: bram_din_r <= num_samples_word;    // w6 AUX1 (num_samples)
+                    default: bram_din_r <= 32'd0;            // w7 RSVD (4'd7)
                 endcase
                 wr_word <= wr_word + 1'b1;                   // wraps naturally
-                if (hdr_idx == 3'd5) begin
+                if (hdr_idx == 4'd7) begin
                     hdr_busy  <= 1'b0;
                     frame_seq <= frame_seq + 1'b1;           // one seq per emitted frame
                 end else begin
