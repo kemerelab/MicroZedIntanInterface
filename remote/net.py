@@ -74,8 +74,26 @@ CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
 CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband channel_enable (firmware accepts-and-ignores)
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+# Wavelet (Tier-3) scalogram engine -- configure while disabled, then enable.
+# The octave packets stream on the UNIFIED port (5000), stream_type=3.
+CMD_WAV_ENABLE = 0x88       # param1 = 0/1
+CMD_WAV_SET_PARAMS = 0x89   # param1 = [3:0]n_oct [7:4]n_voices [15:8]n_taps; param2 = gain word
+CMD_WAV_SET_CHANNELS = 0x8A # param1 = [0] clear-ptr-first; param2 = channel index (one lane)
+CMD_WAV_WRITE_COEF = 0x8B   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef (re,im interleaved)
+CMD_WAV_WRITE_HB = 0x8C     # param1 = [0] clear-ptr-first; param2 = 18-bit signed halfband tap
+CMD_WAV_SET_NCHANNELS = 0x8D # param1 = active streamed channels (1..WAV_K); guarded to one datagram
 CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
+
+# Wavelet (Tier-3) scalogram constants (match wavelet_dsp_block.sv / main.h).
+# One UNIFIED per-octave packet per advancing octave (stream_type=3).
+WAV_COEF_FRAC = 17          # Q1.17 complex coefficient fixed-point
+WAV_K = 40                  # build channel cap (K*V <= 180 at V=4 -> fits 1 datagram)
+WAV_N_OCTAVES = 8           # octaves (build param)
+WAV_V = 4                   # voices/octave (build param)
+WAV_N_TAPS = 24             # complex taps/voice (build param)
+WAV_HB_TAPS = 7             # halfband ÷2 taps (build param)
+WAV_MAX_BINS_PER_PACKET = 180  # 32 + n_ch*n_voc*8 <= 1472 -> n_ch*n_voc <= 180
 
 UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
 # Unified port: the LFP band now arrives on UDP_PORT (5000) mixed with broadband,
@@ -1160,6 +1178,14 @@ class UnifiedSink:
         self._lfp_gaps = 0
         self.lfp_pkts = 0
         self.lfp_bytes = 0
+        # Wavelet fan-out (pub/sub) + per-octave SEQ continuity (the loss check).
+        # Each octave has its OWN SEQ (it updates at its own rate), so we track a
+        # last-seq per octave and flag any gap.
+        self._wav_subs = []
+        self._wav_last_seq = {}     # octave -> last SEQ seen
+        self._wav_gaps = 0
+        self.wav_pkts = 0
+        self.wav_bytes = 0
         self.bb_pkts = 0
         self.other_pkts = 0
         self.last_addr = None
@@ -1237,6 +1263,8 @@ class UnifiedSink:
                 self._handle_broadband(data)
             elif stream_type == STREAM_TYPE_LFP:
                 self._handle_lfp(data)
+            elif stream_type == STREAM_TYPE_WAVELET:
+                self._handle_wavelet(data)
             else:
                 self.other_pkts += 1
 
@@ -1280,6 +1308,38 @@ class UnifiedSink:
         with self._lock:
             if q in self._lfp_subs:
                 self._lfp_subs.remove(q)
+
+    def _handle_wavelet(self, data):
+        # One datagram = one unified per-octave wavelet packet (stream_type=3).
+        # Header: w4=SEQ (per-octave), w5=AUX0 (octave|n_oct<<4|n_voc<<8|ov<<24),
+        # w6=AUX1 (n_channels|lane_start<<8). PER-OCTAVE SEQ continuity = the loss
+        # check (each octave updates at its own rate, so SEQ is checked per octave).
+        self.wav_pkts += 1
+        self.wav_bytes += len(data)
+        seq, aux0, aux1 = struct.unpack('<III', data[16:28])
+        octave = aux0 & 0xF
+        last = self._wav_last_seq.get(octave)
+        if last is not None and seq != (last + 1) & 0xFFFFFFFF:
+            self._wav_gaps += 1
+        self._wav_last_seq[octave] = seq
+        with self._lock:
+            subs = list(self._wav_subs)
+        for q in subs:
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                pass
+
+    def subscribe_wavelet(self, maxsize=20000):
+        q = queue.Queue(maxsize=maxsize)
+        with self._lock:
+            self._wav_subs.append(q)
+        return q
+
+    def unsubscribe_wavelet(self, q):
+        with self._lock:
+            if q in self._wav_subs:
+                self._wav_subs.remove(q)
 
     def stop(self):
         self._running = False
@@ -1745,6 +1805,218 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     return resp
 
 # ============================================================================
+# Wavelet (Tier-3) scalogram engine -- design the Morse voice bank, configure,
+# and receive the UNIFIED octave-split scalogram (stream_type=3 on UDP 5000).
+# The PL is shape-agnostic (host-uploaded complex Q1.17 coeffs); default =
+# generalized Morse (gamma=3). The designer MUST match
+# programmable_logic/sim/gen_wavelet_vectors.py exactly (it generated the
+# bit-exact sim vectors). Pure-Python (no numpy), to match.
+# ============================================================================
+def design_wavelet_bank(V=WAV_V, n_octaves=WAV_N_OCTAVES, n_taps=WAV_N_TAPS,
+                        fs=3000, gamma=3, beta=3.0, fc_top=0.34):
+    """Design the V constant-Q true generalized-MORSE complex voice shapes
+    (reused at every octave -- the cascade halves fs each octave) + the
+    halfband ÷2 FIR, all quantized to signed Q1.17. Returns (voices, hb,
+    centers). Matches gen_wavelet_vectors.py's morse_voice_shapes()."""
+    gamma = float(gamma); beta = float(beta)      # bit-exactness across sites
+    scale = (1 << WAV_COEF_FRAC)
+    lim   = (1 << 17)
+    M     = n_taps - 1
+    wp    = (beta / gamma) ** (1.0 / gamma)       # peak angular freq
+    log_a = math.log(2.0) + (beta / gamma) * (1.0 + math.log(gamma) - math.log(beta))
+    UMAX, NU = 12.0, 6000                          # inverse-FT grid (w>0)
+    du    = UMAX / NU
+    us    = [k * du for k in range(1, NU + 1)]     # skip w=0 (w^beta=0)
+    amp   = [math.exp(log_a + beta * math.log(u) - u ** gamma) for u in us]
+    voices = []
+    for v in range(V):
+        fc = fc_top * (2.0 ** (-v / float(V)))    # cycles/sample in this octave
+        s  = wp / (2.0 * math.pi * fc)            # scale: peak -> fc
+        raw = []
+        for n in range(n_taps):
+            tau = (n - M / 2.0) / s               # psi_s(t) = psi_1(t/s)
+            re = im = 0.0
+            for k in range(NU):                   # inverse FT over w>0
+                u = us[k]; a = amp[k]
+                re += a * math.cos(u * tau)
+                im += a * math.sin(u * tau)
+            raw.append((re * du / (2.0 * math.pi), im * du / (2.0 * math.pi)))
+        mre = sum(r for r, _ in raw) / n_taps     # zero-mean both parts -> reject DC
+        mim = sum(i for _, i in raw) / n_taps
+        taps2 = [(r - mre, i - mim) for (r, i) in raw]
+        norm = sum(math.hypot(re, im) for (re, im) in taps2) or 1.0
+        q = []
+        for (re, im) in taps2:
+            ri = max(-lim, min(lim - 1, int(round(re / norm * scale))))
+            ii = max(-lim, min(lim - 1, int(round(im / norm * scale))))
+            q.append((ri, ii))
+        voices.append(q)
+    # halfband ÷2 (windowed-sinc at fc=0.25, Hamming, unity DC), Q1.17
+    fcq, Mh = 0.25, WAV_HB_TAPS - 1
+    h = []
+    for n in range(WAV_HB_TAPS):
+        x = n - Mh / 2.0
+        s = 2 * fcq if abs(x) < 1e-9 else math.sin(2 * math.pi * fcq * x) / (math.pi * x)
+        w = 0.54 - 0.46 * math.cos(2 * math.pi * n / Mh)
+        h.append(s * w)
+    g = sum(h) or 1.0
+    hb = [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
+    centers = []
+    for o in range(n_octaves):
+        fr = fs / (2.0 ** o)
+        centers.append([fc_top * (2.0 ** (-v / float(V))) * fr for v in range(V)])
+    return voices, hb, centers
+
+def configure_wavelet(sock, channels=None, V=WAV_V, n_octaves=WAV_N_OCTAVES,
+                      n_taps=WAV_N_TAPS, fs=3000, gamma=3, beta=3.0,
+                      gains=None, n_channels=None):
+    """Disable, set params + per-octave gains, upload the channel selector,
+    the V complex Morse voice shapes (re,im interleaved) and the halfband, then
+    bound the streamed channel count so one octave packet fits one datagram.
+    Call wavelet_enable(sock, True) afterwards to stream on UDP 5000 (type=3).
+    channels:   list of up to WAV_K source channel indices (default 0..K-1).
+    n_channels: streamed lanes (default len(channels)); REJECTED by the board if
+                n_channels*V > 180 (the no-loss one-datagram guard)."""
+    if channels is None:
+        channels = list(range(WAV_K))
+    chans = channels[:WAV_K]
+    if n_channels is None:
+        n_channels = len(chans)
+    # Host-side guard mirror (the board also rejects): one octave packet must fit
+    # one datagram. We REDUCE the spec (the no-loss rule), never fragment.
+    if n_channels * V > WAV_MAX_BINS_PER_PACKET:
+        print(f"[WAV] REJECT n_channels={n_channels}*V={V}={n_channels*V} > "
+              f"{WAV_MAX_BINS_PER_PACKET} (one-datagram guard). Reduce channels.")
+        return None
+    if gains is None:
+        ramp = [3, 2, 1, 0, 0, 0, 0, 0]
+        gains = ramp[:n_octaves] + [0] * max(0, n_octaves - len(ramp))
+    gain_word = 0
+    for o in range(n_octaves):
+        gain_word |= (gains[o] & 0xF) << (4 * o)
+
+    voices, hb, centers = design_wavelet_bank(V, n_octaves, n_taps, fs, gamma, beta)
+
+    def _push(cmd_id, p1, p2, what, idx, total):
+        ok, _ = send_binary_command(sock, cmd_id, p1, p2, timeout=2.0)
+        if not ok:
+            print(f"[WAV] {what} upload stalled at {idx}/{total} -- board stopped acking")
+        return ok
+
+    send_binary_command(sock, CMD_WAV_ENABLE, 0)
+    params = (n_octaves & 0xF) | ((V & 0xF) << 4) | ((n_taps & 0xFF) << 8)
+    send_binary_command(sock, CMD_WAV_SET_PARAMS, params, gain_word)
+
+    for i, ch in enumerate(chans):
+        if not _push(CMD_WAV_SET_CHANNELS, 1 if i == 0 else 0, ch & 0xFF,
+                     "selector", i, len(chans)):
+            return None
+    flat = []
+    for v in range(V):
+        for j in range(n_taps):
+            re, im = voices[v][j]
+            flat.append(re); flat.append(im)
+    for i, c in enumerate(flat):
+        if not _push(CMD_WAV_WRITE_COEF, 1 if i == 0 else 0, c & 0x3FFFF,
+                     "voice coef", i, len(flat)):
+            return None
+    for i, c in enumerate(hb):
+        if not _push(CMD_WAV_WRITE_HB, 1 if i == 0 else 0, c & 0x3FFFF,
+                     "halfband", i, len(hb)):
+            return None
+    # bound the streamed channel count (the board rejects an over-budget config)
+    ok, _ = send_binary_command(sock, CMD_WAV_SET_NCHANNELS, n_channels & 0xFF, 0, timeout=2.0)
+    if not ok:
+        print(f"[WAV] REJECTED by board: n_channels={n_channels} would exceed one "
+              f"datagram (n_channels*V > {WAV_MAX_BINS_PER_PACKET}). Reduce channels.")
+        return None
+    print(f"[WAV] configured: K={len(chans)} stream={n_channels} octaves={n_octaves} "
+          f"V={V} taps={n_taps} gains={gains} fs={fs} gamma={gamma}")
+    print(f"[WAV] center freqs oct0 (Hz): {[round(f,1) for f in centers[0]]} ... "
+          f"oct{n_octaves-1}: {[round(f,1) for f in centers[-1]]}")
+    return voices, hb, centers
+
+def wavelet_enable(sock, on=True):
+    send_binary_command(sock, CMD_WAV_ENABLE, 1 if on else 0)
+    print(f"[WAV] {'ENABLED' if on else 'disabled'}")
+
+def set_wav_nchannels(sock, n):
+    """Bound the streamed channel count (1..WAV_K). The board REJECTS any value
+    whose one-octave packet would exceed one datagram (n*V > 180)."""
+    ok, _ = send_binary_command(sock, CMD_WAV_SET_NCHANNELS, int(n) & 0xFF, 0)
+    print(f"[WAV] n_channels = {n}" if ok else
+          f"[WAV] n_channels = {n} REJECTED (one-datagram guard; reduce channels)")
+
+def set_wav_channels(sock, channels):
+    """Selector-only update of which source channels feed the wavelet lanes.
+    Disables the engine first (selector latches while disabled)."""
+    send_binary_command(sock, CMD_WAV_ENABLE, 0)
+    chans = list(channels)[:WAV_K]
+    for i, ch in enumerate(chans):
+        send_binary_command(sock, CMD_WAV_SET_CHANNELS, 1 if i == 0 else 0, ch & 0xFF)
+    print(f"[WAV] selector channels = {chans} (engine left disabled; run wav_on)")
+
+def receive_wavelet(n_packets=200, n_octaves=WAV_N_OCTAVES, bind_port=UDP_PORT):
+    """Receive UNIFIED per-octave wavelet packets (stream_type=3) and reassemble
+    the scalogram surface. Each datagram is ONE octave's update; we HOLD each
+    octave's last value between its (rate-aligned) updates -- the truthful
+    representation of a multirate scalogram. Verifies per-octave SEQ continuity
+    (the loss check). Subscribes to the UnifiedSink so one socket drains 5000."""
+    if UNIFIED_SINK is None or not UNIFIED_SINK._running:
+        print("[WAV] UnifiedSink not running; start the listener first.")
+        return
+    q = UNIFIED_SINK.subscribe_wavelet()
+    surface = {}                 # octave -> list of (re,im) per (lane, voice)
+    last_seq = {}                # octave -> last SEQ (per-octave loss check)
+    gaps = 0
+    got = 0
+    try:
+        while got < n_packets:
+            try:
+                data = q.get(timeout=3.0)
+            except queue.Empty:
+                print("[WAV] receive timeout (engine enabled? wav_on? chirp on?)")
+                break
+            if len(data) < UNIFIED_HEADER_WORDS * 4:
+                continue
+            magic, type_ver = struct.unpack('<II', data[:8])
+            if magic != UNIFIED_MAGIC or (type_ver & 0xFF) != STREAM_TYPE_WAVELET:
+                continue
+            ts_lo, ts_hi, seq, aux0, aux1 = struct.unpack('<IIIII', data[8:28])
+            ts      = ts_lo | (ts_hi << 32)
+            octave  = aux0 & 0xF
+            n_oct   = (aux0 >> 4) & 0xF
+            n_voc   = (aux0 >> 8) & 0xF
+            overrun = (aux0 >> 24) & 1
+            n_chan  = aux1 & 0xFF
+            lane_start = (aux1 >> 8) & 0xFFFF
+            payload = data[UNIFIED_HEADER_WORDS * 4:]
+            nints   = len(payload) // 4
+            expect  = n_chan * n_voc * 2
+            if nints != expect:
+                print(f"[WAV] oct{octave} payload {nints} ints != n_chan*n_voc*2 {expect}")
+                continue
+            vals = struct.unpack(f'<{nints}i', payload)
+            # per-octave SEQ continuity (the loss check)
+            ls = last_seq.get(octave)
+            if ls is not None and seq != (ls + 1) & 0xFFFFFFFF:
+                gaps += 1
+                print(f"[WAV] oct{octave} SEQ gap {ls}->{seq}")
+            last_seq[octave] = seq
+            # HOLD: place this octave's column into the surface (lane-major/voice-minor)
+            surface[octave] = [(vals[2*i], vals[2*i+1]) for i in range(n_chan * n_voc)]
+            got += 1
+            if got <= 12 or got % 50 == 0:
+                print(f"[WAV] pkt {got}: oct={octave} seq={seq} ts={ts} n_oct={n_oct} "
+                      f"V={n_voc} n_chan={n_chan} lane0={lane_start} ov={overrun} "
+                      f"bins={n_chan*n_voc}")
+    finally:
+        UNIFIED_SINK.unsubscribe_wavelet(q)
+    print(f"[WAV] received {got} octave packets, {gaps} per-octave SEQ gaps "
+          f"(MUST be 0 for no-loss), octaves seen: {sorted(surface.keys())}")
+    return surface
+
+# ============================================================================
 # UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
 # replacing the ~18 MB/s small-packet broadband assumption with a measured
 # large-packet ceiling. (Payloads > ~1472 B fragment unless the path is jumbo-
@@ -1892,8 +2164,8 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 288:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 220)")
+    if len(data) != 312:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 312)")
         return None
     
     # Parse status_response_t structure (86 bytes)
@@ -1957,6 +2229,13 @@ def get_status(sock):
      first_drop_pkt, last_drop_pkt, memp_num_pbuf) = \
         struct.unpack('<IIiIIiIII', data[220:256])
     drop_ring = struct.unpack('<8I', data[256:288])
+
+    # Wavelet (Tier-3) scalogram engine config + status (24 bytes): 8 uint8 then
+    # 4 uint32 (gain, frame_seq, packets_sent, dma_errors).
+    (wav_enable, wav_n_octaves, wav_n_voices, wav_n_taps,
+     wav_n_channels, wav_K, wav_overrun, wav_busy) = struct.unpack('<8B', data[288:296])
+    (wav_gain, wav_frame_seq, wav_packets_sent, wav_dma_errors) = \
+        struct.unpack('<4I', data[296:312])
 
     status = {
         'version': version,
@@ -2042,6 +2321,18 @@ def get_status(sock):
         'chirp_stride': chirp_stride,
         'chirp_fspan': chirp_fspan,
         'chirp_rate': chirp_rate,
+        'wav_enable': wav_enable,
+        'wav_n_octaves': wav_n_octaves,
+        'wav_n_voices': wav_n_voices,
+        'wav_n_taps': wav_n_taps,
+        'wav_n_channels': wav_n_channels,
+        'wav_K': wav_K,
+        'wav_overrun': wav_overrun,
+        'wav_busy': wav_busy,
+        'wav_gain': wav_gain,
+        'wav_frame_seq': wav_frame_seq,
+        'wav_packets_sent': wav_packets_sent,
+        'wav_dma_errors': wav_dma_errors,
     }
 
     return status
@@ -2169,6 +2460,21 @@ def print_status(status):
     print(f"  {'ENABLED' if status['chirp_mode'] else 'disabled'}  "
           f"sweep 0->{f_hi:.0f} Hz  stride={status['chirp_stride']}  "
           f"(fspan={status['chirp_fspan']} rate={status['chirp_rate']})")
+
+    # Wavelet (Tier-3) scalogram engine -- one per-octave packet per advancing octave
+    print(f"\n--- Wavelet scalogram (Tier-3, UDP {UDP_PORT} stream_type=3) ---")
+    nch = status['wav_n_channels'] or status['wav_K']
+    nv  = status['wav_n_voices'] or WAV_V
+    print(f"  {'ENABLED' if status['wav_enable'] else 'disabled'}  "
+          f"octaves={status['wav_n_octaves']}  voices={status['wav_n_voices']}  "
+          f"taps={status['wav_n_taps']}  n_channels={status['wav_n_channels']}/{status['wav_K']}  "
+          f"gain=0x{status['wav_gain']:08X}")
+    print(f"  octave packet = 32 + {nch}*{nv}*8 = {32 + nch*nv*8} B "
+          f"({'<= 1472, fits 1 datagram' if (nch*nv) <= WAV_MAX_BINS_PER_PACKET else 'OVER ONE DATAGRAM!'})")
+    print(f"  emitted packets (PL): {status['wav_frame_seq']}   sent (UDP): "
+          f"{status['wav_packets_sent']}   dma_errors: {status['wav_dma_errors']}   "
+          f"overrun: {'YES' if status['wav_overrun'] else 'no'}  "
+          f"busy: {'yes' if status['wav_busy'] else 'no'}")
     print("=" * 50)
 
 def set_udp_dest(sock, ip_str, port):

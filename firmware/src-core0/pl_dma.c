@@ -26,6 +26,12 @@ uint8_t pl_dma_staging[0x100000] __attribute__((aligned(0x100000)));
 // reference into its own buffer until the EMAC transmits it).
 uint8_t pl_dma_lfp_staging[0x100000] __attribute__((aligned(0x100000)));
 
+// Separate 1 MB-aligned non-cacheable staging buffer for the wavelet stream, so
+// the per-octave CDMA + zero-copy pbuf never share/clobber the broadband or LFP
+// staging buffers (all three run sequentially in the same loop, but each holds a
+// pbuf reference into its own buffer until the EMAC transmits it).
+uint8_t pl_dma_wav_staging[0x100000] __attribute__((aligned(0x100000)));
+
 static XAxiCdma cdma;
 static int      cdma_ready = 0;
 
@@ -39,6 +45,9 @@ int pl_dma_init(void) {
     // Same treatment for the LFP staging buffer.
     Xil_DCacheFlushRange((UINTPTR)pl_dma_lfp_staging, sizeof(pl_dma_lfp_staging));
     Xil_SetTlbAttributes((UINTPTR)pl_dma_lfp_staging, NORM_NONCACHE_SHARED);
+    // Same treatment for the wavelet staging buffer.
+    Xil_DCacheFlushRange((UINTPTR)pl_dma_wav_staging, sizeof(pl_dma_wav_staging));
+    Xil_SetTlbAttributes((UINTPTR)pl_dma_wav_staging, NORM_NONCACHE_SHARED);
 
     XAxiCdma_Config *cfg = XAxiCdma_LookupConfig(CDMA_BASEADDR);
     if (cfg == NULL) {

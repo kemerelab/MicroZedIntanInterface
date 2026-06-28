@@ -75,7 +75,7 @@ uint32_t drop_ring[8] = {0};
 uint32_t drop_ring_idx = 0;
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 288, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 312, "status_response_t size must match net.py get_status");
 
 // Clear the sticky maxes + worst-case snapshot + histogram + counts so the user
 // controls the measurement window (CMD_PERF_RESET). Leaves the last-sample fields
@@ -541,6 +541,10 @@ void network_maintenance_loop(void) {
   // enabled; the 16K-word ring tolerates bursty servicing.
   lfp_stream_service();
 
+  // Emit any fresh per-octave wavelet packets -> UDP (Tier-3, stream_type=3 on
+  // the unified port). No-op unless the wavelet engine is enabled.
+  wav_stream_service();
+
   // Refresh the shared status snapshot at ~200 Hz (every 5 ms). Cheap and
   // non-blocking; core 1 reads it on demand or for its ~1 Hz monitor.
   uint32_t now_ms = sys_now();
@@ -695,6 +699,7 @@ int main() {
   // Initialize UDP (always enabled)
   udp_stream_init();
   lfp_stream_init();   // LFP band shares the unified UDP port (5000), stream_type=2
+  wav_stream_init();   // wavelet band shares the unified UDP port (5000), stream_type=3
 
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
   

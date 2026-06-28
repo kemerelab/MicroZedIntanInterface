@@ -70,6 +70,18 @@ ID   | Command          | Param1              | Param2
 #define CMD_LFP_SET_PARAMS   0x81  // param1 = decim_R, param2 = num_taps
 #define CMD_LFP_SET_CHANNELS 0x82  // param1 = 8-bit lane mask
 #define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+
+// Wavelet (Tier-3) scalogram engine. Set params + selector + coeffs while
+// disabled, then enable. The octave packets stream on the unified UDP port
+// (stream_type=3). CMD_WAV_SET_NCHANNELS bounds the streamed channel count so a
+// single octave packet always fits one datagram (the no-loss config guard).
+#define CMD_WAV_ENABLE       0x88  // param1 = 0/1
+#define CMD_WAV_SET_PARAMS   0x89  // param1 = [3:0]n_oct [7:4]n_voices [15:8]n_taps; param2 = gain word
+#define CMD_WAV_SET_CHANNELS 0x8A  // param1 = [0] clear-ptr-first; param2 = channel index (one lane)
+#define CMD_WAV_WRITE_COEF   0x8B  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef (re,im interleaved)
+#define CMD_WAV_WRITE_HB     0x8C  // param1 = [0] clear-ptr-first; param2 = 18-bit signed halfband tap
+#define CMD_WAV_SET_NCHANNELS 0x8D // param1 = active channels streamed (1..WAV_K); guarded to one datagram
+
 #define CMD_UDP_BENCH        0x90  // param1 = payload bytes, param2 = n_packets (throughput test)
 #define CMD_PERF_RESET       0x91  // clear recv->transmit sticky maxes + histogram + counts
 
@@ -300,6 +312,21 @@ void collect_status_data(status_response_t* status) {
     status->chirp_stride = chirp_cfg_stride;
     status->chirp_fspan  = chirp_cfg_fspan;
     status->chirp_rate   = chirp_cfg_rate;
+
+    // Wavelet (Tier-3) scalogram engine config (host-set) + live status.
+    uint32_t wav_st          = pl_wav_read_status();
+    status->wav_enable       = wav_cfg_enable;
+    status->wav_n_octaves    = wav_cfg_n_octaves;
+    status->wav_n_voices     = wav_cfg_n_voices;
+    status->wav_n_taps       = wav_cfg_n_taps;
+    status->wav_n_channels   = wav_cfg_n_channels;
+    status->wav_K            = WAV_K;
+    status->wav_overrun      = (wav_st >> 31) & 1;
+    status->wav_busy         = (wav_st >> 30) & 1;
+    status->wav_gain         = wav_cfg_gain;
+    status->wav_frame_seq    = wav_st & 0x3FFFFFFF;
+    status->wav_packets_sent = wav_udp_packets_sent;
+    status->wav_dma_errors   = wav_dma_errors;
 }
 
 // ============================================================================
@@ -563,6 +590,58 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
             pl_lfp_coef_push((int32_t)(cmd->param2 << 14) >> 14);  // sign-extend 18-bit
             break;
 
+        case CMD_WAV_ENABLE:
+            pl_wav_set_enable(cmd->param1 ? 1 : 0);
+            send_message("Binary Command: WAV_ENABLE %u\r\n", cmd->param1 ? 1 : 0);
+            break;
+
+        case CMD_WAV_SET_PARAMS:
+            pl_wav_set_params((cmd->param1 & 0xF),          // n_octaves
+                              (cmd->param1 >> 4) & 0xF,      // n_voices
+                              (cmd->param1 >> 8) & 0xFF,     // n_taps
+                              cmd->param2);                  // per-octave gain word
+            send_message("Binary Command: WAV_SET_PARAMS oct=%u voc=%u taps=%u gain=0x%08X\r\n",
+                         cmd->param1 & 0xF, (cmd->param1 >> 4) & 0xF,
+                         (cmd->param1 >> 8) & 0xFF, cmd->param2);
+            break;
+
+        case CMD_WAV_SET_CHANNELS:
+            if (cmd->param1 & 0x1) pl_wav_sel_begin();
+            pl_wav_sel_push(cmd->param2 & 0xFF);
+            break;
+
+        case CMD_WAV_WRITE_COEF:
+            if (cmd->param1 & 0x1) pl_wav_coef_begin();
+            pl_wav_coef_push((int32_t)(cmd->param2 << 14) >> 14);  // sign-extend 18-bit
+            break;
+
+        case CMD_WAV_WRITE_HB:
+            if (cmd->param1 & 0x1) pl_wav_hb_begin();
+            pl_wav_hb_push((int32_t)(cmd->param2 << 14) >> 14);    // sign-extend 18-bit
+            break;
+
+        case CMD_WAV_SET_NCHANNELS: {
+            // No-loss config guard: REJECT (do not silently truncate) any config
+            // whose one-octave packet would exceed a single standard datagram.
+            // 32 + n_channels*n_voices*8 <= 1472 -> n_channels*n_voices <= 180.
+            uint8_t n  = (uint8_t)(cmd->param1 & 0xFF);
+            uint8_t nv = wav_cfg_n_voices ? wav_cfg_n_voices : WAV_V;
+            if (n == 0 || n > WAV_K) {
+                status = ACK_ERROR;
+                send_message("Binary Command: WAV_SET_NCHANNELS REJECT n=%u (1..%u)\r\n",
+                             n, (unsigned)WAV_K);
+            } else if ((uint32_t)n * nv > WAV_MAX_BINS_PER_PACKET) {
+                status = ACK_ERROR;
+                send_message("Binary Command: WAV_SET_NCHANNELS REJECT n=%u*v=%u=%u > %u "
+                             "(one-datagram guard; reduce channels)\r\n",
+                             n, nv, (unsigned)(n * nv), (unsigned)WAV_MAX_BINS_PER_PACKET);
+            } else {
+                pl_wav_set_n_channels(n);
+                send_message("Binary Command: WAV_SET_NCHANNELS %u\r\n", n);
+            }
+            break;
+        }
+
         case CMD_UDP_BENCH:
             udp_bench_blast(cmd->param1, cmd->param2);
             break;
@@ -818,5 +897,97 @@ void lfp_stream_service(void) {
             lfp_pbuf_alloc_fail++;   // shared MEMP_PBUF pool empty -> this LFP frame is dropped
         }
         lfp_read_word = (lfp_read_word + frame_words) & mask;
+    }
+}
+
+// ============================================================================
+// WAVELET (Tier-3) STREAM -- STEP 2 UNIFIED OCTAVE-SPLIT, RATE-ALIGNED.
+//
+// The PL builds ONE unified per-octave wire packet in each octave's OWN region
+// of the results BRAM (region(o) = WAV_BRAM_BASE_ADDR + o*WAV_OCT_STRIDE_BYTES),
+// rebuilding region o ONLY when octave o advances (fcount mod 2^o == 0). Each
+// packet = the 8-word common header (stream_type=3) + this octave's n_channels x
+// n_voices complex bins (re,im int32), lane-major / voice-minor.
+//
+// The PS, per service call, peeks each octave region's SEQ word (header w4 -- a
+// 1-word DMA-EXEMPT read, the magic/resync-peek pattern) and, when an octave's
+// SEQ has ADVANCED, CDMAs that ONE region (header + n_channels*n_voices*8 bytes,
+// guaranteed <= one datagram) into non-cacheable staging and sends it on the
+// UNIFIED UDP port (udp_dest_port, default 5000) with stream_type=3. No PS
+// header math, no repack -- the PL built the whole packet (the hard DMA rule).
+//
+// RATE-ALIGNED + NO REDUNDANT SEND: octave o's SEQ only advances when octave o
+// updated, so we send octave o exactly when it has fresh data (octave 0 at the
+// base rate, octave 7 at base/128). The host holds each octave between updates.
+// ============================================================================
+static struct udp_pcb *wav_pcb = NULL;
+uint32_t wav_udp_packets_sent = 0;
+uint32_t wav_dma_errors = 0;
+static uint32_t wav_last_seq[WAV_N_OCTAVES];
+
+// Per-octave region stride in the results BRAM (words). MUST match the engine's
+// OCT_STRIDE_WORDS in wavelet_cqt_engine.sv.
+#define WAV_OCT_STRIDE_WORDS  512u
+#define WAV_OCT_STRIDE_BYTES  (WAV_OCT_STRIDE_WORDS * 4u)
+// SEQ is unified header word 4.
+#define WAV_SEQ_WORD          4u
+
+void wav_stream_init(void) {
+    wav_pcb = udp_new();
+    wav_udp_packets_sent = 0;
+    wav_dma_errors = 0;
+    for (int o = 0; o < WAV_N_OCTAVES; o++) wav_last_seq[o] = 0;  // 0 = none sent yet
+    if (wav_pcb == NULL) send_message("ERROR: Could not create wavelet UDP PCB\r\n");
+}
+
+void wav_stream_service(void) {
+    if (!wav_cfg_enable || wav_pcb == NULL) return;
+
+    uint32_t n_oct  = wav_cfg_n_octaves ? wav_cfg_n_octaves : WAV_N_OCTAVES;
+    if (n_oct > WAV_N_OCTAVES) n_oct = WAV_N_OCTAVES;
+    uint32_t n_voc  = wav_cfg_n_voices ? wav_cfg_n_voices : WAV_V;
+    uint32_t n_chan = wav_cfg_n_channels ? wav_cfg_n_channels : WAV_K;
+    if (n_chan > WAV_K) n_chan = WAV_K;
+
+    // No-loss config guard: NEVER emit a packet larger than one datagram. If the
+    // live config would exceed it (shouldn't -- CMD_WAV_SET_NCHANNELS rejects such
+    // configs), skip rather than fragment.
+    uint32_t bins = n_chan * n_voc;
+    if (bins > WAV_MAX_BINS_PER_PACKET) return;
+    uint32_t frame_words = WAV_HDR_WORDS + bins * 2;     // header + re/im int32 bins
+
+    uint32_t *pkt = (uint32_t *)WAV_DMA_BUF_ADDR;        // non-cacheable wav staging
+
+    int budget = WAV_N_OCTAVES;   // at most one packet per octave per call
+    for (uint32_t o = 0; o < n_oct && budget-- > 0; o++) {
+        uintptr_t base = (uintptr_t)WAV_BRAM_BASE_ADDR + (uintptr_t)o * WAV_OCT_STRIDE_BYTES;
+        // DMA-EXEMPT: 1-word SEQ peek to detect a fresh octave packet (the
+        // magic/resync-peek pattern; not bulk payload).
+        uint32_t seq = Xil_In32(base + WAV_SEQ_WORD * 4);
+        if (seq == 0 || seq == wav_last_seq[o]) continue;   // no fresh packet for octave o
+
+        // CDMA the whole per-octave packet (header + payload) BRAM -> non-cacheable
+        // DDR staging in ONE transfer. On DMA error, skip (retry next call).
+        if (pl_dma_read_addr(pkt, base, frame_words) != 0) {
+            wav_dma_errors++;
+            continue;
+        }
+        // Torn-frame guard: re-peek the SEQ; if it advanced during the DMA the
+        // packet may be inconsistent -> skip (retry next call). The PL stamps the
+        // same SEQ in the header (w4), so the host validates continuity too.
+        // DMA-EXEMPT: 1-word SEQ re-peek (torn-frame cross-check).
+        if (Xil_In32(base + WAV_SEQ_WORD * 4) != seq) continue;
+        wav_last_seq[o] = seq;
+
+        // Zero-copy send on the UNIFIED port (stream_type=3 is in the PL-built
+        // header). The PL built the whole packet, so we send exactly what it wrote.
+        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_words * 4, PBUF_REF);
+        if (p != NULL) {
+            p->payload = (void*)pkt;
+            ip_addr_t dst; dst.addr = udp_dest_ip;
+            udp_sendto(wav_pcb, p, &dst, udp_dest_port);
+            pbuf_free(p);
+            wav_udp_packets_sent++;
+        }
     }
 }
