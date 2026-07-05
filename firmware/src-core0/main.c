@@ -16,6 +16,12 @@
 // This function is provided by the LWIP library's Xilinx EMAC adapter
 extern void eth_link_detect(struct netif *netif);
 
+// RX-hang recovery for the Zynq-7000 GEM errata. The vendor's periodic reset
+// (xemacpsif.c vTimerCallback / RESETRXTIMEOUT) is under #if !NO_SYS and is
+// compiled OUT of this bare-metal (NO_SYS=1) build, leaving no recovery if the
+// MAC RX halts. We drive it ourselves from network_maintenance_loop.
+extern void xemacpsif_resetrx_on_no_rxdata(struct netif *netif);
+
 
 // Global variables
 XTimer timer;
@@ -554,6 +560,15 @@ void network_maintenance_loop(void) {
   if (current_time - last_link_check_time >= 500) {
     last_link_check_time = current_time;
 
+    // Defense-in-depth: kick the GEM RX if it has gone silent (Zynq-7000 RX-hang
+    // errata). Restores the vendor recovery that #if !NO_SYS strips from this
+    // build. Only toggles RXEN when the RX frame counter is stuck at 0 across two
+    // checks (~1 s) -- i.e. a genuinely idle/hung RX; harmless on a healthy idle
+    // board. RX here is control-plane only (TCP commands + ARP, both retried), so
+    // a kick never risks archival (UDP/TX) data. With the serviced link-up wait
+    // above this should never actually trigger at boot; it's a self-heal backstop.
+    xemacpsif_resetrx_on_no_rxdata(&server_netif);
+
     // Update PHY link status
     eth_link_detect(&server_netif);
     int current_link_state = netif_is_link_up(&server_netif) ? 1 : 0;
@@ -683,10 +698,22 @@ int main() {
   }
 
   while (!link_is_up) {
+    // ROOT-CAUSE FIX: keep servicing the network while waiting for PHY link-up.
+    // RX is already live (interrupt-driven) since xemac_add above. If we DON'T
+    // drain it here, packets arriving during the link-up window (e.g. an early
+    // client's SYN retries + ARP) accumulate in recv_q, PBUF_POOL exhausts,
+    // setup_rx_bds stops refilling the RX BD ring, and the Zynq-7000 GEM hits its
+    // RX-used-bit hang errata -- permanently, because the resetrx recovery timer
+    // is #if !NO_SYS (compiled out of this build). Draining here keeps the pool
+    // recycled so the wedge cannot occur, for any link delay or traffic level.
+    // (SYNs before start_tcp_server get a correct RST; the client retries and
+    // connects once the listener is up.)
+    xemacif_input(&server_netif);
+    sys_check_timeouts();
     eth_link_detect(&server_netif);
     if (netif_is_link_up(&server_netif)) {
       link_is_up = 1;
-      send_message("Network link UP\r\n");    
+      send_message("Network link UP\r\n");
     }
   }
 
