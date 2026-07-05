@@ -527,6 +527,46 @@ static void publish_status_snapshot(void) {
   psmon->seq = (s0 | 1u) + 1u;   // even again: snapshot complete
 }
 
+// ---------------------------------------------------------------------------
+// GEM RX diagnostics. When the board wedges "Ethernet-level" (host ping/connect
+// gets no reply, only a power-cycle recovers) we need to SEE the actual MAC RX
+// state, not guess. These are read-only peeks at the Zynq-7000 GEM registers (no
+// writes -> cannot perturb the RX path). Smoking gun for the RX-used-bit hang
+// errata: RXSR.BUFFNA=1 (MAC hit a BD whose used bit was already set -> ring
+// starved) and/or RXSR.RXOVR=1 (overrun). RXEN=0 would mean RX got disabled.
+// FRX/RXcnt tell us whether ANY frame is still being received at all.
+//
+// How to use: flash this, reproduce the wedge (connect early), then read the
+// serial console. A "[GEMDIAG hb]" heartbeat prints every ~2 s while not
+// streaming. Compare a healthy line to a wedged one:
+//   healthy idle : RXEN=1 RXSR=0x00 [BUFFNA=0 ...] RXcnt incrementing on traffic
+//   used-bit hang: RXEN=1 RXSR=0x0? [BUFFNA=1 or OVR=1] RXcnt frozen
+//   RX disabled  : RXEN=0
+// That single distinction tells us which fix class is even relevant.
+// ---------------------------------------------------------------------------
+#define GEM_BASE        XPAR_XEMACPS_0_BASEADDR
+#define GEM_NWCTRL_OFF  0x000u   // Network Control (RXEN = bit 2)
+#define GEM_NWSR_OFF    0x008u   // Network Status
+#define GEM_RXQBASE_OFF 0x018u   // RX Q base pointer
+#define GEM_RXSR_OFF    0x020u   // RX Status: b0 BUFFNA b1 FRAMERX b2 RXOVR b3 HRESPNOK
+#define GEM_RXCNT_OFF   0x158u   // Frames Received OK (statistics)
+
+static void dump_gem_rx_state(const char *tag) {
+  uint32_t nwctrl = Xil_In32(GEM_BASE + GEM_NWCTRL_OFF);
+  uint32_t nwsr   = Xil_In32(GEM_BASE + GEM_NWSR_OFF);
+  uint32_t rxsr   = Xil_In32(GEM_BASE + GEM_RXSR_OFF);
+  uint32_t rxqb   = Xil_In32(GEM_BASE + GEM_RXQBASE_OFF);
+  uint32_t rxcnt  = Xil_In32(GEM_BASE + GEM_RXCNT_OFF);
+  send_message("[GEMDIAG %s] RXEN=%d RXSR=0x%02x [BUFFNA=%d FRX=%d OVR=%d HRESP=%d] "
+               "RXcnt=%u RXQ=0x%08x NWSR=0x%08x\r\n",
+               tag,
+               (int)((nwctrl >> 2) & 1u),
+               (unsigned)(rxsr & 0xffu),
+               (int)(rxsr & 1u), (int)((rxsr >> 1) & 1u),
+               (int)((rxsr >> 2) & 1u), (int)((rxsr >> 3) & 1u),
+               (unsigned)rxcnt, (unsigned)rxqb, (unsigned)nwsr);
+}
+
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
   static uint32_t last_link_check_time = 0;
@@ -547,6 +587,14 @@ void network_maintenance_loop(void) {
   if (now_ms - last_psmon_time >= 5) {
     last_psmon_time = now_ms;
     publish_status_snapshot();
+  }
+
+  // GEM RX diagnostic heartbeat every ~2 s while NOT streaming (don't spam the
+  // console during acquisition). Read-only; safe. See dump_gem_rx_state().
+  static uint32_t last_gemdiag_time = 0;
+  if (!stream_enabled && (now_ms - last_gemdiag_time >= 2000)) {
+    last_gemdiag_time = now_ms;
+    dump_gem_rx_state("hb");
   }
 
   // Poll network link state every 500ms for hotplug detection
@@ -662,6 +710,7 @@ int main() {
   xemac_add(&server_netif, &ipaddr, &netmask, &gw,
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
+  dump_gem_rx_state("post-xemac_add");   // baseline: RX just went live
 
 
   // Start second core
@@ -711,7 +760,8 @@ int main() {
   
   send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   send_message("debug> ");
-  
+  dump_gem_rx_state("ready");   // state at end of init, before any client
+
   // Main event loop
   while (1) {
     network_maintenance_loop();
