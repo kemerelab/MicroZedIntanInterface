@@ -1,4 +1,5 @@
 import socket
+import errno
 import sys
 import threading
 import struct
@@ -2338,10 +2339,96 @@ def configure_tcp_keepalive(sock):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
 
-def tcp_control():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# ---------------------------------------------------------------------------
+# Robust TCP connect.
+#
+# The board needs >20 s after power-on to bring up its lwIP listener, and while
+# it is still booting -- or if its GEM RX has wedged (early-SYN Zynq-7000 RX-hang
+# errata) -- it does not answer at all. A plain blocking connect() then either
+# hangs for the OS connect timeout (~75 s on macOS) or, once the host's ARP entry
+# for the board ages out and re-resolution fails, fails outright with
+# "[Errno 64] Host is down" (EHOSTDOWN) / EHOSTUNREACH. That's the crash you were
+# hitting. None of those mean "give up" -- they mean "the board isn't ready yet."
+#
+# So instead of one blocking connect we poll with a short per-attempt timeout and
+# retry until the board answers: net.py waits patiently and connects the instant
+# the listener is up, and never spews a traceback. errno values are compared
+# symbolically because the numbers differ between macOS and Linux.
+# ---------------------------------------------------------------------------
+CONNECT_TIMEOUT   = 3.0    # seconds per connection attempt (bounds the "hang")
+CONNECT_RETRY_GAP = 1.0    # seconds between attempts
+CONNECT_MAX_WAIT  = None   # overall deadline (s); None = wait forever, Ctrl-C to stop
+
+# errno values that just mean "board not ready yet, keep waiting".
+_RETRYABLE_ERRNOS = {
+    errno.ECONNREFUSED,   # host reachable but listener not up yet
+    errno.EHOSTDOWN,      # no ARP reply -> board booting or RX wedged ([Errno 64])
+    errno.EHOSTUNREACH,   # ARP incomplete / no route to the board yet
+    errno.ENETUNREACH,
+    errno.ENETDOWN,
+    errno.ETIMEDOUT,      # SYN went unanswered
+    errno.ECONNRESET,
+    errno.ECONNABORTED,
+}
+
+
+def connect_with_retry(zynq_ip=None, tcp_port=None,
+                       per_attempt_timeout=CONNECT_TIMEOUT,
+                       retry_gap=CONNECT_RETRY_GAP,
+                       max_wait=CONNECT_MAX_WAIT):
+    """Return a connected, blocking TCP socket, or None if the deadline/Ctrl-C
+    hits first. Retries on the 'board not ready' errno family instead of hanging
+    on a single 75 s connect() or crashing on EHOSTDOWN."""
+    zynq_ip = zynq_ip or ZYNQ_IP
+    tcp_port = tcp_port or TCP_PORT
+    start = time.time()
+    attempt = 0
+    last_reason = None
     try:
-        sock.connect((ZYNQ_IP, TCP_PORT))
+        while True:
+            attempt += 1
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(per_attempt_timeout)
+            try:
+                sock.connect((zynq_ip, tcp_port))
+                sock.settimeout(None)   # blocking again for the command session
+                if attempt > 1:
+                    print(f"[TCP] Board answered after {attempt} attempts "
+                          f"({time.time() - start:.0f}s).")
+                return sock
+            except (socket.timeout, TimeoutError):
+                reason = "no SYN-ACK (board still booting / listener down)"
+                retry = True
+            except OSError as e:
+                reason = f"{e.__class__.__name__}: {e}"
+                retry = getattr(e, "errno", None) in _RETRYABLE_ERRNOS
+            try:
+                sock.close()
+            except OSError:
+                pass
+            if not retry:
+                print(f"[TCP] Connect failed (non-retryable): {reason}")
+                return None
+            if max_wait is not None and (time.time() - start) >= max_wait:
+                print(f"[TCP] Gave up waiting for {zynq_ip}:{tcp_port} after "
+                      f"{max_wait:.0f}s ({reason}).")
+                return None
+            # Only reprint when the reason changes, so a long wait doesn't spam.
+            if reason != last_reason:
+                print(f"[TCP] Waiting for board at {zynq_ip}:{tcp_port} ... "
+                      f"({reason}). Retrying every {retry_gap:.0f}s; Ctrl-C to stop.")
+                last_reason = reason
+            time.sleep(retry_gap)
+    except KeyboardInterrupt:
+        print("\n[TCP] Connect wait cancelled by user.")
+        return None
+
+
+def tcp_control():
+    sock = connect_with_retry()
+    if sock is None:
+        return
+    try:
         print(f"[TCP] Connected to {ZYNQ_IP}:{TCP_PORT}")
 
         # Enable TCP keepalive to detect dead connections faster
@@ -2636,17 +2723,18 @@ def tcp_control():
                 print(f"[TCP] Attempting to reconnect...")
                 try:
                     sock.close()
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.connect((ZYNQ_IP, TCP_PORT))
-
-                    # Re-enable TCP keepalive on reconnection
-                    configure_tcp_keepalive(sock)
-
-                    print(f"[TCP] Reconnected successfully!")
-                except Exception as reconnect_error:
-                    print(f"[TCP] Reconnection failed: {reconnect_error}")
+                except OSError:
+                    pass
+                # Bounded reconnect: wait up to 60 s for the board to come back
+                # (it may be rebooting), then hand control back rather than hang.
+                sock = connect_with_retry(max_wait=60.0)
+                if sock is None:
+                    print(f"[TCP] Reconnection failed.")
                     print(f"[TCP] Please check network cable and device, then restart.")
                     break
+                # Re-enable TCP keepalive on reconnection
+                configure_tcp_keepalive(sock)
+                print(f"[TCP] Reconnected successfully!")
                 
     except ConnectionRefusedError:
         print(f"[TCP] Could not connect to {ZYNQ_IP}:{TCP_PORT}")
