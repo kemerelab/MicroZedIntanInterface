@@ -527,6 +527,23 @@ static void publish_status_snapshot(void) {
   psmon->seq = (s0 | 1u) + 1u;   // even again: snapshot complete
 }
 
+// Pump the lwIP RX path once. Called continuously from the moment RX goes live
+// (right after xemac_add) through ALL of init: xemac_add enables the
+// interrupt-driven GEM RX immediately, but nothing drains recv_q until we call
+// xemacif_input. HYPOTHESIS under test: if packets arrive in an un-serviced
+// window (an early client's SYN retries + ARP during the >20 s boot / PHY
+// link-up), they pile up, PBUF_POOL exhausts, the RX BD ring starves, and the
+// Zynq-7000 GEM RX-used-bit hang latches. Draining throughout keeps the pool
+// recycled so that window never exists. NOTE this is a *cleaner* test than the
+// reverted 7c8a18c, which only serviced inside while(!link_is_up) -- a loop
+// that is SKIPPED when the cable is already up at boot (the common repro), so
+// that fix never actually ran in the failing case. Cheap/non-blocking when
+// there's nothing to receive. No RXEN toggling here (that regressed boots).
+static inline void service_network(void) {
+  xemacif_input(&server_netif);
+  sys_check_timeouts();
+}
+
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
   static uint32_t last_link_check_time = 0;
@@ -663,6 +680,12 @@ int main() {
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
 
+  // RX is now live (xemac_add enabled the interrupt-driven GEM RX). From here
+  // through the rest of init we keep draining it, so an early client's SYN/ARP
+  // can't pile up in an un-serviced window (see service_network()). SYNs that
+  // arrive before start_tcp_server() get a correct RST; the client retries.
+  service_network();
+
 
   // Start second core
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
@@ -683,15 +706,21 @@ int main() {
   }
 
   while (!link_is_up) {
+    // Keep draining RX while we wait for PHY link-up (may take seconds to
+    // negotiate). This is the window the reverted fix targeted -- but it is
+    // skipped entirely when the cable is already up at boot, which is why the
+    // servicing here is backed up by the calls sprinkled through the rest of init.
+    service_network();
     eth_link_detect(&server_netif);
     if (netif_is_link_up(&server_netif)) {
       link_is_up = 1;
-      send_message("Network link UP\r\n");    
+      send_message("Network link UP\r\n");
     }
   }
 
   start_tcp_server();
-  
+  service_network();   // answer any client already waiting on the listener
+
   // Initialize UDP (always enabled)
   udp_stream_init();
   lfp_stream_init();   // LFP band shares the unified UDP port (5000), stream_type=2
@@ -708,7 +737,8 @@ int main() {
   // benchmark_bram_reads();
 
   pl_set_copi_commands(initialization_cmd_sequence);
-  
+  service_network();   // keep the RX pool drained across PL init
+
   send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   send_message("debug> ");
   
