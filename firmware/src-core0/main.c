@@ -7,6 +7,7 @@
 #include "xil_cache.h"
 #include "lwip/init.h"
 #include "lwip/timeouts.h"
+#include "lwip/etharp.h"   // etharp_gratuitous() -- proactively refresh host ARP
 //#include "xuartps.h"
 #include "shared_print.h"
 #include "pl_dma.h"
@@ -587,6 +588,10 @@ void network_maintenance_loop(void) {
       // Restart UDP stream
       udp_stream_init();
 
+      // Announce ourselves so a reconnecting host re-learns our MAC immediately
+      // (same stale-ARP antidote as at boot, for the hotplug path).
+      etharp_gratuitous(&server_netif);
+
       send_message("Network ready. Send START command to resume streaming.\r\n");
     }
   }
@@ -711,7 +716,16 @@ int main() {
   
   send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   send_message("debug> ");
-  
+
+  // Board is fully up now. Proactively announce our IP->MAC with a gratuitous
+  // ARP so the host's ARP cache and the switch CAM learn us immediately -- the
+  // direct antidote to the stale/failed-ARP "[Errno 64] Host is down" the host
+  // reports when it connects before it has heard from us. Then emit ONE
+  // unambiguous readiness line, distinct from the earlier "link UP"/"server up"
+  // notices that fire >20 s before the board can actually service a connection.
+  etharp_gratuitous(&server_netif);
+  send_message("READY: safe to connect now (TCP command port %d up)\r\n", TCP_PORT);
+
   // Main event loop
   while (1) {
     network_maintenance_loop();
