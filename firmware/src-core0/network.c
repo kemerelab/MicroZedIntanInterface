@@ -149,6 +149,52 @@ void udp_stream_init() {
 }
 
 // ============================================================================
+// DEVICE DISCOVERY BEACON: broadcast device_beacon_t to <subnet>.255:BEACON_PORT
+// ~1 Hz so a client can discover our IP + know we're up WITHOUT sending us
+// anything during the fragile boot window. See the contract in main.h.
+// IP_SOF_BROADCAST is off in this build, so a plain udp_sendto() to a broadcast
+// address is permitted (no SOF_BROADCAST flag needed).
+// ============================================================================
+_Static_assert(sizeof(device_beacon_t) == 28, "device_beacon_t must be 28 bytes (net.py/ephys-socket decode)");
+
+extern struct netif server_netif;
+static struct udp_pcb *beacon_pcb = NULL;
+static ip_addr_t beacon_bcast;      // subnet-directed broadcast address
+static uint32_t  beacon_self_ip;    // our IPv4 (network order) for the payload
+
+void beacon_init(void) {
+    uint32_t ip   = netif_ip4_addr(&server_netif)->addr;
+    uint32_t mask = netif_ip4_netmask(&server_netif)->addr;
+    beacon_self_ip = ip;
+    beacon_bcast.addr = (ip & mask) | (~mask);   // (subnet bits) | (host all-ones)
+    beacon_pcb = udp_new();
+    if (beacon_pcb == NULL) {
+        send_message("ERROR: Could not create beacon UDP PCB\r\n");
+        return;
+    }
+    send_message("Discovery beacon -> %s:%d (~1 Hz)\r\n",
+                 ip4addr_ntoa(&beacon_bcast), BEACON_PORT);
+}
+
+void beacon_send(void) {
+    if (beacon_pcb == NULL) return;
+    static device_beacon_t b;   // static: the PBUF_REF references it until TX drains
+    b.magic      = BEACON_MAGIC;
+    b.version    = BEACON_VERSION;
+    b.ip         = beacon_self_ip;
+    b.tcp_port   = TCP_PORT;
+    b.udp_port   = UDP_PORT;
+    b.fw_version = FIRMWARE_VERSION_WORD;
+    memcpy(b.mac, server_netif.hwaddr, 6);
+    b.reserved   = 0;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, sizeof(b), PBUF_REF);
+    if (p == NULL) return;
+    p->payload = &b;
+    udp_sendto(beacon_pcb, p, &beacon_bcast, BEACON_PORT);
+    pbuf_free(p);
+}
+
+// ============================================================================
 // UDP THROUGHPUT BENCHMARK: blast n_packets of `bytes` to udp_dest_ip:5002 as
 // fast as the EMAC drains (zero-copy PBUF_REF, like the real stream path). The
 // host (net.py udp_bench) counts received bytes/packets over wall-clock for the

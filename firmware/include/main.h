@@ -19,6 +19,32 @@
 #define DEFAULT_UDP_DEST_IP_D   100
 #define DEFAULT_UDP_DEST_PORT   5000
 
+// ---- Device discovery beacon (subnet broadcast) ----------------------------
+// Once fully initialized, the board broadcasts this fixed little-endian struct
+// to <subnet>.255:BEACON_PORT ~1 Hz. A client uses it to (a) DISCOVER the board's
+// IP (from the datagram source address / the ip field), (b) know the board is UP
+// (readiness gate -- it only beacons after init), and (c) stay fully passive
+// until it arrives (zero packets to the board during its fragile boot window).
+// CONTRACT -- keep in sync across: network.c (build), remote/net.py (decode),
+// and the ephys-socket plugin (decode). All fields naturally aligned; no padding.
+#define BEACON_PORT     5050
+#define BEACON_MAGIC    0x4B4C4231u   // distinctive discovery magic ("KLB1")
+#define BEACON_VERSION  1
+
+typedef struct {
+    uint32_t magic;       // BEACON_MAGIC
+    uint32_t version;     // BEACON_VERSION
+    uint32_t ip;          // board IPv4, network byte order (== datagram source)
+    uint16_t tcp_port;    // control port (TCP_PORT, 6000)
+    uint16_t udp_port;    // unified data port (UDP_PORT, 5000)
+    uint32_t fw_version;  // FIRMWARE_VERSION_WORD (maj<<24|min<<16|patch<<8|build)
+    uint8_t  mac[6];      // board MAC = unique device id
+    uint16_t reserved;    // pad to 28 bytes / 4-byte multiple
+} device_beacon_t;
+
+void beacon_init(void);   // create the beacon PCB + compute the broadcast addr
+void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
+
 // ============================================================================
 // MULTICORE CONFIGURATION
 // ============================================================================

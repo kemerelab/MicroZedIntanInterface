@@ -550,6 +550,15 @@ void network_maintenance_loop(void) {
     publish_status_snapshot();
   }
 
+  // Discovery beacon: broadcast our identity ~1 Hz while the link is up so a
+  // client can auto-discover us and gate its connect on hearing us. TX-only and
+  // tiny; harmless during streaming.
+  static uint32_t last_beacon_time = 0;
+  if (link_is_up && (now_ms - last_beacon_time >= 1000)) {
+    last_beacon_time = now_ms;
+    beacon_send();
+  }
+
   // Poll network link state every 500ms for hotplug detection
   uint32_t current_time = sys_now();
   if (current_time - last_link_check_time >= 500) {
@@ -725,6 +734,11 @@ int main() {
   // notices that fire >20 s before the board can actually service a connection.
   etharp_gratuitous(&server_netif);
   send_message("READY: safe to connect now (TCP command port %d up)\r\n", TCP_PORT);
+
+  // Start the discovery beacon: from here we broadcast our identity ~1 Hz (in
+  // network_maintenance_loop) so a client can auto-discover our IP and know we're
+  // up, without sending us anything during boot. See beacon_send().
+  beacon_init();
 
   // Main event loop
   while (1) {
