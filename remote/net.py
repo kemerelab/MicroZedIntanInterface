@@ -577,12 +577,16 @@ class CableDetection:
         score = 0.0
         has_ddr = False
         
-        # Extract this channel's data (every other word, starting at channel offset).
-        # The unified broadband header grew from 10 to 14 words; this empirical
-        # offset tracks that growth (+4) so it points at the same data position it
-        # always did (cable detection runs only with a physical chip attached).
-        data_words = packet[8:]  # skip relative to the unified header
-        channel_words = [data_words[i] for i in range(channel, 70, 2)]  # Get every other word
+        # Skip the full 14-word unified broadband header; the chip DATA words
+        # start at word 14 (the RTL always writes a 14-word header regardless of
+        # channel_enable -- data_generator_core.sv). The old value 8 was wrong:
+        # it read 6 header/sub-block words as data and mis-located the INTAN /
+        # chip-ID / MISO positions, so detection scored ~0. This detector runs at
+        # channel_enable=0x0F (port A only): 2 words/cycle, so lane A-CIPO0 = every
+        # other word from index 0, A-CIPO1 from index 1 -> stride 2. (The plugin
+        # detects both ports in parallel at 0xFF, stride 4, 4 lanes.)
+        data_words = packet[14:]
+        channel_words = [data_words[i] for i in range(channel, 70, 2)]  # every other word (0x0F -> stride 2)
         
         if len(channel_words) < 9:
             return 0.0, False
