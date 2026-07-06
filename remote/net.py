@@ -28,9 +28,10 @@ UDP_PORT = 5000  # Must match your board's UDP_PORT (ALL streams; demux by strea
 BEACON_PORT = 5050
 BEACON_MAGIC = 0x4B4C4231
 _BEACON_FMT = '<II4sHHI6sH'   # magic,version,ip,tcp,udp,fw,mac,reserved = 28 bytes
-BEACON_DISCOVERY_TIMEOUT = 30.0   # must exceed the board's >20 s boot; the beacon
-                                  # only starts at the very end of boot. Set to 0
-                                  # to skip discovery (old firmware / blocked port).
+BEACON_DISCOVERY_TIMEOUT = 45.0   # must exceed board boot (>20 s) PLUS any
+                                  # interface bring-up (a USB-C Ethernet adapter
+                                  # re-enumerating on a power-cycle adds seconds).
+                                  # Set to 0 to skip discovery (old fw / blocked port).
 
 
 def _parse_beacon(data):
@@ -50,16 +51,16 @@ def _parse_beacon(data):
     }
 
 
-def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False):
-    """Listen for the device discovery beacon on UDP BEACON_PORT and return the
-    first valid board (dict incl. 'ip' from the datagram source), or None if none
-    arrives within `timeout`. Fully passive -- sends nothing to the board."""
+def _open_beacon_socket(quiet=False):
+    """Create + bind a fresh UDP listener on BEACON_PORT (INADDR_ANY). Returns the
+    socket or None."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    except (AttributeError, OSError):
-        pass
+    for opt in ('SO_REUSEPORT', 'SO_BROADCAST'):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, getattr(socket, opt), 1)
+        except (AttributeError, OSError):
+            pass
     try:
         sock.bind(('', BEACON_PORT))
     except OSError as e:
@@ -67,30 +68,52 @@ def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False):
             print(f"[DISCOVERY] Could not bind UDP {BEACON_PORT}: {e}")
         sock.close()
         return None
+    return sock
+
+
+def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False, rebind_interval=5.0):
+    """Listen for the device discovery beacon on UDP BEACON_PORT and return the
+    first valid board (dict incl. 'ip' from the datagram source), or None if none
+    arrives within `timeout`. Fully passive -- sends nothing to the board.
+
+    Re-creates the listening socket every `rebind_interval` s. This matters when
+    the board-facing interface appears or flaps DURING discovery -- e.g. a USB-C
+    Ethernet adapter re-enumerating on a board power-cycle takes the interface
+    down then up. A socket bound while that interface was down won't reliably
+    receive its broadcasts once it returns; a fresh bind after it's up does."""
     deadline = time.time() + timeout
-    try:
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                return None
-            # Poll in short slices so we can show progress: the board only starts
-            # beaconing at the END of its >20 s boot, so we must keep listening
-            # well past that -- NOT give up early and start poking it mid-boot.
-            sock.settimeout(min(remaining, 3.0))
-            try:
-                data, addr = sock.recvfrom(2048)
-            except socket.timeout:
-                if not quiet:
-                    print(f"[DISCOVERY]   ...still listening ({remaining:.0f}s left)")
-                continue
-            dev = _parse_beacon(data)
-            if dev is None:
-                continue                 # not our beacon; keep listening
-            dev['src_ip'] = addr[0]
-            dev['ip'] = addr[0]          # datagram source is authoritative
-            return dev
-    finally:
-        sock.close()
+    while time.time() < deadline:
+        # Diagnostic: which local IP would reach the board right now? If it's not
+        # on the board's subnet, the board-facing interface isn't up yet (this is
+        # a pure route lookup -- no packet is sent to the board).
+        if not quiet:
+            print(f"[DISCOVERY] listening on UDP {BEACON_PORT} "
+                  f"(local route toward {ZYNQ_IP}: {get_local_ip()})")
+        sock = _open_beacon_socket(quiet)
+        if sock is None:
+            time.sleep(1.0)
+            continue
+        try:
+            sub_deadline = min(deadline, time.time() + rebind_interval)
+            while time.time() < sub_deadline:
+                remaining = sub_deadline - time.time()
+                sock.settimeout(max(0.2, min(remaining, 3.0)))
+                try:
+                    data, addr = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                dev = _parse_beacon(data)
+                if dev is None:
+                    continue             # not our beacon; keep listening
+                dev['src_ip'] = addr[0]
+                dev['ip'] = addr[0]      # datagram source is authoritative
+                return dev
+        finally:
+            sock.close()
+        left = deadline - time.time()
+        if not quiet and left > 0:
+            print(f"[DISCOVERY]   ...still listening ({left:.0f}s left, re-binding)")
+    return None
 
 # Updated data generator constants
 MAGIC_NUMBER_LOW = 0xDEADBEEF
