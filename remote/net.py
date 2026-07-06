@@ -15,6 +15,76 @@ ZYNQ_IP = "192.168.18.10"  # IP of the Zynq board
 TCP_PORT = 6000  # Must match your board's TCP_PORT
 UDP_PORT = 5000  # Must match your board's UDP_PORT (ALL streams; demux by stream_type)
 
+# ---------------------------------------------------------------------------
+# Device discovery beacon (contract: firmware main.h device_beacon_t, built in
+# network.c). The board broadcasts a 28-byte beacon to <subnet>.255:BEACON_PORT
+# ~1 Hz once it's up. We listen for it to (a) auto-discover the board's IP (no
+# hardcoding), (b) confirm it's ready before we send it anything, and (c) stay
+# fully passive during its fragile boot window. Falls back to the configured
+# ZYNQ_IP if no beacon is heard (older firmware without the beacon). The beacon
+# is a subnet BROADCAST, so an unbound host port does NOT provoke an ICMP
+# port-unreachable (hosts don't ICMP-error broadcasts) -- safe to close after.
+# ---------------------------------------------------------------------------
+BEACON_PORT = 5050
+BEACON_MAGIC = 0x4B4C4231
+_BEACON_FMT = '<II4sHHI6sH'   # magic,version,ip,tcp,udp,fw,mac,reserved = 28 bytes
+BEACON_DISCOVERY_TIMEOUT = 8.0
+
+
+def _parse_beacon(data):
+    if len(data) < 28:
+        return None
+    magic, version, ip_bytes, tcp_port, udp_port, fw, mac, _ = \
+        struct.unpack(_BEACON_FMT, data[:28])
+    if magic != BEACON_MAGIC:
+        return None
+    return {
+        'payload_ip': socket.inet_ntoa(ip_bytes),
+        'tcp_port': tcp_port,
+        'udp_port': udp_port,
+        'fw': f"{(fw >> 24) & 0xff}.{(fw >> 16) & 0xff}.{(fw >> 8) & 0xff}.{fw & 0xff}",
+        'mac': ':'.join(f'{b:02x}' for b in mac),
+        'version': version,
+    }
+
+
+def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False):
+    """Listen for the device discovery beacon on UDP BEACON_PORT and return the
+    first valid board (dict incl. 'ip' from the datagram source), or None if none
+    arrives within `timeout`. Fully passive -- sends nothing to the board."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        pass
+    try:
+        sock.bind(('', BEACON_PORT))
+    except OSError as e:
+        if not quiet:
+            print(f"[DISCOVERY] Could not bind UDP {BEACON_PORT}: {e}")
+        sock.close()
+        return None
+    deadline = time.time() + timeout
+    try:
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            sock.settimeout(remaining)
+            try:
+                data, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                return None
+            dev = _parse_beacon(data)
+            if dev is None:
+                continue                 # not our beacon; keep listening
+            dev['src_ip'] = addr[0]
+            dev['ip'] = addr[0]          # datagram source is authoritative
+            return dev
+    finally:
+        sock.close()
+
 # Updated data generator constants
 MAGIC_NUMBER_LOW = 0xDEADBEEF
 MAGIC_NUMBER_HIGH = 0xCAFEBABE
@@ -2745,10 +2815,28 @@ def tcp_control():
 
 if __name__ == "__main__":
     print("=== Zynq BRAM Data Generator Validator ===")
+
+    # Discover the board by listening for its broadcast beacon -- passive, we send
+    # nothing until we've heard it (so we can't disturb the board during boot).
+    # Auto-fills ZYNQ_IP from the beacon's source address; falls back to the
+    # configured address if no beacon arrives (older firmware without the beacon).
+    print(f"[DISCOVERY] Listening for a board beacon on UDP {BEACON_PORT} "
+          f"(up to {BEACON_DISCOVERY_TIMEOUT:.0f}s)...")
+    _dev = discover_board()
+    if _dev:
+        ZYNQ_IP = _dev['ip']
+        TCP_PORT = _dev['tcp_port'] or TCP_PORT
+        UDP_PORT = _dev['udp_port'] or UDP_PORT
+        print(f"[DISCOVERY] Found board at {_dev['ip']}  fw {_dev['fw']}  "
+              f"MAC {_dev['mac']}  (TCP {_dev['tcp_port']}, UDP {_dev['udp_port']})")
+    else:
+        print(f"[DISCOVERY] No beacon heard -- using configured {ZYNQ_IP} "
+              f"(older firmware without the beacon, or wrong subnet?)")
+
     print(f"Device: {ZYNQ_IP}:{TCP_PORT}")
     print(f"UDP Port: {UDP_PORT}")
     print("Press Ctrl+C to stop.\n")
-    
+
     # ONE socket on UDP_PORT (5000) for ALL streams. The UnifiedSink drains it
     # promiscuously (recv->ring), demuxes by stream_type (broadband -> validator,
     # LFP -> subscribers), and verifies per-stream SEQ continuity. Draining 5000
@@ -2756,7 +2844,7 @@ if __name__ == "__main__":
     # unreachable to the board (an unconsumed UDP port => ~1 ICMP/packet => an
     # RX-interrupt storm that preempts the board's polled loop). Started here (not
     # in tcp_control) so it drains regardless of the TCP control state.
-    UNIFIED_SINK = UnifiedSink()
+    UNIFIED_SINK = UnifiedSink(port=UDP_PORT)
     UNIFIED_SINK.start()
 
     tcp_control()
