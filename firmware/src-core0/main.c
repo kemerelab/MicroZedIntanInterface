@@ -528,6 +528,17 @@ static void publish_status_snapshot(void) {
   psmon->seq = (s0 | 1u) + 1u;   // even again: snapshot complete
 }
 
+// Pump the lwIP RX path once. Called continuously from the moment RX goes live
+// (right after xemac_add) through ALL of init so an early client's SYN/ARP can't
+// pile up in an un-serviced window and wedge the GEM RX. Belt-and-suspenders with
+// the beacon-gated connect (the client shouldn't connect until it hears us) --
+// but if a client DOES poke us during boot, draining here keeps the RX healthy.
+// No RXEN toggling (that regressed boots); just drain. Cheap when nothing waits.
+static inline void service_network(void) {
+  xemacif_input(&server_netif);
+  sys_check_timeouts();
+}
+
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
   static uint32_t last_link_check_time = 0;
@@ -676,7 +687,7 @@ int main() {
   xemac_add(&server_netif, &ipaddr, &netmask, &gw,
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
-
+  service_network();   // RX is live now -- start draining it through the rest of init
 
   // Start second core
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
@@ -697,15 +708,17 @@ int main() {
   }
 
   while (!link_is_up) {
+    service_network();   // keep draining RX while waiting for PHY link-up
     eth_link_detect(&server_netif);
     if (netif_is_link_up(&server_netif)) {
       link_is_up = 1;
-      send_message("Network link UP\r\n");    
+      send_message("Network link UP\r\n");
     }
   }
 
   start_tcp_server();
-  
+  service_network();   // answer anything already waiting on the listener
+
   // Initialize UDP (always enabled)
   udp_stream_init();
   lfp_stream_init();   // LFP band shares the unified UDP port (5000), stream_type=2
@@ -722,6 +735,7 @@ int main() {
   // benchmark_bram_reads();
 
   pl_set_copi_commands(initialization_cmd_sequence);
+  service_network();   // keep the RX pool drained across PL init
   
   send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   send_message("debug> ");

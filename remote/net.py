@@ -28,7 +28,9 @@ UDP_PORT = 5000  # Must match your board's UDP_PORT (ALL streams; demux by strea
 BEACON_PORT = 5050
 BEACON_MAGIC = 0x4B4C4231
 _BEACON_FMT = '<II4sHHI6sH'   # magic,version,ip,tcp,udp,fw,mac,reserved = 28 bytes
-BEACON_DISCOVERY_TIMEOUT = 8.0
+BEACON_DISCOVERY_TIMEOUT = 30.0   # must exceed the board's >20 s boot; the beacon
+                                  # only starts at the very end of boot. Set to 0
+                                  # to skip discovery (old firmware / blocked port).
 
 
 def _parse_beacon(data):
@@ -71,11 +73,16 @@ def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False):
             remaining = deadline - time.time()
             if remaining <= 0:
                 return None
-            sock.settimeout(remaining)
+            # Poll in short slices so we can show progress: the board only starts
+            # beaconing at the END of its >20 s boot, so we must keep listening
+            # well past that -- NOT give up early and start poking it mid-boot.
+            sock.settimeout(min(remaining, 3.0))
             try:
                 data, addr = sock.recvfrom(2048)
             except socket.timeout:
-                return None
+                if not quiet:
+                    print(f"[DISCOVERY]   ...still listening ({remaining:.0f}s left)")
+                continue
             dev = _parse_beacon(data)
             if dev is None:
                 continue                 # not our beacon; keep listening
