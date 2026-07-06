@@ -1,4 +1,5 @@
 import socket
+import errno
 import sys
 import threading
 import struct
@@ -12,11 +13,125 @@ from dataclasses import dataclass
 
 ZYNQ_IP = "192.168.18.10"  # IP of the Zynq board
 TCP_PORT = 6000  # Must match your board's TCP_PORT
-UDP_PORT = 5000  # Must match your board's UDP_PORT
+UDP_PORT = 5000  # Must match your board's UDP_PORT (ALL streams; demux by stream_type)
+
+# ---------------------------------------------------------------------------
+# Device discovery beacon (contract: firmware main.h device_beacon_t, built in
+# network.c). The board broadcasts a 28-byte beacon to <subnet>.255:BEACON_PORT
+# ~1 Hz once it's up. We listen for it to (a) auto-discover the board's IP (no
+# hardcoding), (b) confirm it's ready before we send it anything, and (c) stay
+# fully passive during its fragile boot window. Falls back to the configured
+# ZYNQ_IP if no beacon is heard (older firmware without the beacon). The beacon
+# is a subnet BROADCAST, so an unbound host port does NOT provoke an ICMP
+# port-unreachable (hosts don't ICMP-error broadcasts) -- safe to close after.
+# ---------------------------------------------------------------------------
+BEACON_PORT = 5050
+BEACON_MAGIC = 0x4B4C4231
+_BEACON_FMT = '<II4sHHI6sH'   # magic,version,ip,tcp,udp,fw,mac,reserved = 28 bytes
+BEACON_DISCOVERY_TIMEOUT = 45.0   # must exceed board boot (>20 s) PLUS any
+                                  # interface bring-up (a USB-C Ethernet adapter
+                                  # re-enumerating on a power-cycle adds seconds).
+                                  # Set to 0 to skip discovery (old fw / blocked port).
+
+
+def _parse_beacon(data):
+    if len(data) < 28:
+        return None
+    magic, version, ip_bytes, tcp_port, udp_port, fw, mac, _ = \
+        struct.unpack(_BEACON_FMT, data[:28])
+    if magic != BEACON_MAGIC:
+        return None
+    return {
+        'payload_ip': socket.inet_ntoa(ip_bytes),
+        'tcp_port': tcp_port,
+        'udp_port': udp_port,
+        'fw': f"{(fw >> 24) & 0xff}.{(fw >> 16) & 0xff}.{(fw >> 8) & 0xff}.{fw & 0xff}",
+        'mac': ':'.join(f'{b:02x}' for b in mac),
+        'version': version,
+    }
+
+
+def _open_beacon_socket(quiet=False):
+    """Create + bind a fresh UDP listener on BEACON_PORT (INADDR_ANY). Returns the
+    socket or None."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    for opt in ('SO_REUSEPORT', 'SO_BROADCAST'):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, getattr(socket, opt), 1)
+        except (AttributeError, OSError):
+            pass
+    try:
+        sock.bind(('', BEACON_PORT))
+    except OSError as e:
+        if not quiet:
+            print(f"[DISCOVERY] Could not bind UDP {BEACON_PORT}: {e}")
+        sock.close()
+        return None
+    return sock
+
+
+def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False, rebind_interval=5.0):
+    """Listen for the device discovery beacon on UDP BEACON_PORT and return the
+    first valid board (dict incl. 'ip' from the datagram source), or None if none
+    arrives within `timeout`. Fully passive -- sends nothing to the board.
+
+    Re-creates the listening socket every `rebind_interval` s. This matters when
+    the board-facing interface appears or flaps DURING discovery -- e.g. a USB-C
+    Ethernet adapter re-enumerating on a board power-cycle takes the interface
+    down then up. A socket bound while that interface was down won't reliably
+    receive its broadcasts once it returns; a fresh bind after it's up does."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # Diagnostic: which local IP would reach the board right now? If it's not
+        # on the board's subnet, the board-facing interface isn't up yet (this is
+        # a pure route lookup -- no packet is sent to the board).
+        if not quiet:
+            print(f"[DISCOVERY] listening on UDP {BEACON_PORT} "
+                  f"(local route toward {ZYNQ_IP}: {get_local_ip()})")
+        sock = _open_beacon_socket(quiet)
+        if sock is None:
+            time.sleep(1.0)
+            continue
+        try:
+            sub_deadline = min(deadline, time.time() + rebind_interval)
+            while time.time() < sub_deadline:
+                remaining = sub_deadline - time.time()
+                sock.settimeout(max(0.2, min(remaining, 3.0)))
+                try:
+                    data, addr = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                dev = _parse_beacon(data)
+                if dev is None:
+                    continue             # not our beacon; keep listening
+                dev['src_ip'] = addr[0]
+                dev['ip'] = addr[0]      # datagram source is authoritative
+                return dev
+        finally:
+            sock.close()
+        left = deadline - time.time()
+        if not quiet and left > 0:
+            print(f"[DISCOVERY]   ...still listening ({left:.0f}s left, re-binding)")
+    return None
 
 # Updated data generator constants
 MAGIC_NUMBER_LOW = 0xDEADBEEF
 MAGIC_NUMBER_HIGH = 0xCAFEBABE
+
+# ---------------------------------------------------------------------------
+# Unified packet format (docs/unified-packet-format.md). Every PL stream emits
+# the SAME 8 x 32-bit little-endian common header on UDP 5000; the host demuxes
+# by stream_type and verifies the per-stream SEQ continuity (the loss check).
+#   w0 MAGIC=0xCAFEBABE | w1 TYPE_VER=type[7:0]|version[15:8]|flags[31:16]
+#   w2/w3 64-bit timestamp | w4 SEQ | w5 AUX0 | w6 AUX1 | w7 RSVD
+# ---------------------------------------------------------------------------
+UNIFIED_MAGIC = 0xCAFEBABE
+UNIFIED_VERSION = 1
+UNIFIED_HEADER_WORDS = 8
+STREAM_TYPE_BROADBAND = 1
+STREAM_TYPE_LFP = 2
+STREAM_TYPE_WAVELET = 3   # reserved for the follow-on branch
 
 # Binary command protocol constants
 CMD_MAGIC = 0xDEADBEEF
@@ -64,13 +179,11 @@ CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throug
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
 
 UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
-LFP_UDP_PORT = 5001         # separate UDP stream for the LFP band
-# Persistent LFP UDP sink (created in tcp_control(); see class LfpSink). Keeps
-# port 5001 bound + drained for the whole session so the host never replies ICMP
-# port-unreachable to the board while the LFP stream runs.
-LFP_SINK = None
-LFP_MAGIC_LOW = 0x1F1FBEEF
-LFP_MAGIC_HIGH = 0xCAFEBABE
+# Unified port: the LFP band now arrives on UDP_PORT (5000) mixed with broadband,
+# demuxed by stream_type=2. The persistent UnifiedSink (created in __main__)
+# drains 5000 promiscuously and fans the LFP frames out to subscribers, so the
+# host never replies ICMP port-unreachable to the board while LFP streams.
+UNIFIED_SINK = None
 LFP_COEF_FRAC = 17          # Q1.17 coefficient fixed-point
 
 AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
@@ -119,7 +232,7 @@ ACK_ERROR = 0x15
 
 # Cable test constants - ALWAYS use all channels for cable test
 CABLE_TEST_CHANNEL_ENABLE = 0x0F  # All channels always
-CABLE_TEST_PACKET_SIZE_WORDS = 74  # 4 header + 70 data words
+CABLE_TEST_PACKET_SIZE_WORDS = 84  # 14-word unified header + 70 data words
 CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
 
 # Cable test globals
@@ -210,7 +323,7 @@ from dataclasses import dataclass
 
 # Cable test uses all channels (for detection only)
 CABLE_TEST_CHANNEL_ENABLE = 0x0F
-CABLE_TEST_PACKET_SIZE_WORDS = 74
+CABLE_TEST_PACKET_SIZE_WORDS = 84
 CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
 
 # Expected patterns and chip IDs
@@ -234,7 +347,7 @@ from dataclasses import dataclass
 
 # Cable test uses all channels (for detection only)
 CABLE_TEST_CHANNEL_ENABLE = 0x0F
-CABLE_TEST_PACKET_SIZE_WORDS = 80
+CABLE_TEST_PACKET_SIZE_WORDS = 84
 CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
 
 # Expected patterns and chip IDs
@@ -464,8 +577,11 @@ class CableDetection:
         score = 0.0
         has_ddr = False
         
-        # Extract this channel's data (every other word, starting at channel offset)
-        data_words = packet[4:]  # Skip header
+        # Extract this channel's data (every other word, starting at channel offset).
+        # The unified broadband header grew from 10 to 14 words; this empirical
+        # offset tracks that growth (+4) so it points at the same data position it
+        # always did (cable detection runs only with a physical chip attached).
+        data_words = packet[8:]  # skip relative to the unified header
         channel_words = [data_words[i] for i in range(channel, 70, 2)]  # Get every other word
         
         if len(channel_words) < 9:
@@ -521,9 +637,13 @@ def calculate_data_words(channel_enable):
     total_16bit_words = 35 * num_channels
     return (total_16bit_words + 1) // 2
 
+# Broadband framing (unified format): 8-word common header + 6-word broadband
+# sub-block = 14 header words ahead of the data (docs/unified-packet-format.md).
+BB_HEADER_WORDS = 14
+
 def calculate_packet_size(channel_enable):
-    """Total packet size in words (header + data). Up to 10 + 140 = 150."""
-    return 10 + calculate_data_words(channel_enable)
+    """Total broadband packet size in words (header + data). Up to 14 + 140 = 154."""
+    return BB_HEADER_WORDS + calculate_data_words(channel_enable)
 
 # ---------------------------------------------------------------------------
 # Debug-mode sine reference model.
@@ -617,6 +737,11 @@ class DataValidator:
         self.timestamp_errors = 0
         self.magic_errors = 0
         self.size_errors = 0
+        # Per-stream SEQ continuity = the broadband loss check (unified format,
+        # header word 4). MUST stay 0 for the archival broadband stream.
+        self.last_seq = None
+        self.seq_gaps = 0          # broadband gap count (the no-loss assertion)
+        self.seq_lost_packets = 0  # total packets implied missing by the gaps
         self.last_stats_time = None
         self.last_packet_count = 0
         self.last_packet_raw = None
@@ -909,10 +1034,10 @@ class DataValidator:
                     words = struct.unpack(f'<{CABLE_TEST_PACKET_SIZE_WORDS}I', data)
                     self.last_packet_words = words
                     if cable_test_packets_captured == 0:
-                        print(f"Packet {cable_test_packets_captured + 1} (Init): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
+                        print(f"Packet {cable_test_packets_captured + 1} (Init): Word 12: 0x{words[12]:08X}, Word 13: 0x{words[13]:08X}")
                     else:
                         phase1 = cable_test_packets_captured - 1
-                        print(f"Packet {cable_test_packets_captured + 1} (Phase1={phase1}): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
+                        print(f"Packet {cable_test_packets_captured + 1} (Phase1={phase1}): Word 12: 0x{words[12]:08X}, Word 13: 0x{words[13]:08X}")
                 cable_test_packets_captured += 1
                 if cable_test_packets_captured >= 17:
                     cable_test_mode = False
@@ -947,20 +1072,36 @@ class DataValidator:
             if self.cable_detector and len(data) == CABLE_TEST_PACKET_SIZE_BYTES:
                 self.cable_detector.capture_packet(words)
 
-            magic_combined = (words[1] << 32) | words[0]
-            expected_magic = (MAGIC_NUMBER_HIGH << 32) | MAGIC_NUMBER_LOW
-
-            if magic_combined != expected_magic:
+            # Unified header: w0 = MAGIC (0xCAFEBABE), w1 = TYPE_VER (low byte =
+            # stream_type, must be BROADBAND here; next byte = version).
+            stream_type = words[1] & 0xFF
+            version = (words[1] >> 8) & 0xFF
+            if words[0] != UNIFIED_MAGIC or stream_type != STREAM_TYPE_BROADBAND:
                 self.magic_errors += 1
                 self.error_count += 1
-                print(f"[ERROR] Packet {self.packet_count}: Magic number mismatch")
-                return None            
-            
+                print(f"[ERROR] Packet {self.packet_count}: header mismatch "
+                      f"(magic=0x{words[0]:08X} type={stream_type} ver={version})")
+                return None
+
             timestamp = (words[3] << 32) | words[2]
+            seq = words[4]   # per-stream broadband sequence (the loss check)
+
+            # SEQ continuity check: each broadband packet's SEQ must be exactly
+            # +1 (mod 2^32) from the previous. A gap = lost broadband packet(s).
+            if self.last_seq is not None:
+                expected_seq = (self.last_seq + 1) & 0xFFFFFFFF
+                if seq != expected_seq:
+                    self.seq_gaps += 1
+                    self.error_count += 1
+                    missing = (seq - expected_seq) & 0xFFFFFFFF
+                    self.seq_lost_packets += missing
+                    print(f"[LOSS] Broadband SEQ gap: expected {expected_seq}, got "
+                          f"{seq} (+{missing} missing). gap_count={self.seq_gaps}")
+            self.last_seq = seq
 
             # Debug-sine capture: stash data words for offline verification.
             if self.sine_capture_active and len(self.sine_capture) < self.sine_capture_target:
-                self.sine_capture.append((timestamp, words[10:]))
+                self.sine_capture.append((timestamp, words[BB_HEADER_WORDS:]))
                 if len(self.sine_capture) >= self.sine_capture_target:
                     self.sine_capture_active = False
 
@@ -970,14 +1111,16 @@ class DataValidator:
                 total_rate = self.packet_count / elapsed if elapsed > 0 else 0
                 inst_rate = (self.packet_count - self.last_packet_count) / (now - self.last_stats_time) if (now - self.last_stats_time) > 0 else 0
                 
-                if len(words) >= 14:
-                    data_sample = f"Data: [0x{words[10]:08X}, 0x{words[11]:08X}, 0x{words[12]:08X}, 0x{words[13]:08X}]"
+                if len(words) >= BB_HEADER_WORDS + 4:
+                    h = BB_HEADER_WORDS
+                    data_sample = (f"Data: [0x{words[h]:08X}, 0x{words[h+1]:08X}, "
+                                   f"0x{words[h+2]:08X}, 0x{words[h+3]:08X}]")
                 else:
                     data_sample = f"Data: [packet too short]"
-                
-                print(f"[INFO] Packet {self.packet_count}: Timestamp {timestamp}, "
+
+                print(f"[INFO] Packet {self.packet_count}: ts={timestamp} seq={seq}, "
                       f"Rate: {total_rate:.1f} pkt/s (avg), {inst_rate:.1f} pkt/s (inst), "
-                      f"Errors: {self.error_count}")
+                      f"Errors: {self.error_count} (seq_gaps={self.seq_gaps})")
                 print(f"       {data_sample}")
                 
                 self.last_stats_time = now
@@ -1006,23 +1149,23 @@ class DataValidator:
 
     def print_aux_info(self):
         """Decode the aux command-echo metadata of the last received packet.
-        Header 64-bit word 2 (32-bit words 4/5):
-          word4 = {echo_slot0[15:0], flags[7:0], digital_in[7:0]}
-          word5 = {echo_slot2_prev[15:0], echo_slot1_prev[15:0]}
+        Unified broadband header:
+          word6 (AUX1) = {echo_slot0[31:16], flags[15:8], digital_in[7:0]}
+          word8 (sub-block) = {echo_slot2_prev[31:16], echo_slot1_prev[15:0]}
         Result locations (SPI 2-command pipeline): slot-0's result is THIS
         packet's data word 34; slot-1/2 echoes label data words 0 and 1."""
-        if self.last_packet_words is None or len(self.last_packet_words) < 6:
+        if self.last_packet_words is None or len(self.last_packet_words) < 9:
             print("[AUX] No packet captured yet")
             return
-        w4, w5 = self.last_packet_words[4], self.last_packet_words[5]
-        digital_in = w4 & 0xFF
-        flags = (w4 >> 8) & 0xFF
+        w_aux1, w_echo = self.last_packet_words[6], self.last_packet_words[8]
+        digital_in = w_aux1 & 0xFF
+        flags = (w_aux1 >> 8) & 0xFF
         if not (flags & 0x01):
             print(f"[AUX] Sequencer inactive in last packet (digital_in=0x{digital_in:02X})")
             return
-        echo0 = (w4 >> 16) & 0xFFFF
-        echo1 = w5 & 0xFFFF
-        echo2 = (w5 >> 16) & 0xFFFF
+        echo0 = (w_aux1 >> 16) & 0xFFFF
+        echo1 = w_echo & 0xFFFF
+        echo2 = (w_echo >> 16) & 0xFFFF
         print(f"[AUX] digital_in=0x{digital_in:02X}  "
               f"fast_settle={bool(flags & 0x02)} digout={bool(flags & 0x04)} "
               f"dsp={bool(flags & 0x08)} echo_valid={bool(flags & 0x10)} "
@@ -1090,55 +1233,173 @@ def verify_debug_sine(sock, channel_enable=0xFF, n_packets=300):
     validator.analyze_sine_capture(write_ptr=wrptr)
 
 
-def udp_listener():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Big receive buffer: at ~30k pkt/s and up to 600 B/pkt the default buffer
-    # overflows on any brief stall and drops packets (worse at dual-port). Ask
-    # for 16 MB; the OS clamps it to a kernel cap (see the per-platform hint).
-    REQ_RCVBUF = 16 * 1024 * 1024
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, REQ_RCVBUF)
-        got = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        # Linux reports 2x the granted size via getsockopt; macOS reports it as-is.
-        eff = got // 2 if sys.platform.startswith("linux") else got
-        msg = f"[UDP] SO_RCVBUF = {eff // 1024} KB"
-        if eff < REQ_RCVBUF:
-            if sys.platform == "darwin":
-                msg += " (clamped; raise it: sudo sysctl -w kern.ipc.maxsockbuf=33554432)"
-            elif sys.platform.startswith("linux"):
-                msg += " (clamped; raise it: sudo sysctl -w net.core.rmem_max=33554432)"
-            else:
-                msg += " (clamped by the OS socket-buffer cap)"
-        print(msg)
-    except OSError as e:
-        print(f"[UDP] Could not set SO_RCVBUF: {e}")
-    sock.bind(("", UDP_PORT))
-    sock.settimeout(1.0)
-    print(f"[UDP] Listening on port {UDP_PORT}...")
+# ---------------------------------------------------------------------------
+# Unified UDP sink: ONE socket on port 5000 carrying ALL streams (broadband +
+# LFP), demuxed by stream_type. This is the no-loss design from CLAUDE.md /
+# docs/unified-packet-format.md:
+#   * a tight recv->ring thread does the MINIMUM work (recvfrom -> queue), so
+#     broadband is NEVER blocked while a slow consumer processes a packet;
+#   * a demux thread pops from the ring, peeks header word 1 (stream_type), and
+#     routes broadband -> DataValidator (which checks per-stream SEQ continuity
+#     and prints the broadband gap count, which MUST be 0) and LFP -> the LFP
+#     subscriber queues (receive_lfp / lfp_sweep read those).
+# Big SO_RCVBUF so nothing is dropped while waiting.
+# ---------------------------------------------------------------------------
+class UnifiedSink:
+    def __init__(self, port=UDP_PORT, rcvbuf=16 * 1024 * 1024, ring_max=200000):
+        self.port = port
+        self.rcvbuf = rcvbuf
+        self._sock = None
+        self._recv_thread = None
+        self._demux_thread = None
+        self._running = False
+        self._ring = queue.Queue(maxsize=ring_max)
+        self._ring_drops = 0           # datagrams dropped because the ring was full
+        # LFP fan-out (pub/sub), like the old LfpSink
+        self._lfp_subs = []
+        self._lfp_last_seq = None
+        self._lfp_gaps = 0
+        self.lfp_pkts = 0
+        self.lfp_bytes = 0
+        self.bb_pkts = 0
+        self.other_pkts = 0
+        self.last_addr = None
+        self._lock = threading.Lock()
+        # last-timestamp continuity (broadband) handled inside DataValidator now
 
-    last_timestamp = None
-    try:
-        while True:
+    def start(self):
+        if self._running:
+            return True
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.rcvbuf)
+            got = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+            eff = got // 2 if sys.platform.startswith("linux") else got
+            msg = f"[UDP] SO_RCVBUF = {eff // 1024} KB"
+            if eff < self.rcvbuf:
+                if sys.platform == "darwin":
+                    msg += " (clamped; raise it: sudo sysctl -w kern.ipc.maxsockbuf=33554432)"
+                elif sys.platform.startswith("linux"):
+                    msg += " (clamped; raise it: sudo sysctl -w net.core.rmem_max=33554432)"
+                else:
+                    msg += " (clamped by the OS socket-buffer cap)"
+            print(msg)
+        except OSError as e:
+            print(f"[UDP] Could not set SO_RCVBUF: {e}")
+        try:
+            sock.bind(("", self.port))
+        except OSError as e:
+            print(f"[UDP] could NOT bind UDP {self.port}: {e}")
+            return False
+        sock.settimeout(1.0)
+        self._sock = sock
+        self._running = True
+        self._recv_thread = threading.Thread(target=self._recv_loop, name="udp-recv", daemon=True)
+        self._demux_thread = threading.Thread(target=self._demux_loop, name="udp-demux", daemon=True)
+        self._recv_thread.start()
+        self._demux_thread.start()
+        print(f"[UDP] Unified listener on port {self.port} (demux by stream_type; "
+              f"broadband + LFP on one port)")
+        return True
+
+    def _recv_loop(self):
+        # The hot path: recv -> ring, nothing else (so broadband is never blocked
+        # while the demux/validator does its work downstream).
+        ring = self._ring
+        while self._running:
             try:
-                data, addr = sock.recvfrom(4096)
-                total_len = len(data)
-
-                for offset in range(0, total_len - validator.expected_packet_size_bytes + 1, validator.expected_packet_size_bytes):
-                    chunk = data[offset:offset + validator.expected_packet_size_bytes]
-                    timestamp = validator.validate_packet(chunk)
-                    if timestamp is not None:
-                        if last_timestamp is not None and timestamp != last_timestamp + 1:
-                            validator.timestamp_errors += 1
-                            validator.error_count += 1
-                        last_timestamp = timestamp
+                data, addr = self._sock.recvfrom(4096)
             except socket.timeout:
                 continue
-            except KeyboardInterrupt:
+            except OSError:
                 break
+            self.last_addr = addr
+            try:
+                ring.put_nowait(data)
+            except queue.Full:
+                self._ring_drops += 1   # host-side ring overflow (NOT a board drop)
+
+    def _demux_loop(self):
+        while self._running:
+            try:
+                data = self._ring.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if len(data) < UNIFIED_HEADER_WORDS * 4:
+                self.other_pkts += 1
+                continue
+            magic, type_ver = struct.unpack('<II', data[:8])
+            if magic != UNIFIED_MAGIC:
+                self.other_pkts += 1
+                continue
+            stream_type = type_ver & 0xFF
+            if stream_type == STREAM_TYPE_BROADBAND:
+                self._handle_broadband(data)
+            elif stream_type == STREAM_TYPE_LFP:
+                self._handle_lfp(data)
+            else:
+                self.other_pkts += 1
+
+    def _handle_broadband(self, data):
+        # A datagram is exactly one broadband packet (the board sends one packet
+        # per datagram). Re-chunk defensively in case several were coalesced.
+        self.bb_pkts += 1
+        psize = validator.expected_packet_size_bytes
+        if psize <= 0:
+            return
+        total = len(data)
+        if total == psize:
+            validator.validate_packet(data)
+            return
+        for off in range(0, total - psize + 1, psize):
+            validator.validate_packet(data[off:off + psize])
+
+    def _handle_lfp(self, data):
+        self.lfp_pkts += 1
+        self.lfp_bytes += len(data)
+        # SEQ continuity for the LFP stream (header word 4)
+        seq = struct.unpack('<I', data[16:20])[0]
+        if self._lfp_last_seq is not None and seq != (self._lfp_last_seq + 1) & 0xFFFFFFFF:
+            self._lfp_gaps += 1
+        self._lfp_last_seq = seq
+        with self._lock:
+            subs = list(self._lfp_subs)
+        for q in subs:
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                pass
+
+    def subscribe_lfp(self, maxsize=20000):
+        q = queue.Queue(maxsize=maxsize)
+        with self._lock:
+            self._lfp_subs.append(q)
+        return q
+
+    def unsubscribe_lfp(self, q):
+        with self._lock:
+            if q in self._lfp_subs:
+                self._lfp_subs.remove(q)
+
+    def stop(self):
+        self._running = False
+
+
+def udp_listener():
+    """Compatibility wrapper: start the unified sink (the real work is in its
+    recv/demux threads). Kept so __main__ can spawn it like before."""
+    global UNIFIED_SINK
+    if UNIFIED_SINK is None:
+        UNIFIED_SINK = UnifiedSink()
+    UNIFIED_SINK.start()
+    # Block this (daemon) thread until shutdown; print stats on exit.
+    try:
+        while UNIFIED_SINK._running:
+            time.sleep(1.0)
     except KeyboardInterrupt:
-        print("\n[UDP] Stopping UDP listener")
+        pass
     finally:
-        sock.close()
         validator.print_statistics()
 
 def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
@@ -1320,7 +1581,8 @@ def lfp_upload_coeffs(sock, coeffs):
 
 def configure_lfp(sock, datapath="cic", num_taps=None, cutoff_hz=1250.0):
     """Disable, set params, design + upload the LP kernel. Call lfp_enable(sock,
-    True) afterwards to start streaming on UDP 5001.
+    True) afterwards to start streaming on the unified UDP port (5000,
+    stream_type=2).
 
     The LFP lane mask is NO LONGER set here -- it MIRRORS the broadband
     channel-enable mask in the PL (single source of truth). Choose which streams
@@ -1361,96 +1623,26 @@ def lfp_enable(sock, on=True):
 
 
 # ---------------------------------------------------------------------------
-# Persistent LFP UDP sink (port 5001).
-#
-# An UNCONSUMED UDP port makes the host kernel reply ICMP "port unreachable" to
-# the sender for every datagram. With the LFP stream at ~3 kHz that is a ~3000/s
-# ICMP storm back to the board -> ~3000 RX interrupts/s that preempt its polled
-# acquisition loop (exactly why the recv->transmit spikes + rare drops appear
-# only when lfp_on but 5001 is not being drained; broadband on 5000 IS consumed,
-# so it stays clean). Keep 5001 bound + drained for the whole session. The sink
-# owns the socket; receive_lfp / lfp_sweep read from it via _LfpReader (a 2nd
-# bind on 5001 would collide), and fall back to a private bind if it isn't up.
+# LFP datagram reader. Unified port: the LFP band arrives on UDP_PORT (5000)
+# mixed with broadband, demuxed by the UnifiedSink (stream_type=2). The reader
+# subscribes to that sink's LFP fan-out so a single socket drains 5000 for the
+# whole session (an unconsumed UDP port makes the host kernel reply ICMP
+# "port unreachable" per datagram -> an RX-interrupt storm that preempts the
+# board's polled loop). If the sink isn't running, fall back to a private bind
+# on 5000 that demuxes LFP itself.
 # ---------------------------------------------------------------------------
-class LfpSink:
-    def __init__(self, port=LFP_UDP_PORT, rcvbuf=1 << 20):
-        self.port = port
-        self.rcvbuf = rcvbuf
-        self._sock = None
-        self._thread = None
-        self._running = False
-        self.pkts = 0
-        self.bytes = 0
-        self.last_addr = None
-        self._subs = []
-        self._lock = threading.Lock()
-
-    def start(self):
-        if self._running:
-            return True
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.rcvbuf)
-            except OSError:
-                pass
-            s.bind(('', self.port))
-            s.settimeout(0.5)
-        except OSError as e:
-            print(f"[LFP-SINK] could NOT bind UDP {self.port}: {e} -- board may get "
-                  f"ICMP-unreachable storms while LFP streams.")
-            return False
-        self._sock = s
-        self._running = True
-        self._thread = threading.Thread(target=self._run, name="lfp-sink", daemon=True)
-        self._thread.start()
-        print(f"[LFP-SINK] draining UDP {self.port} (prevents ICMP-unreachable storms to the board)")
-        return True
-
-    def _run(self):
-        while self._running:
-            try:
-                data, addr = self._sock.recvfrom(4096)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            self.pkts += 1
-            self.bytes += len(data)
-            self.last_addr = addr
-            with self._lock:
-                subs = list(self._subs)
-            for q in subs:
-                try:
-                    q.put_nowait(data)
-                except queue.Full:
-                    pass
-
-    def subscribe(self, maxsize=20000):
-        q = queue.Queue(maxsize=maxsize)
-        with self._lock:
-            self._subs.append(q)
-        return q
-
-    def unsubscribe(self, q):
-        with self._lock:
-            if q in self._subs:
-                self._subs.remove(q)
-
-
 class _LfpReader:
-    """Yields LFP datagrams from the persistent LfpSink if it is running (so 5001
-    stays drained), else from a private socket bound to the port (fallback)."""
-    def __init__(self, port=LFP_UDP_PORT, timeout=3.0):
+    """Yields LFP datagrams from the persistent UnifiedSink if running, else from
+    a private socket bound to UDP_PORT that filters stream_type=2 itself."""
+    def __init__(self, port=UDP_PORT, timeout=3.0):
         self.port = port
         self.timeout = timeout
         self._q = None
         self._sock = None
 
     def open(self):
-        if LFP_SINK is not None and LFP_SINK._running and self.port == LFP_SINK.port:
-            self._q = LFP_SINK.subscribe()
+        if UNIFIED_SINK is not None and UNIFIED_SINK._running:
+            self._q = UNIFIED_SINK.subscribe_lfp()
         else:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1460,61 +1652,67 @@ class _LfpReader:
         return self
 
     def recv(self):
-        """Next datagram, or raise socket.timeout."""
+        """Next LFP datagram (stream_type=2), or raise socket.timeout."""
         if self._q is not None:
             try:
                 return self._q.get(timeout=self.timeout)
             except queue.Empty:
                 raise socket.timeout()
-        data, _ = self._sock.recvfrom(4096)
-        return data
+        # private-bind fallback: demux LFP ourselves
+        while True:
+            data, _ = self._sock.recvfrom(4096)
+            if len(data) >= 8:
+                magic, type_ver = struct.unpack('<II', data[:8])
+                if magic == UNIFIED_MAGIC and (type_ver & 0xFF) == STREAM_TYPE_LFP:
+                    return data
 
     def close(self):
         if self._q is not None:
-            LFP_SINK.unsubscribe(self._q)
+            UNIFIED_SINK.unsubscribe_lfp(self._q)
             self._q = None
         if self._sock is not None:
             self._sock.close()
             self._sock = None
 
 
-def receive_lfp(n_packets=200, bind_port=LFP_UDP_PORT):
+def receive_lfp(n_packets=200, bind_port=UDP_PORT):
     """Bind the LFP UDP port and parse frames -- a reference receiver for the
     plugin. Payload samples are offset-binary 16-bit (subtract 0x8000 for signed).
 
-    The 6-word header is now built BY THE PL (not the PS): the PL writes the
-    complete wire packet (header + samples) into its output BRAM and the PS just
-    CDMAs it into a pbuf and sends it. Header layout:
-      w0 = LFP_MAGIC_LOW (0x1F1FBEEF), w1 = 0xCAFEBABE
+    The unified 8-word common header is built BY THE PL (not the PS): the PL
+    writes the complete wire packet (header + samples) into its output BRAM and
+    the PS just CDMAs it into a pbuf and sends it on UDP_PORT (5000), demuxed by
+    stream_type=2. Header layout (docs/unified-packet-format.md):
+      w0 = MAGIC (0xCAFEBABE), w1 = TYPE_VER (stream_type=2 | version<<8)
       w2/w3 = 64-bit master timestamp = the master count of the NEWEST broadband
               sample in this output's decimation window -- i.e. the most recent
               broadband packet that was clocked into the (FIR) filter bank for
-              this output. The decimating filters are just FIR: when one emits a
-              sample there is exactly one real, already-acquired broadband sample
-              that is the newest input in that output's support, and this is its
-              master count (the SAME counter the broadband header stamps). For
-              frame m at total decimation R it is broadband packet R*m + (R-1)
-              (R=10 -> 10m+9). Causal, monotonic, R apart -- an absolute master
-              timestamp, not a frame index. NB: this marks the newest *input*
-              sample, not the instant the LFP value represents; subtract the
-              filter group delay to align with broadband *content*.
-      w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24); lane_mask =
-           the broadband channel_enable mask (single source of truth).
-      w5 = PL-maintained LFP frame sequence number (++ per emitted frame)."""
+              this output. For frame m at total decimation R it is broadband
+              packet R*m + (R-1) (R=10 -> 10m+9). Causal, monotonic, R apart.
+              NB: this marks the newest *input* sample, not the instant the LFP
+              value represents; subtract the filter group delay to align with
+              broadband *content*.
+      w4 = SEQ = PL-maintained LFP frame sequence number (++ per emitted frame)
+      w5 = AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24);
+           lane_mask = the broadband channel_enable mask (single source of truth).
+      w6 = AUX1 = num_samples (popcount(lane_mask) * 32)
+      w7 = RSVD = 0."""
+    HDR = UNIFIED_HEADER_WORDS * 4   # 32-byte common header
     r = _LfpReader(port=bind_port, timeout=3.0).open()
     got = bad = 0
     last_seq = None
     try:
         while got < n_packets:
             data = r.recv()
-            if len(data) < 24:
+            if len(data) < HDR:
                 bad += 1; continue
-            mlo, mhi, ts_lo, ts_hi, cfg, seq = struct.unpack('<IIIIII', data[:24])
-            if mlo != LFP_MAGIC_LOW or mhi != LFP_MAGIC_HIGH:
+            magic, type_ver, ts_lo, ts_hi, seq, cfg, num_samples, rsvd = \
+                struct.unpack('<IIIIIIII', data[:HDR])
+            if magic != UNIFIED_MAGIC or (type_ver & 0xFF) != STREAM_TYPE_LFP:
                 bad += 1; continue
             lane_mask, decim_R, num_taps, overrun = (cfg & 0xFF, (cfg >> 8) & 0xFF,
                                                      (cfg >> 16) & 0xFF, (cfg >> 24) & 1)
-            pay = data[24:]
+            pay = data[HDR:]
             usamp = struct.unpack(f'<{len(pay)//2}H', pay)
             samp = [u - 0x8000 for u in usamp]      # offset binary -> signed
             ts = ts_lo | (ts_hi << 32)
@@ -1579,20 +1777,21 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
     lfp_enable(sock, True)
     send_binary_command(sock, CMD_START)
-    # ---- capture one channel's time series off UDP 5001 ----
+    # ---- capture one channel's time series off the unified UDP port (5000) ----
     settle = int(0.3 * fs)
     n_want = int(n_periods * period * fs) + settle
-    r = _LfpReader(port=LFP_UDP_PORT, timeout=3.0).open()
+    HDR = UNIFIED_HEADER_WORDS * 4   # 32-byte common header
+    r = _LfpReader(port=UDP_PORT, timeout=3.0).open()
     series = []
     t_start = time.time()
     max_wall = n_periods * period * 4.0 + 8.0   # hard wall-clock cap; never spin forever
     try:
         while len(series) < n_want and (time.time() - t_start) < max_wall:
             data = r.recv()
-            if len(data) < 24: continue
-            mlo, mhi = struct.unpack('<II', data[:8])
-            if mlo != LFP_MAGIC_LOW or mhi != LFP_MAGIC_HIGH: continue
-            usamp = struct.unpack(f'<{(len(data)-24)//2}H', data[24:])
+            if len(data) < HDR: continue
+            magic, type_ver = struct.unpack('<II', data[:8])
+            if magic != UNIFIED_MAGIC or (type_ver & 0xFF) != STREAM_TYPE_LFP: continue
+            usamp = struct.unpack(f'<{(len(data)-HDR)//2}H', data[HDR:])
             if channel < len(usamp):
                 series.append(usamp[channel] - 0x8000)      # offset-binary -> signed
     except socket.timeout:
@@ -2057,7 +2256,7 @@ def print_status(status):
           f" | amps powered: {amps}/64")
 
     R = status['lfp_decim_R'] or 1
-    print(f"\n--- LFP/DSP engine (Tier-1, UDP {LFP_UDP_PORT}) ---")
+    print(f"\n--- LFP/DSP engine (Tier-1, UDP {UDP_PORT} stream_type=2) ---")
     print(f"  {'ENABLED' if status['lfp_enable'] else 'disabled'}  "
           f"lane_mask=0x{status['lfp_lane_mask']:02X} (= broadband channel_enable)  "
           f"decim_R={status['lfp_decim_R']} "
@@ -2163,10 +2362,10 @@ def manual_cable_test(sock):
         print(f"\nCollected {len(collected_packets)} packets total")
         for i, words in enumerate(collected_packets):
             if i == 0:
-                print(f"Packet {i + 1} (Init): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
+                print(f"Packet {i + 1} (Init): Word 12: 0x{words[12]:08X}, Word 13: 0x{words[13]:08X}")
             else:
                 phase = i - 1
-                print(f"Packet {i + 1} (Phase1={phase}): Word 8: 0x{words[8]:08X}, Word 9: 0x{words[9]:08X}")
+                print(f"Packet {i + 1} (Phase1={phase}): Word 12: 0x{words[12]:08X}, Word 13: 0x{words[13]:08X}")
         
     except Exception as e:
         print(f"Error during manual cable test: {e}")
@@ -2240,10 +2439,96 @@ def configure_tcp_keepalive(sock):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
 
-def tcp_control():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# ---------------------------------------------------------------------------
+# Robust TCP connect.
+#
+# The board needs >20 s after power-on to bring up its lwIP listener, and while
+# it is still booting -- or if its GEM RX has wedged (early-SYN Zynq-7000 RX-hang
+# errata) -- it does not answer at all. A plain blocking connect() then either
+# hangs for the OS connect timeout (~75 s on macOS) or, once the host's ARP entry
+# for the board ages out and re-resolution fails, fails outright with
+# "[Errno 64] Host is down" (EHOSTDOWN) / EHOSTUNREACH. That's the crash you were
+# hitting. None of those mean "give up" -- they mean "the board isn't ready yet."
+#
+# So instead of one blocking connect we poll with a short per-attempt timeout and
+# retry until the board answers: net.py waits patiently and connects the instant
+# the listener is up, and never spews a traceback. errno values are compared
+# symbolically because the numbers differ between macOS and Linux.
+# ---------------------------------------------------------------------------
+CONNECT_TIMEOUT   = 3.0    # seconds per connection attempt (bounds the "hang")
+CONNECT_RETRY_GAP = 1.0    # seconds between attempts
+CONNECT_MAX_WAIT  = None   # overall deadline (s); None = wait forever, Ctrl-C to stop
+
+# errno values that just mean "board not ready yet, keep waiting".
+_RETRYABLE_ERRNOS = {
+    errno.ECONNREFUSED,   # host reachable but listener not up yet
+    errno.EHOSTDOWN,      # no ARP reply -> board booting or RX wedged ([Errno 64])
+    errno.EHOSTUNREACH,   # ARP incomplete / no route to the board yet
+    errno.ENETUNREACH,
+    errno.ENETDOWN,
+    errno.ETIMEDOUT,      # SYN went unanswered
+    errno.ECONNRESET,
+    errno.ECONNABORTED,
+}
+
+
+def connect_with_retry(zynq_ip=None, tcp_port=None,
+                       per_attempt_timeout=CONNECT_TIMEOUT,
+                       retry_gap=CONNECT_RETRY_GAP,
+                       max_wait=CONNECT_MAX_WAIT):
+    """Return a connected, blocking TCP socket, or None if the deadline/Ctrl-C
+    hits first. Retries on the 'board not ready' errno family instead of hanging
+    on a single 75 s connect() or crashing on EHOSTDOWN."""
+    zynq_ip = zynq_ip or ZYNQ_IP
+    tcp_port = tcp_port or TCP_PORT
+    start = time.time()
+    attempt = 0
+    last_reason = None
     try:
-        sock.connect((ZYNQ_IP, TCP_PORT))
+        while True:
+            attempt += 1
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(per_attempt_timeout)
+            try:
+                sock.connect((zynq_ip, tcp_port))
+                sock.settimeout(None)   # blocking again for the command session
+                if attempt > 1:
+                    print(f"[TCP] Board answered after {attempt} attempts "
+                          f"({time.time() - start:.0f}s).")
+                return sock
+            except (socket.timeout, TimeoutError):
+                reason = "no SYN-ACK (board still booting / listener down)"
+                retry = True
+            except OSError as e:
+                reason = f"{e.__class__.__name__}: {e}"
+                retry = getattr(e, "errno", None) in _RETRYABLE_ERRNOS
+            try:
+                sock.close()
+            except OSError:
+                pass
+            if not retry:
+                print(f"[TCP] Connect failed (non-retryable): {reason}")
+                return None
+            if max_wait is not None and (time.time() - start) >= max_wait:
+                print(f"[TCP] Gave up waiting for {zynq_ip}:{tcp_port} after "
+                      f"{max_wait:.0f}s ({reason}).")
+                return None
+            # Only reprint when the reason changes, so a long wait doesn't spam.
+            if reason != last_reason:
+                print(f"[TCP] Waiting for board at {zynq_ip}:{tcp_port} ... "
+                      f"({reason}). Retrying every {retry_gap:.0f}s; Ctrl-C to stop.")
+                last_reason = reason
+            time.sleep(retry_gap)
+    except KeyboardInterrupt:
+        print("\n[TCP] Connect wait cancelled by user.")
+        return None
+
+
+def tcp_control():
+    sock = connect_with_retry()
+    if sock is None:
+        return
+    try:
         print(f"[TCP] Connected to {ZYNQ_IP}:{TCP_PORT}")
 
         # Enable TCP keepalive to detect dead connections faster
@@ -2275,7 +2560,7 @@ def tcp_control():
         print(f"  Network: set_udp <ip> <port>, get_status, perf_reset, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
         print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
-        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], lfp_sink  (5001 auto-drained)")
+        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], sink  (port 5000, stream_type=2)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2438,12 +2723,16 @@ def tcp_control():
                     parts = cmd.split()
                     n = int(parts[1]) if len(parts) > 1 else 200
                     receive_lfp(n)
-                elif cmd == "lfp_sink":
-                    if LFP_SINK is not None and LFP_SINK._running:
-                        print(f"[LFP-SINK] draining UDP {LFP_SINK.port}: {LFP_SINK.pkts} pkts, "
-                              f"{LFP_SINK.bytes/1024.0:.0f} KB, last from {LFP_SINK.last_addr}")
+                elif cmd == "lfp_sink" or cmd == "sink":
+                    if UNIFIED_SINK is not None and UNIFIED_SINK._running:
+                        print(f"[UDP-SINK] draining UDP {UNIFIED_SINK.port}: "
+                              f"broadband={UNIFIED_SINK.bb_pkts} LFP={UNIFIED_SINK.lfp_pkts} "
+                              f"other={UNIFIED_SINK.other_pkts} pkts, "
+                              f"LFP={UNIFIED_SINK.lfp_bytes/1024.0:.0f} KB, "
+                              f"bb_seq_gaps={validator.seq_gaps} lfp_seq_gaps={UNIFIED_SINK._lfp_gaps}, "
+                              f"host-ring-drops={UNIFIED_SINK._ring_drops}, last from {UNIFIED_SINK.last_addr}")
                     else:
-                        print("[LFP-SINK] not running")
+                        print("[UDP-SINK] not running")
                 elif cmd == "aux":
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
@@ -2512,7 +2801,7 @@ def tcp_control():
                     print("Bandwidth (raw UDP throughput, port 5002):")
                     print("  bench [bytes] [n]   - one size (default 1472 B x 50000)")
                     print("  bench_sweep         - sweep 256..8800 B")
-                    print("LFP / Tier-1 (UDP 5001):")
+                    print("LFP / Tier-1 (unified UDP 5000, stream_type=2):")
                     print("  lfp_config [cic|fir] [taps] - set datapath/taps + upload LP kernel")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
                     print("  lfp_recv [n]        - capture + print decoded LFP frames")
@@ -2534,17 +2823,18 @@ def tcp_control():
                 print(f"[TCP] Attempting to reconnect...")
                 try:
                     sock.close()
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.connect((ZYNQ_IP, TCP_PORT))
-
-                    # Re-enable TCP keepalive on reconnection
-                    configure_tcp_keepalive(sock)
-
-                    print(f"[TCP] Reconnected successfully!")
-                except Exception as reconnect_error:
-                    print(f"[TCP] Reconnection failed: {reconnect_error}")
+                except OSError:
+                    pass
+                # Bounded reconnect: wait up to 60 s for the board to come back
+                # (it may be rebooting), then hand control back rather than hang.
+                sock = connect_with_retry(max_wait=60.0)
+                if sock is None:
+                    print(f"[TCP] Reconnection failed.")
                     print(f"[TCP] Please check network cable and device, then restart.")
                     break
+                # Re-enable TCP keepalive on reconnection
+                configure_tcp_keepalive(sock)
+                print(f"[TCP] Reconnected successfully!")
                 
     except ConnectionRefusedError:
         print(f"[TCP] Could not connect to {ZYNQ_IP}:{TCP_PORT}")
@@ -2555,21 +2845,49 @@ def tcp_control():
 
 if __name__ == "__main__":
     print("=== Zynq BRAM Data Generator Validator ===")
+
+    # Discover the board by listening for its broadcast beacon -- passive, we send
+    # nothing until we've heard it (so we can't disturb the board during boot).
+    # Auto-fills ZYNQ_IP from the beacon's source address; falls back to the
+    # configured address if no beacon arrives (older firmware without the beacon).
+    print(f"[DISCOVERY] Listening for a board beacon on UDP {BEACON_PORT} "
+          f"(up to {BEACON_DISCOVERY_TIMEOUT:.0f}s)...")
+    _dev = discover_board()
+    if _dev:
+        ZYNQ_IP = _dev['ip']
+        TCP_PORT = _dev['tcp_port'] or TCP_PORT
+        UDP_PORT = _dev['udp_port'] or UDP_PORT
+        print(f"[DISCOVERY] Found board at {_dev['ip']}  fw {_dev['fw']}  "
+              f"MAC {_dev['mac']}  (TCP {_dev['tcp_port']}, UDP {_dev['udp_port']})")
+    else:
+        print(f"[DISCOVERY] No beacon heard -- using configured {ZYNQ_IP} "
+              f"(older firmware without the beacon, or wrong subnet?)")
+
     print(f"Device: {ZYNQ_IP}:{TCP_PORT}")
     print(f"UDP Port: {UDP_PORT}")
     print("Press Ctrl+C to stop.\n")
-    
-    udp_thread = threading.Thread(target=udp_listener, daemon=True)
-    udp_thread.start()
 
-    # Drain the LFP UDP port (5001) for the whole session (daemon thread, like the
-    # broadband listener above) so the host never replies ICMP port-unreachable to
-    # the board while LFP streams: an unconsumed UDP port => ~1 ICMP/packet => a
-    # ~3 kHz RX-interrupt storm that preempts the board's polled loop. Started here
-    # (not in tcp_control) so it drains regardless of the TCP control state.
-    LFP_SINK = LfpSink()
-    LFP_SINK.start()
+    # ONE socket on UDP_PORT (5000) for ALL streams. The UnifiedSink drains it
+    # promiscuously (recv->ring), demuxes by stream_type (broadband -> validator,
+    # LFP -> subscribers), and verifies per-stream SEQ continuity. Draining 5000
+    # for the whole session also keeps the host from replying ICMP port-
+    # unreachable to the board (an unconsumed UDP port => ~1 ICMP/packet => an
+    # RX-interrupt storm that preempts the board's polled loop). Started here (not
+    # in tcp_control) so it drains regardless of the TCP control state.
+    UNIFIED_SINK = UnifiedSink(port=UDP_PORT)
+    UNIFIED_SINK.start()
 
     tcp_control()
-    
+
+    # Shutdown summary: the broadband no-loss assertion (gap count MUST be 0).
+    if UNIFIED_SINK is not None:
+        UNIFIED_SINK.stop()
+        print(f"\n[UDP] demux summary: broadband={UNIFIED_SINK.bb_pkts} pkts, "
+              f"LFP={UNIFIED_SINK.lfp_pkts} pkts, other={UNIFIED_SINK.other_pkts}, "
+              f"host-ring-drops={UNIFIED_SINK._ring_drops}")
+        print(f"[UDP] broadband SEQ gaps = {validator.seq_gaps} "
+              f"({validator.seq_lost_packets} packets implied missing)  "
+              f"{'OK (no loss)' if validator.seq_gaps == 0 else 'LOSS DETECTED'}")
+        print(f"[UDP] LFP SEQ gaps = {UNIFIED_SINK._lfp_gaps}")
+    validator.print_statistics()
     time.sleep(0.5)

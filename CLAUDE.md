@@ -2,6 +2,20 @@
 
 Guidance for working in this repository.
 
+## Hard rules (non-negotiable)
+
+- **NO DATA LOSS — top priority, set in stone.** This is a neural-data acquisition system;
+  broadband is archival and must never drop a packet, and the principle applies to every
+  stream. **We step back the spec to guarantee perfect data — we never design around losing
+  it.** Concretely: size every packet to fit ONE standard datagram (no IP fragmentation, no
+  jumbo MTU, no MTU framer/chunker) — *specify* the data so it inherently fits (e.g. one
+  octave per scalogram packet); if a config wouldn't fit or would saturate the link/TX path,
+  **reduce the spec** (fewer channels/octaves/rate), do not accept loss. Carry a per-stream
+  sequence number so loss is *provably zero and detectable*, not assumed. Drain promiscuously
+  host-side (recv → ring, process later) so nothing is dropped while waiting. Never write
+  "best-effort", "drop-tolerant", or "lossy monitor" into a design — if you're tempted to,
+  step the spec back instead.
+
 ## What this project is
 
 An FPGA-based data acquisition system for **Intan RHD2000-style neural recording

@@ -19,6 +19,32 @@
 #define DEFAULT_UDP_DEST_IP_D   100
 #define DEFAULT_UDP_DEST_PORT   5000
 
+// ---- Device discovery beacon (subnet broadcast) ----------------------------
+// Once fully initialized, the board broadcasts this fixed little-endian struct
+// to <subnet>.255:BEACON_PORT ~1 Hz. A client uses it to (a) DISCOVER the board's
+// IP (from the datagram source address / the ip field), (b) know the board is UP
+// (readiness gate -- it only beacons after init), and (c) stay fully passive
+// until it arrives (zero packets to the board during its fragile boot window).
+// CONTRACT -- keep in sync across: network.c (build), remote/net.py (decode),
+// and the ephys-socket plugin (decode). All fields naturally aligned; no padding.
+#define BEACON_PORT     5050
+#define BEACON_MAGIC    0x4B4C4231u   // distinctive discovery magic ("KLB1")
+#define BEACON_VERSION  1
+
+typedef struct {
+    uint32_t magic;       // BEACON_MAGIC
+    uint32_t version;     // BEACON_VERSION
+    uint32_t ip;          // board IPv4, network byte order (== datagram source)
+    uint16_t tcp_port;    // control port (TCP_PORT, 6000)
+    uint16_t udp_port;    // unified data port (UDP_PORT, 5000)
+    uint32_t fw_version;  // FIRMWARE_VERSION_WORD (maj<<24|min<<16|patch<<8|build)
+    uint8_t  mac[6];      // board MAC = unique device id
+    uint16_t reserved;    // pad to 28 bytes / 4-byte multiple
+} device_beacon_t;
+
+void beacon_init(void);   // create the beacon PCB + compute the broadcast addr
+void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
+
 // ============================================================================
 // MULTICORE CONFIGURATION
 // ============================================================================
@@ -38,14 +64,46 @@
 #define BRAM_SIZE_WORDS         16384       // 16384 x 32-bit words (64KB)
 #define BRAM_SIZE_BYTES         (BRAM_SIZE_WORDS * BYTES_PER_WORD)   // 64KB
 
+// ============================================================================
+// UNIFIED PACKET FORMAT (docs/unified-packet-format.md)
+// ----------------------------------------------------------------------------
+// Every PL stream (broadband + LFP) emits the SAME 8 x 32-bit little-endian
+// common header, then a stream-specific payload, all on ONE UDP port (5000).
+// The host demuxes by stream_type. The PL builds the whole header in its BRAM;
+// the PS does NO header math (DMA-into-pbuf rule). Keep this in sync with the
+// PL builders (data_generator_core.sv / lfp_dsp_block.sv) and net.py.
+//
+//   word 0  MAGIC      = 0xCAFEBABE
+//   word 1  TYPE_VER   = stream_type[7:0] | version[15:8] | flags[31:16]
+//   word 2  TS_LO      | word 3 TS_HI  (64-bit master timestamp)
+//   word 4  SEQ        per-stream packet sequence (+1/packet; the loss check)
+//   word 5  AUX0       stream-specific
+//   word 6  AUX1       stream-specific
+//   word 7  RSVD       0
+#define UNIFIED_MAGIC           0xCAFEBABE
+#define UNIFIED_VERSION         1
+#define UNIFIED_HEADER_WORDS    8
+#define STREAM_TYPE_BROADBAND   1
+#define STREAM_TYPE_LFP         2
+#define STREAM_TYPE_WAVELET     3   // reserved for the follow-on branch
+
 // Packet size calculation based on channel_enable bits.
 // channel_enable is now 8 bits: [3:0] = port 0 streams, [7:4] = port 1 (dual
 // cable). Max = 8 streams x 35 cycles / 2 = 140 data words.
-#define PACKET_HEADER_WORDS     10           // Magic number + timestamp
+//
+// BROADBAND framing (stream_type=1): the 8-word common header + a 6-word
+// broadband sub-block = 14 header words ahead of the data. The sub-block
+// carries the previous-packet aux echoes + the 8 external-ADC breadcrumbs --
+// every field of the legacy 10-word header is preserved; the DATA words are
+// byte-identical to before (see docs/unified-packet-format.md, NO DATA LOSS).
+//   AUX0 (w5) = channel_enable[7:0] | num_data_words[23:8]
+//   AUX1 (w6) = digital_in[7:0] | aux_flags[15:8] | echo0[31:16]
+#define BB_SUBBLOCK_WORDS       6
+#define PACKET_HEADER_WORDS     (UNIFIED_HEADER_WORDS + BB_SUBBLOCK_WORDS) // 14
 #define MAX_PACKET_DATA_WORDS   140         // Maximum data words (all 8 streams = both ports)
 #define MIN_PACKET_DATA_WORDS   18          // Minimum data words (1 stream enabled)
-#define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 150 words
-#define MIN_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MIN_PACKET_DATA_WORDS) // 28 words
+#define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 154 words
+#define MIN_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MIN_PACKET_DATA_WORDS) // 32 words
 
 // ============================================================================
 // AXI LITE CONTROL INTERFACE
@@ -90,7 +148,9 @@
 // LFP output BRAM (decimated stream, PS read via 2nd axi_bram_ctrl)
 #define LFP_BRAM_BASE_ADDR          0x84000000
 #define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
-#define LFP_UDP_PORT                5001       // separate UDP stream for the LFP band
+// Unified-port format: the LFP band now streams on the SAME UDP port as
+// broadband (UDP_PORT / udp_dest_port, default 5000), demuxed host-side by
+// stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 #define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
 #define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
@@ -566,7 +626,8 @@ void pl_lfp_coef_push(int32_t coef);                      // write one 18-bit Q1
 void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
 uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 
-// Streaming (network.c): drain the LFP output BRAM -> UDP on LFP_UDP_PORT.
+// Streaming (network.c): drain the LFP output BRAM -> UDP on the unified port
+// (udp_dest_port, default 5000), demuxed host-side by stream_type=2.
 void lfp_stream_init(void);
 void lfp_stream_service(void);   // call from the core-0 maintenance loop
 

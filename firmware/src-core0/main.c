@@ -7,6 +7,7 @@
 #include "xil_cache.h"
 #include "lwip/init.h"
 #include "lwip/timeouts.h"
+#include "lwip/etharp.h"   // etharp_gratuitous() -- proactively refresh host ARP
 //#include "xuartps.h"
 #include "shared_print.h"
 #include "pl_dma.h"
@@ -36,7 +37,7 @@ volatile int cable_test_flag = 0;
 
 // BRAM state tracking
 uint32_t ps_read_address = 0;              // Current PS read position (word address)
-uint32_t current_packet_size = 74;         // Current expected packet size in 32-bit words (default to max)
+uint32_t current_packet_size = 84;         // 14-word header + 70 data words (0x0F default); recomputed on start
 uint32_t current_channel_enable = 0x0F;    // Current channel enable setting (default all channels)
 
 // Packet validation tracking
@@ -215,26 +216,29 @@ static int packets_available(void) {
 // Read and validate one packet directly from BRAM with UDP transmission
 static int process_packet_from_bram(void) {
   XTime t_loop0; XTime_GetTime(&t_loop0);   // perf: receive->transmit timer
-  // Calculate BRAM address (no copying - read directly)
-  uint32_t magic_low_offset = ps_read_address; // should always be smaller than BRAM_SIZE_WORDS!!!
-  uint32_t magic_high_offset = (ps_read_address + 1) % BRAM_SIZE_WORDS;
+  // Unified packet format: header word 0 = MAGIC (0xCAFEBABE), word 1 = TYPE_VER
+  // with stream_type=1 (broadband), version=1 in the low 16 bits. The capture
+  // BRAM only ever holds broadband packets (the LFP stream lives in its own
+  // BRAM), so we validate both the magic AND the broadband stream_type/version.
+  uint32_t magic_offset    = ps_read_address; // should always be < BRAM_SIZE_WORDS
+  uint32_t typever_offset  = (ps_read_address + 1) % BRAM_SIZE_WORDS;
 
-  // Read packet header from BRAM
-  uint32_t magic_low = Xil_In32(BRAM_BASE_ADDR + (magic_low_offset * 4));   // DMA-EXEMPT: 2-word magic peek (clean 1-beat reads; bulk payload moves by CDMA below)
-  uint32_t magic_high = Xil_In32(BRAM_BASE_ADDR + (magic_high_offset * 4)); // DMA-EXEMPT: 2-word magic peek (clean 1-beat reads; bulk payload moves by CDMA below)
+  uint32_t magic_word   = Xil_In32(BRAM_BASE_ADDR + (magic_offset * 4));   // DMA-EXEMPT: 2-word header peek (clean 1-beat reads; bulk payload moves by CDMA below)
+  uint32_t typever_word = Xil_In32(BRAM_BASE_ADDR + (typever_offset * 4)); // DMA-EXEMPT: 2-word header peek (clean 1-beat reads; bulk payload moves by CDMA below)
 
-  // Reconstruct 64-bit magic number
-  uint64_t magic = ((uint64_t)magic_high << 32) | magic_low;
+  uint32_t expected_typever =
+      (uint32_t)STREAM_TYPE_BROADBAND | ((uint32_t)UNIFIED_VERSION << 8);
 
-  // Validate magic number
-  if (magic != 0xCAFEBABEDEADBEEF) {
-    // Invalid magic - could be BRAM overflow, corruption, or misalignment
-    // Jump directly to write pointer to sync with fresh data
+  // Validate the unified header (magic + broadband type/version, low 16 bits)
+  if (magic_word != UNIFIED_MAGIC ||
+      (typever_word & 0xFFFFu) != (expected_typever & 0xFFFFu)) {
+    // Invalid header - could be BRAM overflow, corruption, or misalignment.
+    // Jump directly to write pointer to sync with fresh data.
     uint32_t pl_write_addr = pl_get_bram_write_address();
     ps_read_address = pl_write_addr;
     error_count++; // ERROR TO TRACK
-    send_message("Magic validation failed (0x%016llX), jumping to write position %u\r\n",
-                 magic, pl_write_addr);
+    send_message("Header validation failed (magic=0x%08X type_ver=0x%08X), jumping to write position %u\r\n",
+                 magic_word, typever_word, pl_write_addr);
     return 0; // Packet validation failed, now synced to fresh data
   }
 
@@ -379,22 +383,25 @@ void handle_enable_streaming(void) {
   stream_enabled = 1;
   pl_set_transmission(1);
 
-  // Re-sync ps_read to a REAL packet boundary by scanning for the magic.
+  // Re-sync ps_read to a REAL packet boundary by scanning for the header.
   // A stop can interrupt the datapath mid-packet; since write_address, the
   // packet boundary, and the (intentionally unreset) FIFO are only cleared by
-  // the hardware reset -- not by stop/restart -- the fresh magic on restart can
+  // the hardware reset -- not by stop/restart -- the fresh header on restart can
   // land a few words off packet_boundary_address. Setting ps_read to the
-  // pointer then mis-aligns and the magic check loops forever. So: let the PL
+  // pointer then mis-aligns and the header check loops forever. So: let the PL
   // write several packets, then walk back from the write pointer to the nearest
-  // 0xDEADBEEF/0xCAFEBABE and align to it (single Xil_In32 reads are clean).
+  // unified header (word0=MAGIC, word1=broadband TYPE_VER) and align to it
+  // (single Xil_In32 reads are clean).
   usleep(3000);  // ~90 packets @30ksps -- guarantees fresh complete packets
   uint32_t wp = pl_get_bram_write_address();
+  uint32_t expected_typever =
+      (uint32_t)STREAM_TYPE_BROADBAND | ((uint32_t)UNIFIED_VERSION << 8);
   int synced = 0;
   for (uint32_t back = 0; back < 2 * current_packet_size + 16; back++) {
     uint32_t a = (wp + BRAM_SIZE_WORDS - back) % BRAM_SIZE_WORDS;
     uint32_t b = (a + 1) % BRAM_SIZE_WORDS;
-    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == 0xDEADBEEF &&     // magic low  // DMA-EXEMPT: 2-word resync magic peek (clean 1-beat reads while re-aligning ps_read)
-        Xil_In32(BRAM_BASE_ADDR + b * 4) == 0xCAFEBABE) {     // magic high // DMA-EXEMPT: 2-word resync magic peek (clean 1-beat reads while re-aligning ps_read)
+    if (Xil_In32(BRAM_BASE_ADDR + a * 4) == UNIFIED_MAGIC &&                       // word0 MAGIC  // DMA-EXEMPT: 2-word resync header peek (clean 1-beat reads while re-aligning ps_read)
+        (Xil_In32(BRAM_BASE_ADDR + b * 4) & 0xFFFFu) == (expected_typever & 0xFFFFu)) { // word1 TYPE_VER // DMA-EXEMPT: 2-word resync header peek (clean 1-beat reads while re-aligning ps_read)
       ps_read_address = a;
       synced = 1;
       break;
@@ -521,6 +528,17 @@ static void publish_status_snapshot(void) {
   psmon->seq = (s0 | 1u) + 1u;   // even again: snapshot complete
 }
 
+// Pump the lwIP RX path once. Called continuously from the moment RX goes live
+// (right after xemac_add) through ALL of init so an early client's SYN/ARP can't
+// pile up in an un-serviced window and wedge the GEM RX. Belt-and-suspenders with
+// the beacon-gated connect (the client shouldn't connect until it hears us) --
+// but if a client DOES poke us during boot, draining here keeps the RX healthy.
+// No RXEN toggling (that regressed boots); just drain. Cheap when nothing waits.
+static inline void service_network(void) {
+  xemacif_input(&server_netif);
+  sys_check_timeouts();
+}
+
 void network_maintenance_loop(void) {
   static uint32_t counter = 0;
   static uint32_t last_link_check_time = 0;
@@ -541,6 +559,15 @@ void network_maintenance_loop(void) {
   if (now_ms - last_psmon_time >= 5) {
     last_psmon_time = now_ms;
     publish_status_snapshot();
+  }
+
+  // Discovery beacon: broadcast our identity ~1 Hz while the link is up so a
+  // client can auto-discover us and gate its connect on hearing us. TX-only and
+  // tiny; harmless during streaming.
+  static uint32_t last_beacon_time = 0;
+  if (link_is_up && (now_ms - last_beacon_time >= 1000)) {
+    last_beacon_time = now_ms;
+    beacon_send();
   }
 
   // Poll network link state every 500ms for hotplug detection
@@ -580,6 +607,10 @@ void network_maintenance_loop(void) {
 
       // Restart UDP stream
       udp_stream_init();
+
+      // Announce ourselves so a reconnecting host re-learns our MAC immediately
+      // (same stale-ARP antidote as at boot, for the hotplug path).
+      etharp_gratuitous(&server_netif);
 
       send_message("Network ready. Send START command to resume streaming.\r\n");
     }
@@ -656,7 +687,7 @@ int main() {
   xemac_add(&server_netif, &ipaddr, &netmask, &gw,
        mac_ethernet_address, XPAR_XEMACPS_0_BASEADDR);
   netif_set_up(&server_netif);
-
+  service_network();   // RX is live now -- start draining it through the rest of init
 
   // Start second core
   xil_printf("ARM0: sending the SEV to wake up ARM1\n\r");
@@ -677,18 +708,20 @@ int main() {
   }
 
   while (!link_is_up) {
+    service_network();   // keep draining RX while waiting for PHY link-up
     eth_link_detect(&server_netif);
     if (netif_is_link_up(&server_netif)) {
       link_is_up = 1;
-      send_message("Network link UP\r\n");    
+      send_message("Network link UP\r\n");
     }
   }
 
   start_tcp_server();
-  
+  service_network();   // answer anything already waiting on the listener
+
   // Initialize UDP (always enabled)
   udp_stream_init();
-  lfp_stream_init();   // separate UDP stream for the LFP band (port 5001)
+  lfp_stream_init();   // LFP band shares the unified UDP port (5000), stream_type=2
 
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
   
@@ -702,10 +735,25 @@ int main() {
   // benchmark_bram_reads();
 
   pl_set_copi_commands(initialization_cmd_sequence);
+  service_network();   // keep the RX pool drained across PL init
   
   send_message("System ready. Commands: start, stop, reset_timestamp, status\r\n");
   send_message("debug> ");
-  
+
+  // Board is fully up now. Proactively announce our IP->MAC with a gratuitous
+  // ARP so the host's ARP cache and the switch CAM learn us immediately -- the
+  // direct antidote to the stale/failed-ARP "[Errno 64] Host is down" the host
+  // reports when it connects before it has heard from us. Then emit ONE
+  // unambiguous readiness line, distinct from the earlier "link UP"/"server up"
+  // notices that fire >20 s before the board can actually service a connection.
+  etharp_gratuitous(&server_netif);
+  send_message("READY: safe to connect now (TCP command port %d up)\r\n", TCP_PORT);
+
+  // Start the discovery beacon: from here we broadcast our identity ~1 Hz (in
+  // network_maintenance_loop) so a client can auto-discover our IP and know we're
+  // up, without sending us anything during boot. See beacon_send().
+  beacon_init();
+
   // Main event loop
   while (1) {
     network_maintenance_loop();

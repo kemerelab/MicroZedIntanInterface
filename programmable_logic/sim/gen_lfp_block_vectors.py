@@ -64,31 +64,40 @@ lanes = [l for l in range(N_LANES) if (LANE_MASK >> l) & 1]
 def s_at(p, s, l):
     return sig[p][s][l] if p >= 0 else 0
 
-# The PL now builds the COMPLETE LFP wire packet in BRAM: a 6-word header AHEAD
-# of each frame's decimated samples. Header (matches lfp_dsp_block.sv + net.py):
-#   w0 = LFP_MAGIC_LOW (0x1F1FBEEF), w1 = 0xCAFEBABE
+# The PL now builds the COMPLETE LFP wire packet in BRAM: the UNIFIED 8-word
+# common header AHEAD of each frame's decimated samples (docs/unified-packet-
+# format.md). Header (matches lfp_dsp_block.sv + net.py):
+#   w0 = MAGIC = 0xCAFEBABE
+#   w1 = TYPE_VER = stream_type(2) | version(1)<<8 | flags<<16  (flags=0)
 #   w2/w3 = 64-bit master timestamp of the last contributing broadband sample.
 #           The decimation tick at packet p stamps master count p (the broadband
 #           timestamp of packet p), so the frame triggered at p carries ts = p.
-#   w4 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24); overrun=0
-#   w5 = PL frame sequence number (++ per emitted frame, 0-indexed)
-LFP_MAGIC_LOW  = 0x1F1FBEEF
-LFP_MAGIC_HIGH = 0xCAFEBABE
+#   w4 = SEQ = PL frame sequence number (++ per emitted frame, 0-indexed)
+#   w5 = AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24); overrun=0
+#   w6 = AUX1 = num_samples = popcount(lane_mask) * N_SLOTS
+#   w7 = RSVD = 0
+UNIFIED_MAGIC  = 0xCAFEBABE
+STREAM_TYPE_LFP = 2
+UNIFIED_VERSION = 1
+TYPE_VER = (STREAM_TYPE_LFP & 0xFF) | ((UNIFIED_VERSION & 0xFF) << 8)
 CFG_WORD = (LANE_MASK & 0xFF) | ((DECIM_R & 0xFF) << 8) | ((NUM_TAPS & 0xFF) << 16)  # overrun=0
+NUM_SAMPLES = bin(LANE_MASK & 0xFF).count('1') * N_SLOTS
 
 words = []
 frame_seq = 0
 for p in range(K_PACKETS):
     if (p % DECIM_R) != (DECIM_R - 1):
         continue
-    # ---- header (6 words) ----
+    # ---- unified 8-word common header ----
     ts = p                                       # master count of the contributing packet
-    words.append(LFP_MAGIC_LOW)
-    words.append(LFP_MAGIC_HIGH)
+    words.append(UNIFIED_MAGIC)
+    words.append(TYPE_VER)
     words.append(ts & 0xFFFFFFFF)
     words.append((ts >> 32) & 0xFFFFFFFF)
-    words.append(CFG_WORD)
     words.append(frame_seq)
+    words.append(CFG_WORD)
+    words.append(NUM_SAMPLES)
+    words.append(0)
     frame_seq += 1
     # ---- decimated samples (signed -> offset binary, packed 2/word) ----
     emit = []
@@ -107,4 +116,4 @@ with open(f"{OUT}/lfp_blk_exp_words.hex", "w") as f:
         f.write(to_hex(w, 32) + "\n")
 
 print(f"taps={NUM_TAPS} packets={K_PACKETS} frames={frame_seq} "
-      f"lanes={lanes} bram_words={len(words)} (incl {frame_seq}x6 header words)")
+      f"lanes={lanes} bram_words={len(words)} (incl {frame_seq}x8 header words)")

@@ -149,6 +149,52 @@ void udp_stream_init() {
 }
 
 // ============================================================================
+// DEVICE DISCOVERY BEACON: broadcast device_beacon_t to <subnet>.255:BEACON_PORT
+// ~1 Hz so a client can discover our IP + know we're up WITHOUT sending us
+// anything during the fragile boot window. See the contract in main.h.
+// IP_SOF_BROADCAST is off in this build, so a plain udp_sendto() to a broadcast
+// address is permitted (no SOF_BROADCAST flag needed).
+// ============================================================================
+_Static_assert(sizeof(device_beacon_t) == 28, "device_beacon_t must be 28 bytes (net.py/ephys-socket decode)");
+
+extern struct netif server_netif;
+static struct udp_pcb *beacon_pcb = NULL;
+static ip_addr_t beacon_bcast;      // subnet-directed broadcast address
+static uint32_t  beacon_self_ip;    // our IPv4 (network order) for the payload
+
+void beacon_init(void) {
+    uint32_t ip   = netif_ip4_addr(&server_netif)->addr;
+    uint32_t mask = netif_ip4_netmask(&server_netif)->addr;
+    beacon_self_ip = ip;
+    beacon_bcast.addr = (ip & mask) | (~mask);   // (subnet bits) | (host all-ones)
+    beacon_pcb = udp_new();
+    if (beacon_pcb == NULL) {
+        send_message("ERROR: Could not create beacon UDP PCB\r\n");
+        return;
+    }
+    send_message("Discovery beacon -> %s:%d (~1 Hz)\r\n",
+                 ip4addr_ntoa(&beacon_bcast), BEACON_PORT);
+}
+
+void beacon_send(void) {
+    if (beacon_pcb == NULL) return;
+    static device_beacon_t b;   // static: the PBUF_REF references it until TX drains
+    b.magic      = BEACON_MAGIC;
+    b.version    = BEACON_VERSION;
+    b.ip         = beacon_self_ip;
+    b.tcp_port   = TCP_PORT;
+    b.udp_port   = UDP_PORT;
+    b.fw_version = FIRMWARE_VERSION_WORD;
+    memcpy(b.mac, server_netif.hwaddr, 6);
+    b.reserved   = 0;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, sizeof(b), PBUF_REF);
+    if (p == NULL) return;
+    p->payload = &b;
+    udp_sendto(beacon_pcb, p, &beacon_bcast, BEACON_PORT);
+    pbuf_free(p);
+}
+
+// ============================================================================
 // UDP THROUGHPUT BENCHMARK: blast n_packets of `bytes` to udp_dest_ip:5002 as
 // fast as the EMAC drains (zero-copy PBUF_REF, like the real stream path). The
 // host (net.py udp_bench) counts received bytes/packets over wall-clock for the
@@ -736,16 +782,21 @@ void stop_udp_stream(void) {
 }
 
 // ============================================================================
-// LFP/DSP STREAM (Tier-1): drain the LFP output BRAM -> UDP on LFP_UDP_PORT.
+// LFP/DSP STREAM (Tier-1): drain the LFP output BRAM -> UDP on the UNIFIED port.
 //
-// The PL now builds the COMPLETE LFP wire packet in its output BRAM (0x84000000):
-// per frame, a 6-word header (LFP magic, 64-bit master timestamp, lane_mask/
-// decim_R/num_taps/overrun, seq) followed by the decimated samples (popcount of
-// the broadband channel_enable mask x 32 ch x 16-bit, packed 2/word). So the PS
-// just CDMAs the whole packet from the LFP BRAM into a non-cacheable staging
-// buffer and sends a zero-copy pbuf referencing it -- NO PS-side header math and
-// NO Xil_In32 sample loop (the long single-beat loop blew the per-packet budget;
-// see CLAUDE.md "PL->PS bulk data ALWAYS moves by DMA").
+// Unified-port format: the LFP band streams on the SAME UDP port as broadband
+// (udp_dest_port, default 5000), demuxed host-side by stream_type=2. The former
+// separate LFP_UDP_PORT (5001) send path is removed.
+//
+// The PL builds the COMPLETE LFP wire packet in its output BRAM (0x84000000):
+// per frame, the unified 8-word common header (MAGIC, TYPE_VER=2, 64-bit master
+// timestamp, SEQ, AUX0=lane_mask/decim_R/num_taps/overrun, AUX1=num_samples,
+// RSVD) followed by the decimated samples (popcount of the broadband
+// channel_enable mask x 32 ch x 16-bit, packed 2/word). So the PS just CDMAs the
+// whole packet from the LFP BRAM into a non-cacheable staging buffer and sends a
+// zero-copy pbuf referencing it -- NO PS-side header math and NO Xil_In32 sample
+// loop (the long single-beat loop blew the per-packet budget; see CLAUDE.md
+// "PL->PS bulk data ALWAYS moves by DMA").
 //
 // The PL exposes its write pointer (next word to be written) in STATUS_REG_13;
 // we drain whole [header|samples] frames as they complete. The frame size is
@@ -754,7 +805,7 @@ void stop_udp_stream(void) {
 static struct udp_pcb *lfp_pcb = NULL;
 static uint32_t lfp_read_word = 0;
 uint32_t lfp_udp_packets_sent = 0;
-#define LFP_HDR_WORDS 6
+#define LFP_HDR_WORDS UNIFIED_HEADER_WORDS   // 8-word common header
 
 void lfp_stream_init(void) {
     lfp_pcb = udp_new();
@@ -803,7 +854,9 @@ void lfp_stream_service(void) {
         if (p != NULL) {
             p->payload = (void*)pkt;
             ip_addr_t dst; dst.addr = udp_dest_ip;
-            err_t e = udp_sendto(lfp_pcb, p, &dst, LFP_UDP_PORT);
+            // Unified port: LFP shares the broadband UDP destination (5000),
+            // demuxed host-side by stream_type=2.
+            err_t e = udp_sendto(lfp_pcb, p, &dst, udp_dest_port);
             if (e != ERR_OK) { lfp_send_err++; lfp_last_send_err = (int32_t)e; }
             pbuf_free(p);
             lfp_udp_packets_sent++;
