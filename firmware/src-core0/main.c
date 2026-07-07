@@ -533,10 +533,42 @@ static void publish_status_snapshot(void) {
 // pile up in an un-serviced window and wedge the GEM RX. Belt-and-suspenders with
 // the beacon-gated connect (the client shouldn't connect until it hears us) --
 // but if a client DOES poke us during boot, draining here keeps the RX healthy.
-// No RXEN toggling (that regressed boots); just drain. Cheap when nothing waits.
+
+// ---- GEM RX-hang self-heal (Zynq-7000 SI#692601) ---------------------------
+// The GEM RX can latch up ("used-bit hang"): RXSR sets BUFFNA (b0) and/or RXOVR
+// (b2), the RX DMA stops, and the MAC receives nothing (even though TX keeps
+// working) until reset. This was the "connect during boot -> unreachable until
+// power-cycle" failure. Recover by toggling RXEN (vendor SI#692601 workaround) and
+// clearing the sticky RX status bits, GATED on the actual hang bits so a healthy/
+// idle RX is never touched (the old resetrx toggled on merely-idle RX and regressed
+// normal boots). Cheap: one register read per call when there's no hang.
+#define GEM_BASE          XPAR_XEMACPS_0_BASEADDR
+#define GEM_NWCTRL_OFF    0x000u
+#define GEM_RXSR_OFF      0x020u
+#define GEM_NWCTRL_RXEN   0x00000004u
+#define GEM_RXSR_BUFFNA   0x00000001u
+#define GEM_RXSR_RXOVR    0x00000004u
+#define GEM_RXSR_HRESPNOK 0x00000008u
+
+volatile uint32_t rx_hang_recoveries = 0;
+
+static void rx_hang_recover(void) {
+  uint32_t rxsr = Xil_In32(GEM_BASE + GEM_RXSR_OFF);
+  if (rxsr & (GEM_RXSR_BUFFNA | GEM_RXSR_RXOVR | GEM_RXSR_HRESPNOK)) {
+    uint32_t nwctrl = Xil_In32(GEM_BASE + GEM_NWCTRL_OFF);
+    Xil_Out32(GEM_BASE + GEM_NWCTRL_OFF, nwctrl & ~GEM_NWCTRL_RXEN);  // RXEN off (TXEN preserved)
+    Xil_Out32(GEM_BASE + GEM_NWCTRL_OFF, nwctrl);                     // RXEN on
+    Xil_Out32(GEM_BASE + GEM_RXSR_OFF, rxsr);                         // W1C sticky bits
+    rx_hang_recoveries++;
+    send_message("GEM RX hang RXSR=0x%02x -> RXEN toggled to recover [#%u]\r\n",
+                 (unsigned)(rxsr & 0xffu), (unsigned)rx_hang_recoveries);
+  }
+}
+
 static inline void service_network(void) {
   xemacif_input(&server_netif);
   sys_check_timeouts();
+  rx_hang_recover();   // self-heal a GEM RX hang during the boot/init window too
 }
 
 void network_maintenance_loop(void) {
@@ -547,6 +579,7 @@ void network_maintenance_loop(void) {
 
   xemacif_input(&server_netif);
   sys_check_timeouts();
+  rx_hang_recover();   // steady-state GEM RX-hang self-heal (gated on the hang bits)
   process_command_flags();
 
   // Drain the LFP output BRAM -> UDP (Tier-1). No-op unless the engine is
