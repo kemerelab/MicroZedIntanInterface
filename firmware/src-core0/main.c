@@ -534,9 +534,54 @@ static void publish_status_snapshot(void) {
 // the beacon-gated connect (the client shouldn't connect until it hears us) --
 // but if a client DOES poke us during boot, draining here keeps the RX healthy.
 // No RXEN toggling (that regressed boots); just drain. Cheap when nothing waits.
+// ---- GEM RX-hang detect + recover (Zynq-7000 SI#692601) --------------------
+// The MicroZed GEM RX can latch up under certain RX traffic (the "used-bit hang"):
+// the RX status register sets BUFFNA (b0) and/or RXOVR (b2), the RX DMA stops, and
+// the MAC then receives NOTHING -- even though TX (the beacon) keeps working. This
+// is the "connect during boot -> board unreachable until power-cycle" bug, and it
+// survives the pbuf-servicing fix (so it is NOT pool exhaustion). Recover by
+// toggling RXEN (the vendor SI#692601 workaround) and clearing the sticky RX
+// status bits. GATED on the actual hang bits, so a healthy/idle RX is never
+// touched -- unlike the old resetrx that toggled on merely-idle RX and regressed
+// normal boots. Logs when it fires so we can confirm the mechanism.
+#define GEM_BASE          XPAR_XEMACPS_0_BASEADDR
+#define GEM_NWCTRL_OFF    0x000u
+#define GEM_RXSR_OFF      0x020u
+#define GEM_RXCNT_OFF     0x158u
+#define GEM_NWCTRL_RXEN   0x00000004u
+#define GEM_RXSR_BUFFNA   0x00000001u   // RX used-bit hang
+#define GEM_RXSR_RXOVR    0x00000004u   // RX overrun
+#define GEM_RXSR_HRESPNOK 0x00000008u
+
+volatile uint32_t rx_hang_recoveries = 0;
+
+static void rx_hang_recover(void) {
+  uint32_t rxsr = Xil_In32(GEM_BASE + GEM_RXSR_OFF);
+  if (rxsr & (GEM_RXSR_BUFFNA | GEM_RXSR_RXOVR | GEM_RXSR_HRESPNOK)) {
+    uint32_t nwctrl = Xil_In32(GEM_BASE + GEM_NWCTRL_OFF);
+    Xil_Out32(GEM_BASE + GEM_NWCTRL_OFF, nwctrl & ~GEM_NWCTRL_RXEN);  // RXEN off
+    Xil_Out32(GEM_BASE + GEM_NWCTRL_OFF, nwctrl);                     // RXEN on
+    Xil_Out32(GEM_BASE + GEM_RXSR_OFF, rxsr);                         // W1C sticky bits
+    rx_hang_recoveries++;
+    send_message("GEM RX hang RXSR=0x%02x -> RXEN toggled to recover [#%u]\r\n",
+                 (unsigned)(rxsr & 0xffu), (unsigned)rx_hang_recoveries);
+  }
+}
+
+static void gem_rx_dump(const char *tag) {
+  uint32_t nwctrl = Xil_In32(GEM_BASE + GEM_NWCTRL_OFF);
+  uint32_t rxsr   = Xil_In32(GEM_BASE + GEM_RXSR_OFF);
+  uint32_t rxcnt  = Xil_In32(GEM_BASE + GEM_RXCNT_OFF);
+  send_message("[GEMDIAG %s] RXEN=%d RXSR=0x%02x [BUFFNA=%d OVR=%d HRESP=%d] RXcnt=%u\r\n",
+               tag, (int)((nwctrl >> 2) & 1u), (unsigned)(rxsr & 0xffu),
+               (int)(rxsr & 1u), (int)((rxsr >> 2) & 1u), (int)((rxsr >> 3) & 1u),
+               (unsigned)rxcnt);
+}
+
 static inline void service_network(void) {
   xemacif_input(&server_netif);
   sys_check_timeouts();
+  rx_hang_recover();   // catch a hang during the boot/init window too
 }
 
 void network_maintenance_loop(void) {
@@ -547,6 +592,7 @@ void network_maintenance_loop(void) {
 
   xemacif_input(&server_netif);
   sys_check_timeouts();
+  rx_hang_recover();   // steady-state RX-hang self-heal (gated on the hang bits)
   process_command_flags();
 
   // Drain the LFP output BRAM -> UDP (Tier-1). No-op unless the engine is
@@ -559,6 +605,14 @@ void network_maintenance_loop(void) {
   if (now_ms - last_psmon_time >= 5) {
     last_psmon_time = now_ms;
     publish_status_snapshot();
+  }
+
+  // GEM RX diagnostic heartbeat every ~2 s while NOT streaming, so a captured
+  // serial log shows the RX state across a wedge (read-only; safe).
+  static uint32_t last_gemdiag_time = 0;
+  if (!stream_enabled && (now_ms - last_gemdiag_time >= 2000)) {
+    last_gemdiag_time = now_ms;
+    gem_rx_dump("hb");
   }
 
   // Discovery beacon: broadcast our identity ~1 Hz while the link is up so a
