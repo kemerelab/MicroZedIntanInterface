@@ -28,7 +28,7 @@ UDP_PORT = 5000  # Must match your board's UDP_PORT (ALL streams; demux by strea
 BEACON_PORT = 5050
 BEACON_MAGIC = 0x4B4C4231
 _BEACON_FMT = '<II4sHHI6sH'   # magic,version,ip,tcp,udp,fw,mac,reserved = 28 bytes
-BEACON_DISCOVERY_TIMEOUT = 45.0   # must exceed board boot (>20 s) PLUS any
+BEACON_DISCOVERY_TIMEOUT = 0   # must exceed board boot (>20 s) PLUS any
                                   # interface bring-up (a USB-C Ethernet adapter
                                   # re-enumerating on a power-cycle adds seconds).
                                   # Set to 0 to skip discovery (old fw / blocked port).
