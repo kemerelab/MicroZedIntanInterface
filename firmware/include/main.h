@@ -151,8 +151,6 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // Unified-port format: the LFP band now streams on the SAME UDP port as
 // broadband (UDP_PORT / udp_dest_port, default 5000), demuxed host-side by
 // stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
-#define UDP_BENCH_PORT              5002       // UDP throughput-benchmark blaster
-#define UDP_BENCH_MAX_BYTES         9000       // jumbo-frame-sized blast buffer
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
