@@ -806,6 +806,17 @@ static struct udp_pcb *lfp_pcb = NULL;
 static uint32_t lfp_read_word = 0;
 uint32_t lfp_udp_packets_sent = 0;
 #define LFP_HDR_WORDS UNIFIED_HEADER_WORDS   // 8-word common header
+// LFP zero-copy staging RING. The send is PBUF_REF into the LFP staging buffer, and
+// up to 8 frames are sent per service call; a SINGLE staging buffer aliased each
+// frame's payload with the previous frame's still-queued TX BD -> the GEM transmits
+// stale/duplicate bytes and the earlier frame is effectively lost (a clean +1 LFP
+// SEQ gap on the host). Rotate through N slots so every in-flight LFP send owns its
+// slot. 64 * 1 KB = 64 KB inside the existing 1 MB pl_dma_lfp_staging; N=64 >> the
+// 8/call and ~16 (MEMP_NUM_PBUF) max in-flight, so a slot is reused only long after
+// its TX-done.
+#define LFP_STAGING_SLOT_BYTES 1024u   // >= max LFP frame (8+128 words = 544 B)
+#define N_LFP_STAGING_SLOTS    64u
+static uint32_t lfp_staging_slot = 0;
 
 void lfp_stream_init(void) {
     lfp_pcb = udp_new();
@@ -827,14 +838,17 @@ void lfp_stream_service(void) {
     uint32_t st = pl_lfp_read_status();
     uint32_t wr_word = (st & 0xFFFF) >> 2;              // byte addr -> 32-bit word index
 
-    uint32_t *pkt = (uint32_t *)LFP_DMA_BUF_ADDR;       // non-cacheable LFP staging
-
     int budget = 8;   // cap frames per call so the broadband loop isn't starved
     while (budget-- > 0) {
         if (((wr_word - lfp_read_word) & mask) < frame_words) break;  // no full frame yet
 
+        // Rotate the LFP staging slot so the up-to-8 frames sent per call don't
+        // alias one buffer (see the ring note above).
+        uint32_t *pkt = (uint32_t *)(LFP_DMA_BUF_ADDR
+                          + (uintptr_t)lfp_staging_slot * LFP_STAGING_SLOT_BYTES);
+
         // CDMA the whole packet (header + samples) from the LFP BRAM ring into the
-        // non-cacheable staging buffer, splitting at the ring wrap if needed.
+        // non-cacheable staging slot, splitting at the ring wrap if needed.
         int derr;
         if ((lfp_read_word + frame_words) <= LFP_BRAM_SIZE_WORDS) {
             derr = pl_dma_read_addr(pkt,
@@ -846,23 +860,30 @@ void lfp_stream_service(void) {
             derr |= pl_dma_read_addr(pkt + first,
                        LFP_BRAM_BASE_ADDR, frame_words - first);
         }
-        if (derr) { dma_errors++; break; }   // CDMA error: retry next call
+        if (derr) { dma_errors++; break; }   // CDMA error: retry SAME frame next call (no advance)
 
-        // Zero-copy send: the pbuf references the staging buffer directly (the PL
-        // built the header, so we send exactly what the PL wrote).
+        // NO-LOSS: advance the read pointer ONLY once the frame is actually sent.
+        // If the shared MEMP_PBUF pool is momentarily empty or udp_sendto rejects
+        // the frame, DO NOT skip it -- break and retry the SAME frame next call. The
+        // 16K-word LFP ring holds ~120+ frames of slack, so a transient shortage is
+        // lossless. (The old code advanced lfp_read_word unconditionally, turning a
+        // transient pool shortage / send reject into a permanently dropped LFP frame
+        // -- the periodic +1 LFP SEQ gaps seen on the host.)
         struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_words * 4, PBUF_REF);
-        if (p != NULL) {
-            p->payload = (void*)pkt;
-            ip_addr_t dst; dst.addr = udp_dest_ip;
-            // Unified port: LFP shares the broadband UDP destination (5000),
-            // demuxed host-side by stream_type=2.
-            err_t e = udp_sendto(lfp_pcb, p, &dst, udp_dest_port);
-            if (e != ERR_OK) { lfp_send_err++; lfp_last_send_err = (int32_t)e; }
-            pbuf_free(p);
-            lfp_udp_packets_sent++;
-        } else {
-            lfp_pbuf_alloc_fail++;   // shared MEMP_PBUF pool empty -> this LFP frame is dropped
+        if (p == NULL) { lfp_pbuf_alloc_fail++; break; }   // pool empty: retry this frame next call
+        p->payload = (void*)pkt;
+        ip_addr_t dst; dst.addr = udp_dest_ip;
+        // Unified port: LFP shares the broadband UDP destination (5000), demuxed
+        // host-side by stream_type=2.
+        err_t e = udp_sendto(lfp_pcb, p, &dst, udp_dest_port);
+        pbuf_free(p);   // PBUF_REF: frees the ref pbuf only, not the staging slot
+        if (e != ERR_OK) {                        // send rejected: retry this frame next call
+            lfp_send_err++; lfp_last_send_err = (int32_t)e;
+            break;
         }
-        lfp_read_word = (lfp_read_word + frame_words) & mask;
+
+        lfp_udp_packets_sent++;
+        lfp_staging_slot = (lfp_staging_slot + 1u) % N_LFP_STAGING_SLOTS;
+        lfp_read_word = (lfp_read_word + frame_words) & mask;   // commit: frame is out
     }
 }
