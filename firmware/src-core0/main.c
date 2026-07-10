@@ -37,6 +37,7 @@ volatile int cable_test_flag = 0;
 
 // BRAM state tracking
 uint32_t ps_read_address = 0;              // Current PS read position (word address)
+uint32_t staging_slot = 0;                 // rotating DDR staging-ring slot (zero-copy TX aliasing fix)
 uint32_t current_packet_size = 84;         // 14-word header + 70 data words (0x0F default); recomputed on start
 uint32_t current_channel_enable = 0x0F;    // Current channel enable setting (default all channels)
 
@@ -69,6 +70,8 @@ uint32_t loop_hist[PERF_HIST_BUCKETS] = {0};        // recv->transmit time distr
 // perf_reset() so it can clear them. Cleared by CMD_PERF_RESET.
 uint32_t bb_pbuf_alloc_fail = 0, bb_send_err = 0;
 int32_t  bb_last_send_err = 0;
+// NO-LOSS retry stats (bb_send_err now = drops after exhausting all retries).
+uint32_t bb_send_retries = 0, bb_pbuf_retries = 0, bb_send_recovered = 0;
 uint32_t lfp_pbuf_alloc_fail = 0, lfp_send_err = 0;
 int32_t  lfp_last_send_err = 0;
 uint32_t first_drop_pkt = 0, last_drop_pkt = 0;
@@ -253,7 +256,13 @@ static int process_packet_from_bram(void) {
   // word-by-word Xil_In32 (the conceptual reference / 210 MHz fallback).
   uint32_t *pkt_buf;
 #if BRAM_READ_METHOD == BRAM_READ_DMA
-  pkt_buf = (uint32_t *)DMA_BUF_ADDR;
+  // Staging RING: the send is zero-copy (PBUF_REF), so rotate the staging slot to
+  // avoid clobbering a slot whose TX BD is still pending (see the broadband no-loss
+  // notes). 128 * 2 KB = 256 KB inside the 1 MB pl_dma_staging.
+  #define STAGING_SLOT_BYTES 2048u
+  #define N_STAGING_SLOTS    128u
+  pkt_buf = (uint32_t *)(DMA_BUF_ADDR + (uintptr_t)staging_slot * STAGING_SLOT_BYTES);
+  staging_slot = (staging_slot + 1u) % N_STAGING_SLOTS;
   int derr;
   XTime t_dma0; XTime_GetTime(&t_dma0);     // perf: CDMA transfer timer
   if ((ps_read_address + current_packet_size) <= BRAM_SIZE_WORDS) {
@@ -275,42 +284,46 @@ static int process_packet_from_bram(void) {
   }
 #endif
 
-  // Create pbuf that references our buffer directly (zero-copy!)
+  // NO-LOSS bounded retry (broadband is archival): retry the send instead of
+  // dropping. udp_sendto returns ERR_MEM on a transient TX-BD-ring-full (the GEM
+  // reaps lazily, no TX-done ISR); the ring drains autonomously and each udp_sendto
+  // reaps completed BDs, so a fresh attempt recovers the packet. Bounded so a
+  // sustained stall degrades to a drop; the staging ring + ~100-packet PL BRAM
+  // absorb the backlog. (PAUSErx=0/TXSR=TXGO confirmed these drops are benign
+  // transient ring-full, not flow control or a TX error.)
+  #define TX_MAX_ATTEMPTS 64
   uint32_t packet_bytes = current_packet_size * BYTES_PER_WORD;
-  struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, packet_bytes, PBUF_REF);
-  if (p != NULL) {
-    // Point pbuf payload directly to our buffer (zero-copy!)
-    p->payload = (void*)pkt_buf;
+  ip_addr_t dest_ip;
+  dest_ip.addr = udp_dest_ip;
 
-    // Send using udp_sendto (no connect required).
-    // perf: time the send separately. The GEM TX path inside udp_sendto reaps a
-    // variable number of completed TX descriptors (xemacps_process_sent_bds, a
-    // while(1) loop), so this is the suspected source of the recv->transmit spike.
-    ip_addr_t dest_ip;
-    dest_ip.addr = udp_dest_ip;
-    XTime t_send0; XTime_GetTime(&t_send0);   // perf: udp_sendto timer
-    err_t result = udp_sendto(udp, p, &dest_ip, udp_dest_port);
-    XTime t_send1; XTime_GetTime(&t_send1);
-    send_ticks_last = (uint32_t)(t_send1 - t_send0);
-    if (send_ticks_last > send_ticks_max) send_ticks_max = send_ticks_last;
-    // err_t result = udp_send(udp, p);
-
-    if (result == ERR_OK) {
-      udp_packets_sent++;
+  XTime t_send0; XTime_GetTime(&t_send0);
+  err_t result = ERR_MEM;
+  uint32_t attempt = 0;
+  for (; attempt < TX_MAX_ATTEMPTS; attempt++) {
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, packet_bytes, PBUF_REF);
+    if (p != NULL) {
+      p->payload = (void*)pkt_buf;
+      result = udp_sendto(udp, p, &dest_ip, udp_dest_port);
+      pbuf_free(p);
+      if (result == ERR_OK) break;
+      bb_send_retries++;
     } else {
-      send_message("UDP Send Error: %d\r\n", result);
-      udp_send_errors++; // ERROR TO TRACK
-      bb_send_err++;                       // broadband: udp_sendto rejected it
-      bb_last_send_err = (int32_t)result;  // err_t (ERR_MEM=-1 => no TX BD/mem)
-      record_bb_drop();
+      bb_pbuf_retries++;
     }
-    
-    // Free pbuf (this won't free our buffer since it's PBUF_REF)
-    pbuf_free(p);
+    for (volatile int s = 0; s < 120; s++) { }   // let the GEM make TX progress
+  }
+  XTime t_send1; XTime_GetTime(&t_send1);
+  send_ticks_last = (uint32_t)(t_send1 - t_send0);
+  if (send_ticks_last > send_ticks_max) send_ticks_max = send_ticks_last;
+
+  if (result == ERR_OK) {
+    udp_packets_sent++;
+    if (attempt > 0) bb_send_recovered++;   // needed >=1 retry but got through (no loss)
   } else {
-    send_ticks_last = 0;   // perf: no send happened; keep the breakdown honest
+    send_message("UDP Send Error: %d (after %u retries)\r\n", result, (unsigned)attempt);
     udp_send_errors++;
-    bb_pbuf_alloc_fail++;  // MEMP_PBUF (shared zero-copy pool) momentarily empty
+    bb_send_err++;
+    bb_last_send_err = (int32_t)result;
     record_bb_drop();
   }
 
