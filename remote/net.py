@@ -175,10 +175,8 @@ CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
 CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband channel_enable (firmware accepts-and-ignores)
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
-CMD_UDP_BENCH = 0x90        # param1 = payload bytes, param2 = n_packets (throughput test)
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
 
-UDP_BENCH_PORT = 5002       # UDP throughput-benchmark blaster
 # Unified port: the LFP band now arrives on UDP_PORT (5000) mixed with broadband,
 # demuxed by stream_type=2. The persistent UnifiedSink (created in __main__)
 # drains 5000 promiscuously and fans the LFP frames out to subscribers, so the
@@ -1845,60 +1843,6 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     print("  (chirp left running; 'chirp_off' to stop, or raise f_max for more transition)")
     return resp
 
-# ============================================================================
-# UDP throughput benchmark -- measure the real sustained MB/s vs packet size,
-# replacing the ~18 MB/s small-packet broadband assumption with a measured
-# large-packet ceiling. (Payloads > ~1472 B fragment unless the path is jumbo-
-# enabled; the sweep shows the effect.)
-# ============================================================================
-def udp_bench(sock, payload_bytes=1400, n_packets=50000, bind_port=UDP_BENCH_PORT):
-    import time
-    us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        us.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
-    except OSError:
-        pass
-    us.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    us.bind(('', bind_port))
-    us.settimeout(2.0)
-    ack_id = random.randint(1, 65535)
-    sock.sendall(struct.pack('<IIIII', CMD_MAGIC, CMD_UDP_BENCH, ack_id,
-                             payload_bytes, n_packets))
-    got = nbytes = 0
-    t0 = t1 = None
-    try:
-        while got < n_packets:
-            data, _ = us.recvfrom(payload_bytes + 200)
-            now = time.time()
-            if t0 is None:
-                t0 = now
-            t1 = now
-            got += 1; nbytes += len(data)
-    except socket.timeout:
-        pass
-    us.close()
-    try:                                  # the firmware ACKs after the blast
-        sock.settimeout(1.0); sock.recv(8)
-    except Exception:
-        pass
-    finally:
-        sock.settimeout(None)
-    if t0 and got > 1 and t1 > t0:
-        dt = t1 - t0
-        mbps, pps = nbytes / dt / 1e6, got / dt
-        loss = 100.0 * (1 - got / n_packets)
-        print(f"  {payload_bytes:>6} B x {n_packets}:  {mbps:6.1f} MB/s   "
-              f"{pps/1000:6.1f}k pps   loss {loss:5.1f}%   ({got} rx)")
-        return mbps, pps, loss
-    print(f"  {payload_bytes:>6} B: no/insufficient data received "
-          f"(check ZYNQ_IP / firewall on port {bind_port})")
-    return 0.0, 0.0, 100.0
-
-def udp_bench_sweep(sock, n_packets=50000):
-    print("UDP throughput sweep (small=broadband-like, 1472=MTU, larger=jumbo/fragmented):")
-    for sz in (256, 600, 1024, 1472, 2944, 5888, 8800):
-        udp_bench(sock, sz, n_packets)
-
 def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
     """Upload a command program (with its length record) into a standby bank.
     Works during acquisition; swap it live with aux_bank_select()."""
@@ -2559,7 +2503,6 @@ def tcp_control():
         print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, perf_reset, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
-        print(f"  Bandwidth: bench [bytes] [n], bench_sweep  (raw UDP throughput, port 5002)")
         print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], sink  (port 5000, stream_type=2)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
@@ -2675,14 +2618,6 @@ def tcp_control():
                     validator.print_statistics()
                 elif cmd == "hex":
                     validator.print_last_packet_hex()
-                elif cmd == "bench" or cmd.startswith("bench "):
-                    # measure raw UDP throughput vs packet size (port 5002 blaster)
-                    parts = cmd.split()
-                    sz = int(parts[1]) if len(parts) > 1 else 1472
-                    n  = int(parts[2]) if len(parts) > 2 else 50000
-                    udp_bench(sock, sz, n)
-                elif cmd == "bench_sweep":
-                    udp_bench_sweep(sock)
                 elif cmd == "lfp_config" or cmd.startswith("lfp_config "):
                     # lfp_config [datapath=cic|fir] [taps]  (configure while off)
                     # default = CIC^4(/5)+halfband(/2)=/10 -> 3 kHz, 43 comp taps.
@@ -2798,9 +2733,6 @@ def tcp_control():
                     print("  set_udp <ip> <port>, get_status, perf_reset, ping")
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, quit")
-                    print("Bandwidth (raw UDP throughput, port 5002):")
-                    print("  bench [bytes] [n]   - one size (default 1472 B x 50000)")
-                    print("  bench_sweep         - sweep 256..8800 B")
                     print("LFP / Tier-1 (unified UDP 5000, stream_type=2):")
                     print("  lfp_config [cic|fir] [taps] - set datapath/taps + upload LP kernel")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
