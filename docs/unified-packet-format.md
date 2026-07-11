@@ -16,6 +16,32 @@ implement exactly this.
 3. **Loss is provably zero**, not assumed: every packet carries a **per-stream monotonic
    sequence number**; the host flags any gap. Broadband's gap count must stay 0.
 
+## Why one port (not one per stream)
+
+The board could just as easily send each stream to its **own** UDP port — the PL builds
+the complete wire packet (header + payload) in its output BRAM and the PS DMAs it straight
+into a `PBUF_REF`, so a per-stream destination port costs the board nothing. The single
+port is driven entirely by a **receiver-side** failure mode:
+
+If a per-stream port has **no socket draining it** (that stream's consumer isn't running —
+e.g. a viewer is closed), the receiving host's **OS kernel** — *because nothing is
+listening* — replies **ICMP "port unreachable"** to every datagram sent there. At stream
+rate that is a multi-kHz inbound flood, and the board's **fully-polled** lwIP stack
+(`NO_SYS`, no interrupts) must receive and process every one of those ICMP replies. That
+steals time from the 30 kHz acquisition loop (recv→transmit spikes to 40–60 µs against a
+~33 µs budget) and drives catch-up bursts that exhaust the TX descriptors → **dropped
+broadband**. Measured on the separate-LFP-port design: broadband-only pristine (~27 µs max,
+0 over-budget, 0 drops); the LFP port left **undrained** → ~63 µs, ~250 over-budget, ~12
+drops; that same port **drained** → identical to broadband-only. The firmware was never the
+bottleneck — an unlistened UDP port was.
+
+One port removes the failure mode **structurally**: there is only ever one socket, broadband
+keeps it drained continuously, and an unconsumed stream (e.g. LFP) is simply demuxed and
+ignored — it never lands on a dead port, so the host never emits ICMP and the board never
+sees the storm. A host-side "always drain every stream port" rule also works, but it is
+fragile (a GUI viewer can be closed mid-run); the single port makes it impossible to get
+wrong. This is why principle 1 is one port + a `stream_type` tag, not a port per stream.
+
 ## Common header — 8 × 32-bit little-endian words (32 bytes), identical for every stream
 
 | word | name | contents |
