@@ -480,12 +480,6 @@ void process_command_flags(void) {
     command_flags->lock = 0;
   }
 
-  if (command_flags->bram_benchmark_flag) {
-    command_flags->bram_benchmark_flag = 0;
-    benchmark_bram_reads();
-    command_flags->lock = 0;
-  }
-
   if (command_flags->dump_bram_flag) {
     command_flags->dump_bram_flag = 0;
     pl_dump_bram_data(command_flags->start_bram_addr, command_flags->word_count);
@@ -767,7 +761,7 @@ int main() {
 
   // Initialize UDP (always enabled)
   udp_stream_init();
-  lfp_stream_init();   // LFP band shares the unified UDP port (5000), stream_type=2
+  lfp_stream_init();   // LFP band shares the unified UDP port (UDP_PORT), stream_type=2
 
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
   
@@ -777,8 +771,6 @@ int main() {
     
   // Initialize packet size based on current channel_enable setting
   update_current_packet_size();
-
-  // benchmark_bram_reads();
 
   pl_set_copi_commands(initialization_cmd_sequence);
   service_network();   // keep the RX pool drained across PL init

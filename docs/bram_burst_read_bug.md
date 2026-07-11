@@ -32,8 +32,8 @@ CPU GP port is off the data path entirely.
 
 MicroZed (Zynq-7020, `xc7z020clg400-1`). PL acquires Intan RHD2000 data and writes
 packets into a 64 KB capture BRAM (`0x80000000`). PS core 0 polls the BRAM, copies
-each packet to a DDR buffer, and UDP-streams it (port 5000); core 1 is the serial
-debug console. Host control + capture is `remote/net.py` (TCP 6000). Read
+each packet to a DDR buffer, and UDP-streams it (port 0x6800); core 1 is the serial
+debug console. Host control + capture is `remote/net.py` (TCP 0x6900). Read
 `overview.txt` and `CLAUDE.md` for the full picture and the 3-layer
 register/packet contract.
 

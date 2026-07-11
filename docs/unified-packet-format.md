@@ -7,7 +7,7 @@ implement exactly this.
 
 ## Principles (from the CLAUDE.md hard rule)
 
-1. **One UDP port** (default **5000**) for ALL PL→host streams. The host demuxes by
+1. **One UDP port** (default **0x6800 / 26624**) for ALL PL→host streams. The host demuxes by
    `stream_type` in the header. (Board-side this is TX-neutral; host-side we drain
    promiscuously so broadband is never blocked.)
 2. **NO DATA LOSS.** Every packet fits **one standard datagram** (≤ 1472 B payload → no IP
@@ -74,7 +74,7 @@ packet (the loss check). Max packet = 14 + 140 = 154 words = 616 B (≤ 1 datagr
 **As implemented (claude/unified-ports):** the LFP frame is exactly the 8-word common
 header (no sub-block) then the decimated samples. `num_samples` = `popcount(lane_mask)·32`
 (`lane_mask` mirrors the broadband `channel_enable`). The PL builds the whole frame
-(header + samples) in its output BRAM; the PS DMAs it and sends it on UDP 5000 with
+(header + samples) in its output BRAM; the PS DMAs it and sends it on UDP 0x6800 with
 stream_type=2. Verified in `programmable_logic/sim/lfp_dsp_block_tb.sv`.
 
 ### WAVELET (type 3) — one octave per packet, rate-aligned
@@ -97,7 +97,7 @@ stream_type=2. Verified in `programmable_logic/sim/lfp_dsp_block_tb.sv`.
 
 ## Host (net.py + Open Ephys)
 
-- **One socket, port 5000, promiscuous drain:** a tight `recvfrom → ring` loop that never
+- **One socket, port 0x6800, promiscuous drain:** a tight `recvfrom → ring` loop that never
   blocks on processing; demux + per-stream handling happen downstream. Big `SO_RCVBUF`.
 - Demux by `TYPE_VER[7:0]`; verify per-stream `SEQ` continuity (the loss check).
 - Wavelet: place each packet's `(octave, lane_start..+n_channels)` block into the surface;
@@ -105,7 +105,7 @@ stream_type=2. Verified in `programmable_logic/sim/lfp_dsp_block_tb.sv`.
 
 ## Branch plan
 
-1. `claude/unified-ports` (off `main`): broadband + LFP on port 5000 with this header. PL
+1. `claude/unified-ports` (off `main`): broadband + LFP on port 0x6800 with this header. PL
    (both packet builders) + firmware (single send path/port) + `net.py` (one socket, demux)
    + sim. **No wavelet.**
 2. `claude/unified-wavelet` (off `unified-ports`): port the v2 wavelet engine on top, add the
