@@ -81,7 +81,7 @@ architectural changes.
 
 **PS (core 0):**
 - `main.c` — init + `network_maintenance_loop`.
-- `network.c` — lwIP TCP server (port 6000), UDP stream (port 5000), status struct.
+- `network.c` — lwIP TCP server (port 0x6900), UDP stream (port 0x6800), status struct.
 - `pl_control.c` — AXI-Lite register read/write helpers, COPI command sequences.
 - `pl_dma.c` — AXI CDMA driver: the bulk capture-BRAM read goes BRAM→DDR via a PL
   master (CDMA over S_AXI_HP0), **not** the CPU's M_AXI_GP (whose long burst reads
