@@ -9,15 +9,17 @@
 // ============================================================================
 // NETWORK CONFIGURATION
 // ============================================================================
-#define UDP_PORT 5000
-#define TCP_PORT 6000
+// Ports chosen to avoid common OS conflicts (macOS AirPlay 5000/7000, X11 6000,
+// Windows Hyper-V reserved ranges) and to sit below every ephemeral-port floor.
+#define UDP_PORT 0x6800   // 26624 -- unified data stream (broadband + LFP)
+#define TCP_PORT 0x6900   // 26880 -- control channel
 
 // Default UDP destination (can be changed via TCP command)
 #define DEFAULT_UDP_DEST_IP_A   192
 #define DEFAULT_UDP_DEST_IP_B   168
 #define DEFAULT_UDP_DEST_IP_C   18
 #define DEFAULT_UDP_DEST_IP_D   100
-#define DEFAULT_UDP_DEST_PORT   5000
+#define DEFAULT_UDP_DEST_PORT   0x6800   // 26624 (== UDP_PORT)
 
 // ---- Device discovery beacon (subnet broadcast) ----------------------------
 // Once fully initialized, the board broadcasts this fixed little-endian struct
@@ -27,7 +29,7 @@
 // until it arrives (zero packets to the board during its fragile boot window).
 // CONTRACT -- keep in sync across: network.c (build), remote/net.py (decode),
 // and the ephys-socket plugin (decode). All fields naturally aligned; no padding.
-#define BEACON_PORT     5050
+#define BEACON_PORT     0x6880   // 26752 -- discovery beacon (subnet broadcast)
 #define BEACON_MAGIC    0x4B4C4231u   // distinctive discovery magic ("KLB1")
 #define BEACON_VERSION  1
 
@@ -35,8 +37,8 @@ typedef struct {
     uint32_t magic;       // BEACON_MAGIC
     uint32_t version;     // BEACON_VERSION
     uint32_t ip;          // board IPv4, network byte order (== datagram source)
-    uint16_t tcp_port;    // control port (TCP_PORT, 6000)
-    uint16_t udp_port;    // unified data port (UDP_PORT, 5000)
+    uint16_t tcp_port;    // control port (TCP_PORT, 0x6900)
+    uint16_t udp_port;    // unified data port (UDP_PORT, 0x6800)
     uint32_t fw_version;  // FIRMWARE_VERSION_WORD (maj<<24|min<<16|patch<<8|build)
     uint8_t  mac[6];      // board MAC = unique device id
     uint16_t reserved;    // pad to 28 bytes / 4-byte multiple
@@ -68,7 +70,7 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // UNIFIED PACKET FORMAT (docs/unified-packet-format.md)
 // ----------------------------------------------------------------------------
 // Every PL stream (broadband + LFP) emits the SAME 8 x 32-bit little-endian
-// common header, then a stream-specific payload, all on ONE UDP port (5000).
+// common header, then a stream-specific payload, all on ONE UDP port (UDP_PORT).
 // The host demuxes by stream_type. The PL builds the whole header in its BRAM;
 // the PS does NO header math (DMA-into-pbuf rule). Keep this in sync with the
 // PL builders (data_generator_core.sv / lfp_dsp_block.sv) and net.py.
@@ -149,7 +151,7 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define LFP_BRAM_BASE_ADDR          0x84000000
 #define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
 // Unified-port format: the LFP band now streams on the SAME UDP port as
-// broadband (UDP_PORT / udp_dest_port, default 5000), demuxed host-side by
+// broadband (UDP_PORT / udp_dest_port, default UDP_PORT), demuxed host-side by
 // stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 
 // CTRL_REG_AUX_CTRL bit fields
@@ -584,12 +586,6 @@ extern const uint16_t initialization_cmd_sequence[35];
 extern const uint16_t cable_length_cmd_sequence[35];
 
 // ============================================================================
-// DEBUG FUNCTIONS
-// ============================================================================
-
-void benchmark_bram_reads(void);
-
-// ============================================================================
 // NETWORK FUNCTIONS
 // ============================================================================
 
@@ -625,7 +621,7 @@ void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
 uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 
 // Streaming (network.c): drain the LFP output BRAM -> UDP on the unified port
-// (udp_dest_port, default 5000), demuxed host-side by stream_type=2.
+// (udp_dest_port, default UDP_PORT), demuxed host-side by stream_type=2.
 void lfp_stream_init(void);
 void lfp_stream_service(void);   // call from the core-0 maintenance loop
 

@@ -50,7 +50,6 @@ typedef struct {
     volatile int disable_streaming_flag;
     volatile int reset_timestamp_flag;
     volatile int pl_print_flag;
-    volatile int bram_benchmark_flag;
     volatile int dump_bram_flag;
     volatile int cable_test_flag;
     volatile uint32_t start_bram_addr;

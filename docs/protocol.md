@@ -4,8 +4,8 @@ The board exposes two network endpoints once its Ethernet link is up:
 
 | Endpoint | Port | Direction | Purpose |
 |----------|------|-----------|---------|
-| **TCP control** | 6000 | host → board (with acks) | commands (start/stop, config, registers) |
-| **UDP data** | 5000 | board → host | the acquisition stream |
+| **TCP control** | 0x6900 | host → board (with acks) | commands (start/stop, config, registers) |
+| **UDP data** | 0x6800 | board → host | the acquisition stream |
 
 Default board IP is `192.168.18.10` (put your host on the same `/24`).
 
@@ -67,7 +67,7 @@ LFP filters exactly the broadband-enabled lanes. (See `remote/net.py` `configure
 (See `remote/net.py` for the exact per-command parameter packing and the interactive
 command names like `start`, `set_channels`, `auto_cable_detect`, `verify_sine`.)
 
-## UDP data packet (port 5000)
+## UDP data packet (port 0x6800)
 
 Each UDP datagram is **one 30 kHz sample frame**: `10` header words + `N` data words, all
 32-bit little-endian. The 64-bit timestamp (header words 2–3) increments once per datagram.
@@ -141,7 +141,7 @@ mismatch is the classic dual-port "dropout" symptom; keep the plugin's size calc
 ## LFP UDP stream (port 5001) — the decimated band, a *separate* product
 
 When the LFP/DSP engine is enabled, the board emits a second, independent UDP stream on
-**port 5001** (broadband on 5000 is untouched). One datagram per decimation frame
+**port 5001** (broadband on 0x6800 is untouched). One datagram per decimation frame
 (broadband rate ÷ effective decimation, e.g. 30 kHz ÷ 10 = 3 kHz).
 
 **The PL builds the whole wire packet** (6-word header + samples) in the LFP output BRAM

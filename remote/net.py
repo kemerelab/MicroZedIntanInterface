@@ -12,8 +12,8 @@ from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
 ZYNQ_IP = "192.168.18.10"  # IP of the Zynq board
-TCP_PORT = 6000  # Must match your board's TCP_PORT
-UDP_PORT = 5000  # Must match your board's UDP_PORT (ALL streams; demux by stream_type)
+TCP_PORT = 0x6900  # 26880 -- must match your board's TCP_PORT
+UDP_PORT = 0x6800  # 26624 -- must match your board's UDP_PORT (ALL streams; demux by stream_type)
 
 # ---------------------------------------------------------------------------
 # Device discovery beacon (contract: firmware main.h device_beacon_t, built in
@@ -25,7 +25,7 @@ UDP_PORT = 5000  # Must match your board's UDP_PORT (ALL streams; demux by strea
 # is a subnet BROADCAST, so an unbound host port does NOT provoke an ICMP
 # port-unreachable (hosts don't ICMP-error broadcasts) -- safe to close after.
 # ---------------------------------------------------------------------------
-BEACON_PORT = 5050
+BEACON_PORT = 0x6880  # 26752 -- must match your board's BEACON_PORT
 BEACON_MAGIC = 0x4B4C4231
 _BEACON_FMT = '<II4sHHI6sH'   # magic,version,ip,tcp,udp,fw,mac,reserved = 28 bytes
 BEACON_DISCOVERY_TIMEOUT = 45.0   # must exceed board boot (>20 s) PLUS any
@@ -121,7 +121,7 @@ MAGIC_NUMBER_HIGH = 0xCAFEBABE
 
 # ---------------------------------------------------------------------------
 # Unified packet format (docs/unified-packet-format.md). Every PL stream emits
-# the SAME 8 x 32-bit little-endian common header on UDP 5000; the host demuxes
+# the SAME 8 x 32-bit little-endian common header on UDP_PORT; the host demuxes
 # by stream_type and verifies the per-stream SEQ continuity (the loss check).
 #   w0 MAGIC=0xCAFEBABE | w1 TYPE_VER=type[7:0]|version[15:8]|flags[31:16]
 #   w2/w3 64-bit timestamp | w4 SEQ | w5 AUX0 | w6 AUX1 | w7 RSVD
@@ -177,7 +177,7 @@ CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband ch
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
 
-# Unified port: the LFP band now arrives on UDP_PORT (5000) mixed with broadband,
+# Unified port: the LFP band now arrives on UDP_PORT mixed with broadband,
 # demuxed by stream_type=2. The persistent UnifiedSink (created in __main__)
 # drains 5000 promiscuously and fans the LFP frames out to subscribers, so the
 # host never replies ICMP port-unreachable to the board while LFP streams.
@@ -1232,7 +1232,7 @@ def verify_debug_sine(sock, channel_enable=0xFF, n_packets=300):
 
 
 # ---------------------------------------------------------------------------
-# Unified UDP sink: ONE socket on port 5000 carrying ALL streams (broadband +
+# Unified UDP sink: ONE socket on UDP_PORT carrying ALL streams (broadband +
 # LFP), demuxed by stream_type. This is the no-loss design from CLAUDE.md /
 # docs/unified-packet-format.md:
 #   * a tight recv->ring thread does the MINIMUM work (recvfrom -> queue), so
@@ -1579,7 +1579,7 @@ def lfp_upload_coeffs(sock, coeffs):
 
 def configure_lfp(sock, datapath="cic", num_taps=None, cutoff_hz=1250.0):
     """Disable, set params, design + upload the LP kernel. Call lfp_enable(sock,
-    True) afterwards to start streaming on the unified UDP port (5000,
+    True) afterwards to start streaming on the unified UDP port (UDP_PORT,
     stream_type=2).
 
     The LFP lane mask is NO LONGER set here -- it MIRRORS the broadband
@@ -1621,13 +1621,13 @@ def lfp_enable(sock, on=True):
 
 
 # ---------------------------------------------------------------------------
-# LFP datagram reader. Unified port: the LFP band arrives on UDP_PORT (5000)
+# LFP datagram reader. Unified port: the LFP band arrives on UDP_PORT
 # mixed with broadband, demuxed by the UnifiedSink (stream_type=2). The reader
 # subscribes to that sink's LFP fan-out so a single socket drains 5000 for the
 # whole session (an unconsumed UDP port makes the host kernel reply ICMP
 # "port unreachable" per datagram -> an RX-interrupt storm that preempts the
 # board's polled loop). If the sink isn't running, fall back to a private bind
-# on 5000 that demuxes LFP itself.
+# on UDP_PORT that demuxes LFP itself.
 # ---------------------------------------------------------------------------
 class _LfpReader:
     """Yields LFP datagrams from the persistent UnifiedSink if running, else from
@@ -1679,7 +1679,7 @@ def receive_lfp(n_packets=200, bind_port=UDP_PORT):
 
     The unified 8-word common header is built BY THE PL (not the PS): the PL
     writes the complete wire packet (header + samples) into its output BRAM and
-    the PS just CDMAs it into a pbuf and sends it on UDP_PORT (5000), demuxed by
+    the PS just CDMAs it into a pbuf and sends it on UDP_PORT, demuxed by
     stream_type=2. Header layout (docs/unified-packet-format.md):
       w0 = MAGIC (0xCAFEBABE), w1 = TYPE_VER (stream_type=2 | version<<8)
       w2/w3 = 64-bit master timestamp = the master count of the NEWEST broadband
@@ -1775,7 +1775,7 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
     lfp_enable(sock, True)
     send_binary_command(sock, CMD_START)
-    # ---- capture one channel's time series off the unified UDP port (5000) ----
+    # ---- capture one channel's time series off the unified UDP port (UDP_PORT) ----
     settle = int(0.3 * fs)
     n_want = int(n_periods * period * fs) + settle
     HDR = UNIFIED_HEADER_WORDS * 4   # 32-byte common header
@@ -2503,7 +2503,7 @@ def tcp_control():
         print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, perf_reset, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
-        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], sink  (port 5000, stream_type=2)")
+        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], sink  (port UDP_PORT, stream_type=2)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2733,7 +2733,7 @@ def tcp_control():
                     print("  set_udp <ip> <port>, get_status, perf_reset, ping")
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, quit")
-                    print("LFP / Tier-1 (unified UDP 5000, stream_type=2):")
+                    print("LFP / Tier-1 (unified UDP 0x6800, stream_type=2):")
                     print("  lfp_config [cic|fir] [taps] - set datapath/taps + upload LP kernel")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
                     print("  lfp_recv [n]        - capture + print decoded LFP frames")
@@ -2799,7 +2799,7 @@ if __name__ == "__main__":
     print(f"UDP Port: {UDP_PORT}")
     print("Press Ctrl+C to stop.\n")
 
-    # ONE socket on UDP_PORT (5000) for ALL streams. The UnifiedSink drains it
+    # ONE socket on UDP_PORT for ALL streams. The UnifiedSink drains it
     # promiscuously (recv->ring), demuxes by stream_type (broadband -> validator,
     # LFP -> subscribers), and verifies per-stream SEQ continuity. Draining 5000
     # for the whole session also keeps the host from replying ICMP port-

@@ -749,7 +749,7 @@ void stop_udp_stream(void) {
 // LFP/DSP STREAM (Tier-1): drain the LFP output BRAM -> UDP on the UNIFIED port.
 //
 // Unified-port format: the LFP band streams on the SAME UDP port as broadband
-// (udp_dest_port, default 5000), demuxed host-side by stream_type=2. The former
+// (udp_dest_port, default UDP_PORT), demuxed host-side by stream_type=2. The former
 // separate LFP_UDP_PORT (5001) send path is removed.
 //
 // The PL builds the COMPLETE LFP wire packet in its output BRAM (0x84000000):
@@ -837,7 +837,7 @@ void lfp_stream_service(void) {
         if (p == NULL) { lfp_pbuf_alloc_fail++; break; }   // pool empty: retry this frame next call
         p->payload = (void*)pkt;
         ip_addr_t dst; dst.addr = udp_dest_ip;
-        // Unified port: LFP shares the broadband UDP destination (5000), demuxed
+        // Unified port: LFP shares the broadband UDP destination (UDP_PORT), demuxed
         // host-side by stream_type=2.
         err_t e = udp_sendto(lfp_pcb, p, &dst, udp_dest_port);
         pbuf_free(p);   // PBUF_REF: frees the ref pbuf only, not the staging slot

@@ -7,10 +7,10 @@ has announced itself — the clean way to avoid the early-connect RX wedge).
 
 ## Transport
 - **Subnet-directed broadcast** to `<subnet>.255` (e.g. `192.168.18.255`), UDP
-  **port 5050** (`BEACON_PORT`).
+  **port 0x6880 / 26752** (`BEACON_PORT`).
 - Sent every ~1 s from `network_maintenance_loop` while the link is up, once the
   board has finished init (so hearing it == "ready to connect").
-- Broadcast on purpose: needs no IGMP, and a host with no listener on 5050 will
+- Broadcast on purpose: needs no IGMP, and a host with no listener on 0x6880 will
   **not** send an ICMP port-unreachable (hosts don't ICMP-error broadcasts), so an
   idle beacon never storms anyone.
 
@@ -21,8 +21,8 @@ has announced itself — the clean way to avoid the early-connect RX wedge).
 | 0   | u32        | `magic`     | `0x4B4C4231` (`BEACON_MAGIC`) |
 | 4   | u32        | `version`   | `1` (`BEACON_VERSION`) |
 | 8   | u32/4B     | `ip`        | board IPv4, **network byte order** (== datagram source) |
-| 12  | u16        | `tcp_port`  | control port (6000) |
-| 14  | u16        | `udp_port`  | unified data port (5000) |
+| 12  | u16        | `tcp_port`  | control port (0x6900) |
+| 14  | u16        | `udp_port`  | unified data port (0x6800) |
 | 16  | u32        | `fw_version`| `maj<<24 | min<<16 | patch<<8 | build` |
 | 20  | u8[6]      | `mac`       | board MAC = unique device id |
 | 26  | u16        | `reserved`  | 0 |
@@ -33,7 +33,7 @@ Defined in `firmware/include/main.h` (`device_beacon_t`, guarded by a
 (`_parse_beacon`, format `'<II4sHHI6sH'`), and the ephys-socket plugin.
 
 ## Client pattern
-1. Bind UDP 5050 (`INADDR_ANY`, `SO_REUSEADDR`), listen.
+1. Bind UDP 0x6880/26752 (`INADDR_ANY`, `SO_REUSEADDR`), listen.
 2. On a datagram: check `magic`, take the **source address** as the board IP
    (authoritative), read ports / fw / mac from the payload.
 3. If several boards answer, list them by MAC and let the user pick.
