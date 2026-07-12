@@ -143,10 +143,6 @@ module data_generator #(
 
         // Digital input
         .digital_in(digital_in)
-        // NOTE: data_generator_core still exposes an unused DSP sample tap
-        // (dsp_sample_valid/data/slot/packet_tick/master_timestamp/channel_enable)
-        // that formerly fed the removed on-PL LFP/DSP engine. The broadband
-        // datapath is unchanged; these outputs are simply left unconnected.
     );
 
     // Instantiate the FIFO-BRAM interface
