@@ -634,8 +634,7 @@ proc create_root_design { parentCell } {
   # { GP1 (PS Xil_In32 BRAM peeks), axi_cdma_0/M_AXI } (2 SI) ->
   # { axi_bram_ctrl_0/S_AXI (BRAM read), processing_system7/S_AXI_HP0 (DDR write) } (2 MI)
   set smartconnect_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_1 ]
-  # 3rd MI (M02) -> axi_bram_ctrl_1 (the LFP/DSP engine output BRAM @0x84000000)
-  set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {3}] $smartconnect_1
+  set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {2}] $smartconnect_1
 
 
   # Create instance: simple_dual_port_bram, and set properties
@@ -652,22 +651,6 @@ proc create_root_design { parentCell } {
   # Create instance: axi_bram_ctrl_0, and set properties
   set axi_bram_ctrl_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0 ]
   set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_0
-
-  # Create instance: simple_dual_port_bram_lfp -- the LFP/DSP engine output BRAM.
-  # PL write side = data_generator/LFP_BRAM; PS read side = axi_bram_ctrl_1.
-  set block_name simple_dual_port_bram_wrapper
-  set block_cell_name simple_dual_port_bram_lfp
-  if { [catch {set simple_dual_port_bram_lfp [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>."}
-     return 1
-   } elseif { $simple_dual_port_bram_lfp eq "" } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>."}
-     return 1
-   }
-
-  # Create instance: axi_bram_ctrl_1 -- PS read port for the LFP output BRAM
-  set axi_bram_ctrl_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_1 ]
-  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_1
 
   # Create instance: axi_cdma_0 -- memory-to-memory DMA that copies a packet from
   # the capture BRAM (0x80000000) to a DDR buffer (via S_AXI_HP0), taking the PS
@@ -758,10 +741,6 @@ proc create_root_design { parentCell } {
   connect_bd_intf_net -intf_net axi_cdma_0_M_AXI [get_bd_intf_pins axi_cdma_0/M_AXI] [get_bd_intf_pins smartconnect_1/S01_AXI]
   # smartconnect_1 second master -> PS HP0 slave (DDR write path)
   connect_bd_intf_net -intf_net smartconnect_1_M01_AXI [get_bd_intf_pins smartconnect_1/M01_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
-  # LFP output BRAM: PL write side (data_generator/LFP_BRAM) + PS read side (axi_bram_ctrl_1)
-  connect_bd_intf_net -intf_net axi_bram_ctrl_1_BRAM_PORTA [get_bd_intf_pins axi_bram_ctrl_1/BRAM_PORTA] [get_bd_intf_pins simple_dual_port_bram_lfp/BRAM_PORTB]
-  connect_bd_intf_net -intf_net data_generator_LFP_BRAM [get_bd_intf_pins data_generator/LFP_BRAM] [get_bd_intf_pins simple_dual_port_bram_lfp/BRAM_PORTA]
-  connect_bd_intf_net -intf_net smartconnect_1_M02_AXI [get_bd_intf_pins smartconnect_1/M02_AXI] [get_bd_intf_pins axi_bram_ctrl_1/S_AXI]
 
   # Create port connections
   connect_bd_net -net UART1_RX_0_1  [get_bd_ports UART1_RX_0] \
@@ -782,7 +761,6 @@ proc create_root_design { parentCell } {
   [get_bd_pins axi_cdma_0/s_axi_lite_aclk] \
   [get_bd_pins axi_cdma_0/m_axi_aclk] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aclk] \
-  [get_bd_pins axi_bram_ctrl_1/s_axi_aclk] \
   [get_bd_pins proc_sys_reset_175MHz/slowest_sync_clk] \
   [get_bd_pins axi_lite_registers/s_axi_aclk]
   connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0_84M_175M/locked] \
@@ -806,7 +784,6 @@ proc create_root_design { parentCell } {
   [get_bd_pins smartconnect_1/aresetn] \
   [get_bd_pins axi_cdma_0/s_axi_lite_aresetn] \
   [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn] \
-  [get_bd_pins axi_bram_ctrl_1/s_axi_aresetn] \
   [get_bd_pins axi_lite_registers/s_axi_aresetn]
   connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
   [get_bd_pins rst_ps7_0_100M/slowest_sync_clk] \
@@ -822,16 +799,12 @@ proc create_root_design { parentCell } {
 
   # Create address segments
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
-  # LFP output BRAM, PS read view (small GP reads -- below the long-burst threshold)
-  assign_bd_address -offset 0x84000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
   assign_bd_address -offset 0x40000000 -range 0x00010000 -with_name SEG_axi_lite_registers_0_reg0 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_lite_registers/s_axi/reg0] -force
   # CDMA control registers in the PS GP address space
   assign_bd_address -offset 0x44A00000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_cdma_0/S_AXI_LITE/Reg] -force
-  # CDMA master view: it must reach the capture BRAM (read src), the LFP output
-  # BRAM (read src -- the PL builds the whole LFP wire packet there and the PS
-  # CDMAs it straight into the pbuf), and DDR via HP0 (write dst).
+  # CDMA master view: it must reach the capture BRAM (read src) and DDR via HP0
+  # (write dst).
   assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
-  assign_bd_address -offset 0x84000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
   assign_bd_address -offset 0x00000000 -range 0x40000000 -target_address_space [get_bd_addr_spaces axi_cdma_0/Data] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
   # The PS GP masters can reach HP0 through the smartconnect_1 crossbar but never
   # address DDR that way -- exclude it so processing_system7_0/Data is clean.

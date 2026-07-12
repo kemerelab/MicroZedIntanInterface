@@ -63,23 +63,21 @@ uint32_t worst_pkt_index = 0;                       // packet idx of the worst l
 uint32_t worst_cdma_ticks = 0, worst_send_ticks = 0, worst_other_ticks = 0;
 uint32_t loop_hist[PERF_HIST_BUCKETS] = {0};        // recv->transmit time distribution
 
-// TX drop diagnostics (v1.6): split udp_send_errors by stream + failure mode and
-// record WHEN drops happen. Each zero-copy PBUF_REF send holds one MEMP_PBUF
-// entry (MEMP_NUM_PBUF, shared by broadband + LFP) until the GEM TX-done reaps
-// it; pbuf_alloc()==NULL => that pool is momentarily empty. Declared before
-// perf_reset() so it can clear them. Cleared by CMD_PERF_RESET.
+// TX drop diagnostics (v1.6): split udp_send_errors by failure mode and record
+// WHEN drops happen. Each zero-copy PBUF_REF send holds one MEMP_PBUF entry
+// (MEMP_NUM_PBUF) until the GEM TX-done reaps it; pbuf_alloc()==NULL => that pool
+// is momentarily empty. Declared before perf_reset() so it can clear them.
+// Cleared by CMD_PERF_RESET.
 uint32_t bb_pbuf_alloc_fail = 0, bb_send_err = 0;
 int32_t  bb_last_send_err = 0;
 // NO-LOSS retry stats (bb_send_err now = drops after exhausting all retries).
 uint32_t bb_send_retries = 0, bb_pbuf_retries = 0, bb_send_recovered = 0;
-uint32_t lfp_pbuf_alloc_fail = 0, lfp_send_err = 0;
-int32_t  lfp_last_send_err = 0;
 uint32_t first_drop_pkt = 0, last_drop_pkt = 0;
 uint32_t drop_ring[8] = {0};
 uint32_t drop_ring_idx = 0;
 // If this fails, the wire layout changed -- update net.py get_status (the length
 // check and the struct.unpack offsets) to match.
-_Static_assert(sizeof(status_response_t) == 288, "status_response_t size must match net.py get_status");
+_Static_assert(sizeof(status_response_t) == 264, "status_response_t size must match net.py get_status");
 
 // Clear the sticky maxes + worst-case snapshot + histogram + counts so the user
 // controls the measurement window (CMD_PERF_RESET). Leaves the last-sample fields
@@ -94,7 +92,6 @@ void perf_reset(void) {
   for (int i = 0; i < PERF_HIST_BUCKETS; i++) loop_hist[i] = 0;
   // TX drop diagnostics
   bb_pbuf_alloc_fail = bb_send_err = 0; bb_last_send_err = 0;
-  lfp_pbuf_alloc_fail = lfp_send_err = 0; lfp_last_send_err = 0;
   first_drop_pkt = last_drop_pkt = 0; drop_ring_idx = 0;
   for (int i = 0; i < 8; i++) drop_ring[i] = 0;
 }
@@ -221,8 +218,8 @@ static int process_packet_from_bram(void) {
   XTime t_loop0; XTime_GetTime(&t_loop0);   // perf: receive->transmit timer
   // Unified packet format: header word 0 = MAGIC (0xCAFEBABE), word 1 = TYPE_VER
   // with stream_type=1 (broadband), version=1 in the low 16 bits. The capture
-  // BRAM only ever holds broadband packets (the LFP stream lives in its own
-  // BRAM), so we validate both the magic AND the broadband stream_type/version.
+  // BRAM only ever holds broadband packets, so we validate both the magic AND
+  // the broadband stream_type/version.
   uint32_t magic_offset    = ps_read_address; // should always be < BRAM_SIZE_WORDS
   uint32_t typever_offset  = (ps_read_address + 1) % BRAM_SIZE_WORDS;
 
@@ -589,10 +586,6 @@ void network_maintenance_loop(void) {
   rx_hang_recover();   // steady-state GEM RX-hang self-heal (gated on the hang bits)
   process_command_flags();
 
-  // Drain the LFP output BRAM -> UDP (Tier-1). No-op unless the engine is
-  // enabled; the 16K-word ring tolerates bursty servicing.
-  lfp_stream_service();
-
   // Refresh the shared status snapshot at ~200 Hz (every 5 ms). Cheap and
   // non-blocking; core 1 reads it on demand or for its ~1 Hz monitor.
   uint32_t now_ms = sys_now();
@@ -761,7 +754,6 @@ int main() {
 
   // Initialize UDP (always enabled)
   udp_stream_init();
-  lfp_stream_init();   // LFP band shares the unified UDP port (UDP_PORT), stream_type=2
 
   send_message("Network initialized. IP: %s\r\n", ip4addr_ntoa(&ipaddr));
   
