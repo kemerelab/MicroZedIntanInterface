@@ -562,6 +562,12 @@ extern const uint16_t initialization_cmd_sequence[35];
 extern const uint16_t cable_length_cmd_sequence[35];
 
 // ============================================================================
+// DEBUG FUNCTIONS
+// ============================================================================
+
+void benchmark_bram_reads(void);   // serial 'benchmark' cmd: single-beat vs DMA BRAM reads
+
+// ============================================================================
 // NETWORK FUNCTIONS
 // ============================================================================
 

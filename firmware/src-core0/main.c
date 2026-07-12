@@ -477,6 +477,12 @@ void process_command_flags(void) {
     command_flags->lock = 0;
   }
 
+  if (command_flags->bram_benchmark_flag) {
+    command_flags->bram_benchmark_flag = 0;
+    benchmark_bram_reads();
+    command_flags->lock = 0;
+  }
+
   if (command_flags->dump_bram_flag) {
     command_flags->dump_bram_flag = 0;
     pl_dump_bram_data(command_flags->start_bram_addr, command_flags->word_count);
