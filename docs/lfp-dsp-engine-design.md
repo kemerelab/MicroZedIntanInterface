@@ -1,18 +1,18 @@
 # LFP / on-PL DSP engine — design
 
-Status: **design** (branch `claude/pl-dsp-engine`). This is the agreed plan, not yet
-implemented. It captures the first module of an on-fabric **preprocessing engine** aimed
-at closed-loop work: a decimating low-pass filter that extracts an **LFP band** and streams
-it as a second, independent data product.
+Status: **design rationale / decision log** (originated on branch `claude/pl-dsp-engine`;
+since implemented). It captures the first module of an on-fabric **preprocessing engine**
+aimed at closed-loop work: a decimating low-pass filter that extracts an **LFP band** and
+streams it as a second, independent data product. For the as-built reference (theory +
+implementation) see [`lfp-extraction.md`](lfp-extraction.md).
 
-LFP = anti-alias low-pass + downsample 30 kHz → **3 kHz** (decimation `R = 10`,
-Phase A; was 2 kHz / `R = 15`). See `docs/PHASE_A_SUMMARY.md` for the 3 kHz
-anti-alias design (a ~131-tap Kaiser run on a **dual-MAC** time-shared engine,
-passband ~1 kHz, ≥46 dB alias rejection) and the analytic-chirp debug signal.
-The single-stage budget at R=10 is ~109 taps/256ch per MAC, so the engine now
-processes `N_MAC=2` taps/clock (DSP48 is otherwise free); the delay-line BRAM is
-unchanged. A CIC÷5 + halfband÷2 variant (`cic_decimator.sv`/`lfp_halfband.sv`)
-that would cut the delay-line BRAM ~5× is the documented alternative.
+LFP = anti-alias low-pass + downsample 30 kHz → **3 kHz** (decimation `R = 10`; was 2 kHz /
+`R = 15`). The shipped anti-alias chain is **CIC⁴(÷5) → droop-comp half-band(÷2) = ÷10**
+(`cic_decimator.sv` / `lfp_halfband.sv`), which cuts the delay-line BRAM ~5× vs a single
+big FIR (~70% → ~33% BRAM). A single-stage **dual-MAC** 131-tap Kaiser FIR
+(`lfp_fir_decimator.sv`, `N_MAC=2` taps/clock since DSP48 is otherwise free) is retained as a
+timing-closed fallback (`USE_CIC=0`). Filter numbers, references, and validation are in
+[`lfp-extraction.md`](lfp-extraction.md).
 
 ## 1. Why these choices (the short version)
 

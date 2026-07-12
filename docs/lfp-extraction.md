@@ -4,9 +4,8 @@ How the board turns the 30 kHz broadband neural stream into a decimated **local 
 potential (LFP)** band, streamed as an independent data product. Part 1 is the signal-
 processing theory (with references); Part 2 is the as-built PL implementation.
 
-Companion docs: [`lfp-dsp-engine-design.md`](lfp-dsp-engine-design.md) (design rationale /
-decision log) and [`PHASE_A_SUMMARY.md`](PHASE_A_SUMMARY.md) (the 3 kHz build results). This
-doc is the reference for *what the engine is and why*.
+Companion doc: [`lfp-dsp-engine-design.md`](lfp-dsp-engine-design.md) (design rationale /
+decision log). This doc is the reference for *what the engine is and why*.
 
 ---
 
@@ -207,8 +206,7 @@ rate as `30 kHz / decim_R` and auto-tracks it (the Open Ephys `ephys-socket` plu
 
 CIC chain @ `xc7z020clg400-1`: **BRAM ≈ 33%** (vs ~70% for the FIR fallback — the CIC's ~5×
 delay-line saving), **1 DSP48**, **WNS ≈ +0.42 ns @ 84 MHz** (0 failing endpoints). LFP stream
-bandwidth = `256 ch × 3 kHz × 2 B = 1.5 MB/s` (+8.3 % over the ~18 MB/s broadband). See
-`PHASE_A_SUMMARY.md`.
+bandwidth = `256 ch × 3 kHz × 2 B = 1.5 MB/s` (+8.3 % over the ~18 MB/s broadband).
 
 ---
 
@@ -268,4 +266,4 @@ high-pass in the viewer. Expect: flat to ~1 kHz, −3 dB ≈ 1.25 kHz, rolling i
 | `firmware/src-core0/pl_control.c`, `network.c` | `pl_lfp_set_config`, coef upload, UDP 5001 stream |
 | `firmware/include/main.h` | LFP registers, packet layout, status struct |
 | `programmable_logic/sim/gen_cic_chain_vectors.py` + `*_tb.sv` | bit-exact reference + testbenches |
-| `docs/lfp-dsp-engine-design.md`, `docs/PHASE_A_SUMMARY.md` | rationale; build results |
+| `docs/lfp-dsp-engine-design.md` | design rationale / decision log |

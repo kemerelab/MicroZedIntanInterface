@@ -53,7 +53,7 @@ Remember the three-layer contract: every register/packet change touches
       each, length bound to bank, atomic packet-boundary swap, live bank upload + confirm
       handshake, one-shot injection for runtime register R/W (`CMD_READ_/WRITE_REGISTER`),
       command-echo identity in the packet header. Default OFF — datapath proven bit-identical
-      to main when disabled. See `docs/NIGHT_LOG-2026-06-11.md`.
+      to main when disabled.
       *(Init/calibration/cable-test keep the legacy full-table path by design — they run while
       stopped; the banks cover the streaming-time use cases.)*
 

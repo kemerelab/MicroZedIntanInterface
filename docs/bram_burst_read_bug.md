@@ -1,4 +1,4 @@
-# BRAM burst-read corruption — problem & task brief
+# BRAM burst-read corruption — root cause (resolved)
 
 > **RESOLVED (fw 1.1.0.0).** The fix is **AXI CDMA**, not the chunked read this brief
 > proposes: a PL master (CDMA) reads the capture BRAM and writes DDR over S_AXI_HP0,
@@ -7,8 +7,7 @@
 > See `docs/custom_axi_bram_ctrl_decision.md` and `firmware/src-core0/pl_dma.c`. The
 > root-cause analysis below remains accurate and is kept as the record.
 
-Status: **RESOLVED via DMA** (historical: "candidate fix in test", chunked read).
-Audience: a Claude Code instance picking this up, possibly with hardware attached.
+Status: **RESOLVED via DMA.** The root-cause analysis below is kept as the durable record.
 
 ## TL;DR
 
@@ -21,12 +20,11 @@ issues **long AXI bursts over the M_AXI_GP port**. Long GP-port bursts
 intermittently corrupt one short run of beats. It is **not** the BRAM, **not**
 read-during-write, **not** the clock, **not** cache.
 
-**Quick fix (in test):** read the packet in small `memcpy` chunks
-(`BRAM_READ_CHUNK_WORDS = 8` in `firmware/src-core0/main.c`), each a short burst
-below the length that triggers the corruption.
-
-**Real fix (next):** move BRAM→DDR onto a **PL DMA** (e.g. `axi_datamover`) so the
-CPU GP port is off the data path entirely.
+**Fix (shipped):** move BRAM→DDR onto a **PL master (AXI CDMA over S_AXI_HP0)**, taking the
+corrupting PS GP master off the data path entirely (see the RESOLVED note above and
+`docs/custom_axi_bram_ctrl_decision.md`). The earlier chunked-`memcpy` idea
+(`BRAM_READ_CHUNK_WORDS`, short bursts below the corruption threshold) was a dead end — it
+still bursts over the broken GP master.
 
 ## The system (1 paragraph)
 
@@ -77,33 +75,13 @@ what matter.
 - **Read-during-write / BRAM timing margin / output register**: ruled out by the
   STOPPED-board reproduction and the +2.3 ns timing slack.
 
-## Current state of the branch (`claude/dual-port`)
+## Related fix — stop/restart resync (kept)
 
-- Firmware read is a **chunked `memcpy`** (`BRAM_READ_CHUNK_WORDS = 8`).
-- AXI clock at **131.25 MHz** (clean timing, WNS ~+0.13).
-- Custom `simple_dual_port_bram` (vendor swap reverted; it's not at fault).
-- **Stop/restart fix**: `handle_enable_streaming` scans back from the write pointer
-  to the real `0xDEADBEEF/0xCAFEBABE` magic to re-sync `ps_read` (the datapath's
-  write_address/FIFO are only cleared by the hardware reset, so a stop mid-packet
-  used to leave `ps_read` a few words off the boundary → endless
-  `Magic validation failed (0x..11CE8)` loop).
-- Diagnostic kept: `dump_bram` shows `burst | single | flag` and a diff count.
-- Pre-built image: `blobs/BOOT.bin`.
-
-## Remaining task list
-
-1. **Verify the chunked fix** on hardware: `verify_sine 0xFF` → expect
-   `VALUE CHECK: PASS` and `PACKET LOSS: PASS`. Check Open Ephys glitch bands gone.
-   Check start/stop/restart is clean.
-2. **Tune `BRAM_READ_CHUNK_WORDS`**: if clean + no loss, raise it (10, then higher)
-   re-checking `verify_sine` each step to find the largest safe/ fastest burst; if
-   any diffs survive, drop to 4. Firmware-only, minutes per iteration.
-3. **DMA (real fix)**: add an `axi_datamover`/`axi_dma` PL master to copy
-   BRAM→DDR with controlled bursts, freeing core 0. Verify it doesn't reintroduce
-   the GP-port pattern (it reads through the same `axi_bram_ctrl` but as a
-   different, well-formed master). Bitstream + firmware change.
-4. Re-confirm `0x0F`/`0x3F` still pass (no regression) and the plugin
-   (`ephys-socket`, branch `claude/dual-port-plugin`) streams cleanly.
+`handle_enable_streaming` scans back from the write pointer to the real
+`0xDEADBEEF/0xCAFEBABE` magic to re-sync `ps_read`. The datapath's `write_address`/FIFO are
+only cleared by the hardware reset, so a stop mid-packet used to leave `ps_read` a few words
+off the boundary → an endless `Magic validation failed` loop on restart. Resyncing to the
+magic on enable fixes it.
 
 ## Key tools
 

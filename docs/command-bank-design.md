@@ -119,7 +119,10 @@ intricate and empirically tuned; verify ours by simulation rather than by replic
 offset.) We do the same:
 
 - **`aux_capture` unit:** latch each aux result, pair it with the **originating command** carried
-  through the readback delay, and emit clean.
+  through the readback delay, and emit clean. *(As built, this dissolved into ~3 registers in
+  the core rather than a separate module: the "intricate alignment" is just the fixed 2-command
+  SPI readback pipeline — packet word 34 answers this packet's slot-1 command, words 0/1 answer
+  the previous packet's slot-2/3 commands — so no generic delay-line module is needed.)*
 - **Command-echo identity:** each packet's metadata carries the *originating command* per aux slot.
   The command is self-describing (`CONVERT(49)`→temp, `CONVERT(48)`→supply, `CONVERT(3x)`→accel
   axis, `READ(addr)`→that register). Host decodes with **zero** knowledge of the loaded program,

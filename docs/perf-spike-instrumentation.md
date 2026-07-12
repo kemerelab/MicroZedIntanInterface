@@ -1,12 +1,20 @@
 # recv→transmit spike instrumentation (firmware v1.4)
 
 Tooling to pinpoint the occasional `recv→transmit` spike (typical ~16 µs, sticky
-max seen ~40 µs) on the core-0 fast loop, even at broadband-only. **Hypothesis:**
-the spike lives inside `udp_sendto(...)` — the GEM TX path reaps a *variable*
-number of completed TX descriptors via `xemacps_process_sent_bds` (a `while(1)`
-loop), so the send time is bursty. This instrumentation *measures* that rather
-than guessing: it splits the timed recv→transmit window, captures the worst
-packet's breakdown, and builds a distribution.
+max seen ~40 µs) on the core-0 fast loop. It splits the timed recv→transmit window,
+captures the worst packet's breakdown, and builds a distribution. The `get_status`
+fields it adds are durable, so this remains the reference for reading them.
+
+> **Root cause found (supersedes the original hypothesis).** This doc was written to test
+> the theory that the spike lived inside `udp_sendto(...)` — the GEM TX path reaping a
+> variable number of TX descriptors via `xemacps_process_sent_bds`. The **actual** cause of
+> the large recv→transmit spikes + UDP drops was a **host-side** failure mode: an
+> **undrained UDP stream port** makes the receiving host's kernel emit an ICMP
+> "port-unreachable" flood, which the board's fully-polled lwIP stack must service, stealing
+> time from the 30 kHz loop. The one-port unified design removes this structurally (drain one
+> socket, demux by stream type) — see [`unified-packet-format.md`](unified-packet-format.md)
+> "Why one port". The instrumentation below is still the right tool to *watch* the loop
+> budget; just don't expect the tail to originate in `udp_sendto` on a properly-drained host.
 
 All times are stored as raw 333.3 MHz global-timer **ticks** and converted to
 microseconds host-side in `net.py print_status` (the "store the measurement,

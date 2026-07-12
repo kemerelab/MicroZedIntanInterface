@@ -228,6 +228,25 @@ Edit `ZYNQ_IP`/ports at the top of the file if the board address differs.
 - `write_fifo` in `fifo_bram_interface.sv` must **not** be reset element-by-element — that
   forces ~18k flip-flops + a 256:1 read mux and a routing-congestion hotspot. Leaving the
   array unreset makes it infer LUTRAM (safe: entries are only read after being written).
+- **xsim treats `logic name = expr;` as a one-time initializer, not a continuous assign.**
+  In Vivado *synthesis* a declaration-with-initializer is a continuous assignment, but under
+  *xsim* (per the LRM) it runs once at time 0, so the signal sticks at its initial value
+  (usually X) and silently idles the datapath in simulation while synthesizing correctly. Use
+  `wire name = expr;` for continuous combinational assigns — identical netlist, correct sim
+  semantics. (This once made an identity testbench "pass" vacuously with both cores idle.)
+- **A bare `a*b` product takes a self-determined width and can truncate.** A multiply nested
+  in a wider expression (e.g. inside a ternary) is evaluated at `max(width(a),width(b))` — the
+  product is truncated *before* it reaches the wider target. Widen both operands to the full
+  product width first (`PROD_W`). (Bit the dual-MAC FIR generalization.)
+- **AXI-Lite writes must accept AW and W jointly, or they can deadlock.** A write FSM that
+  toggles `awready`/`wready` independently against their own valids can hang: if the
+  interconnect presents `AWVALID` and `WVALID` one cycle apart (legal, traffic-dependent), the
+  two readys oscillate in anti-phase forever — the write never completes, `BVALID` never
+  asserts, and the ARM core stalls mid-store on the GP port. Assert `AWREADY`/`WREADY`
+  **together**, only when both valids are present and no response is pending (AXI-compliant),
+  and guard `ARREADY` with `~rvalid`. This was latent in `axi_lite_registers.v` until a
+  microsecond-fast back-to-back command burst (the aux-bank upload from the ephys-socket
+  plugin) hit the skew and hard-wedged core 0. TB: `sim/axi_lite_write_tb.sv`.
 - The AXI fabric clock is **131.25 MHz** (was 175 MHz, over-spec for the `-1` part's AXI-GP
   port — it caused the only remaining setup violations). ~525 MB/s BRAM bandwidth still far
   exceeds the ~9 MB/s stream.
