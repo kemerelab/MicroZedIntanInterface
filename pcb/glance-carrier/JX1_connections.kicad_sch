@@ -5,7 +5,7 @@
   (uuid "7c9a2f09-a4b6-4243-bcb2-32d798af235e") 
   (paper "A4") 
   (title_block 
-    (title "MicroZed development carrier board") 
+    (title "GLANCE Project Intan Interface Carrier for MicroZed module") 
     (date "2023-08-19") 
     (rev "4") 
     (comment 1 "               License: CERN-OHL-P v2") 

@@ -7,7 +7,7 @@
     (legacy_teardrops no)) 
   (paper "A4") 
   (title_block 
-    (title "MicroZed Intan Interface carrier board") 
+    (title "GLANCE Project Intan Interface Carrier for MicroZed module") 
     (date "2026-05-15") 
     (rev "1") 
     (comment 1 "License: CERN-OHL-P v2") 
