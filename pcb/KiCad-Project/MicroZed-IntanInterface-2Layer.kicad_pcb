@@ -11,7 +11,7 @@
 		(title "MicroZed Intan Interface carrier board")
 		(date "2026-05-15")
 		(rev "1")
-		(comment 1 "License: Creative Commons Zero")
+		(comment 1 "License: CERN-OHL-P v2")
 		(comment 3 "(c) 2026 Caleb Kemere ")
 		(comment 4 "derived from a 2023 Viktor Nikolov project")
 	)

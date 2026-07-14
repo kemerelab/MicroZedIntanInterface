@@ -8,8 +8,8 @@
 		(title "Intan Interface carrier board")
 		(date "2025-08-18")
 		(rev "1.0")
-		(comment 1 "               License: Creative Commons Zero")
-		(comment 3 "               (c) 2025 Caleb Kemere")
+		(comment 1 "               License: CERN-OHL-P v2")
+		(comment 3 "               (c) 2025-2026 Caleb Kemere")
 		(comment 4 "                    derived from a design by  Viktor Nikolov")
 	)
 	(lib_symbols
