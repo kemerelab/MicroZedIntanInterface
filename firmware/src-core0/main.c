@@ -696,7 +696,7 @@ int main() {
   isb();  // Instruction Synchronization Barrier
   // ========================================================================
 
-  xil_printf("Kemere Lab Intan Interface v%d.%d.%d.%d\n\r\n\r\n\r",
+  xil_printf("GLANCE v%d.%d.%d.%d by the Kemere Lab\n\r\n\r\n\r",
             FIRMWARE_VERSION_MAJOR,
             FIRMWARE_VERSION_MINOR,
             FIRMWARE_VERSION_PATCH,
