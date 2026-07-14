@@ -17,6 +17,20 @@ conventions see [`../CLAUDE.md`](../CLAUDE.md).
   <img src="../resources/PCBWithMicroZed-Highlighted.jpg" width="70%" />
 </p>
 
+### Set the VCCIO voltage switches (do this first)
+
+The carrier has two **VCCIO bank-voltage switches** that must be set before powering a
+headstage — the FPGA I/O banks physically drive at the selected voltage:
+
+- **`VCCIO_35`** (at the **bottom end** of the carrier board) sets the voltage for the
+  bank driving the **headstage** SPI. **Set it to `2V5` (2.5 V)** — RHD2000 headstages
+  require 2.5 V I/O and will **not** work otherwise.
+- **`VCCIO_34`** sets the voltage for the **PMOD** connector I/O. Set it to match what
+  you attach there — either **3.3 V** or **2.5 V**.
+
+> ⚠️ A wrong `VCCIO_35` is the most common "headstage doesn't respond / RESCAN finds
+> nothing" cause — check this switch **first** if detection fails.
+
 ### Omnetics connector epoxy (do this)
 The Omnetics 12-pin connector **requires epoxy reinforcement** — the pin-to-solder-pad
 joints alone don't survive repeated mating. Apply several layers of UV-curing epoxy (we use
@@ -87,3 +101,9 @@ Full build notes and gotchas are in [`../CLAUDE.md`](../CLAUDE.md).
 4. For real recording/visualization use the **[ephys-socket](https://github.com/ckemere/ephys-socket)**
    OpenEphys plugin (drag **Intan Socket** in as the source, set the IP, **CONNECT** →
    **RESCAN** → play).
+
+> ⚠️ **Don't run `net.py` and the OpenEphys plugin at the same time.** Both bind the
+> same UDP data port (`0x6800`), so whichever is up consumes the datagrams. If `net.py`
+> is running, the plugin will still **connect and look fine** (control is over TCP) but
+> its data packets get **swallowed by `net.py`** — you'll see no (or partial) data in
+> OpenEphys. Quit `net.py` before using the plugin.

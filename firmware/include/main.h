@@ -259,14 +259,15 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         8   // 1.8: BROADBAND-ONLY variant. Removed the on-PL LFP/DSP
-                                           //      engine (stream_type=2 producer): its control/status
-                                           //      registers (PL 25-27 + status 13), the lfp_stream
-                                           //      drain path, and the LFP status-struct fields.
-                                           //      status_response_t wire size 288 -> 264 B; keep
-                                           //      net.py get_status + the _Static_assert in sync.
-                                           //      Unified 8-word header format is UNCHANGED (broadband
-                                           //      = stream_type=1). PL N_CTRL 28->25, N_STATUS 14->13.
+#define FIRMWARE_VERSION_MINOR         0   // 1.0.0.0: GLANCE release -- broadband-only firmware (rebrand;
+                                           //      was internally v1.8). No on-PL LFP/DSP engine
+                                           //      (stream_type=2 producer): its control/status registers
+                                           //      (PL 25-27 + status 13), the lfp_stream drain path, and the
+                                           //      LFP status-struct fields are gone. status_response_t wire
+                                           //      size 264 B; keep net.py get_status + the _Static_assert in
+                                           //      sync. Unified 8-word header UNCHANGED (broadband =
+                                           //      stream_type=1). PL N_CTRL 25, N_STATUS 13.
+                                           //      --- prior internal history ---
                                            // 1.7: lwIP TX headroom -- n_tx_descriptors 64->256, mem_size
                                            //      128K->256K (BSP lwip220 config) to eliminate the rare
                                            //      udp_sendto ERR_MEM drops under ISR-stall catch-up bursts.
