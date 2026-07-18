@@ -43,7 +43,25 @@ module data_generator_core (
     input  logic        cipo3,      // Port 1 (cable B) CIPO1
 
     // External digital input
-    input  logic [7:0]  digital_in
+    input  logic [7:0]  digital_in,
+
+    // DSP tap: the de-interleaved per-slot sample stream, for the on-PL LFP/DSP
+    // engine. Pulses on each data-word write (NOT the header), carrying the same
+    // 8x16-bit lanes as fifo_write_data with the slot index (cycle_counter) and a
+    // once-per-packet tick. Offset-binary->signed conversion + amplifier-slot
+    // gating happen downstream in lfp_dsp_block. See docs/lfp-dsp-engine-design.md.
+    output logic        dsp_sample_valid,
+    output logic [127:0] dsp_sample_data,
+    output logic [5:0]  dsp_sample_slot,
+    output logic        dsp_packet_tick,
+    // Live 64-bit master sample count, exposed so the LFP engine can stamp each
+    // decimated frame with the master timestamp of the LAST broadband sample that
+    // contributed to it (latched in lfp_dsp_block on the decimation tick). This is
+    // the SAME counter the broadband packet header stamps (header word 1).
+    output logic [63:0] dsp_master_timestamp,
+    // Broadband channel-enable mask (single source of truth for the LFP lane
+    // mask -- the LFP filters exactly the broadband-enabled lanes).
+    output logic [7:0]  dsp_channel_enable
 );
 
 // Extract control bits
@@ -78,7 +96,7 @@ logic [15:0] copi_words_reg [0:35];
 //                        phase-accumulator units -> ~0.46 Hz/step, full = ~1.9 kHz)
 //   [31:20] sweep_rate  (12-bit; freq_acc increment per packet =
 //                        sweep_rate << CHIRP_RATE_SHIFT; sets sweep speed/period)
-// See the chirp NCO block below.
+// See data_generator_core.sv chirp NCO block + docs/lfp-dsp-engine-design.md.
 wire [31:0] ctrl_reg_3 = ctrl_regs_pl[3*32 +: 32];  // chirp config
 localparam int CHIRP_PHW          = 32;  // phase/freq accumulator width
 localparam int CHIRP_LUT_IDX_HI   = CHIRP_PHW - 1;          // top 9 bits = LUT idx
@@ -186,7 +204,6 @@ CIPO_combined_phase_selector cipo3_selector(
 logic [6:0] state_counter;
 logic [5:0] cycle_counter;
 
-// Constants
 // Unified common-header constants (identical across all PL streams).
 localparam logic [31:0] UNIFIED_MAGIC       = 32'hCAFEBABE;  // header word 0
 localparam logic [7:0]  STREAM_TYPE_BROADBAND = 8'd1;
@@ -663,9 +680,15 @@ always_ff @(posedge clk) begin
         chirp_freq_acc   <= '0;
         chirp_phase_acc  <= '0;
         chirp_sweep_up   <= 1'b1;
+        dsp_sample_valid <= 1'b0;
+        dsp_sample_slot  <= 6'd0;
+        dsp_packet_tick  <= 1'b0;
     end else begin
         // Default: no FIFO write
         fifo_write_en <= 1'b0;
+        // DSP tap defaults (single-cycle pulses)
+        dsp_sample_valid <= 1'b0;
+        dsp_packet_tick  <= 1'b0;
 
         if (transmission_active && !fifo_full) begin
             // ---- Unified packet header (broadband, stream_type=1) -------------
@@ -741,6 +764,11 @@ always_ff @(posedge clk) begin
                 fifo_write_en <= 1'b1;
                 fifo_channel_mask <= channel_enable_reg;  // 8-bit channel enable
                 fifo_packet_end_flag <= is_last_cycle;    // Only last cycle's data word ends the packet
+                // DSP tap: this is a data-word write -> pulse the engine with the
+                // slot index. fifo_write_data (set below) carries the 8 lanes and
+                // is exposed combinationally as dsp_sample_data.
+                dsp_sample_valid <= 1'b1;
+                dsp_sample_slot  <= cycle_counter;
 
                 if (!debug_mode_reg) begin
                     // Real CIPO data, both ports.
@@ -823,6 +851,9 @@ always_ff @(posedge clk) begin
                             chirp_freq_acc <= chirp_freq_acc - chirp_rstep;
                     end
                     chirp_phase_acc <= chirp_phase_acc + chirp_freq_acc;
+                    // DSP tap: the packet is complete -> advance the engine's ring
+                    // (one tick per packet, after all 35 slot samples are ingested).
+                    dsp_packet_tick <= 1'b1;
                 end
             end
 
@@ -835,6 +866,16 @@ always_ff @(posedge clk) begin
         end
     end
 end
+
+// DSP tap data: the registered 128-bit data word (valid when dsp_sample_valid).
+assign dsp_sample_data = fifo_write_data;
+
+// Master timestamp + broadband channel-enable taps for the LFP engine. The LFP
+// engine latches dsp_master_timestamp on its decimation tick (so each LFP frame
+// carries the master count of the last contributing broadband sample) and drives
+// its lane_mask from dsp_channel_enable (mirror of the broadband mask).
+assign dsp_master_timestamp = timestamp;
+assign dsp_channel_enable   = channel_enable_reg;
 
 // Pack status signals
 // Status Register 0: Dynamic status and counters (locally generated)

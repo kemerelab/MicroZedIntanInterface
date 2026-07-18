@@ -11,7 +11,7 @@
 // ============================================================================
 // Ports chosen to avoid common OS conflicts (macOS AirPlay 5000/7000, X11 6000,
 // Windows Hyper-V reserved ranges) and to sit below every ephemeral-port floor.
-#define UDP_PORT 0x6800   // 26624 -- unified data stream (broadband)
+#define UDP_PORT 0x6800   // 26624 -- unified data stream (broadband + LFP)
 #define TCP_PORT 0x6900   // 26880 -- control channel
 
 // Default UDP destination (can be changed via TCP command)
@@ -69,11 +69,11 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // ============================================================================
 // UNIFIED PACKET FORMAT (docs/unified-packet-format.md)
 // ----------------------------------------------------------------------------
-// The PL stream emits an 8 x 32-bit little-endian common header, then a
-// stream-specific payload, on UDP_PORT. The host demuxes by stream_type (this
-// broadband-only build produces stream_type=1 only). The PL builds the whole
-// header in its BRAM; the PS does NO header math (DMA-into-pbuf rule). Keep this
-// in sync with the PL builder (data_generator_core.sv) and net.py.
+// Every PL stream (broadband + LFP) emits the SAME 8 x 32-bit little-endian
+// common header, then a stream-specific payload, all on ONE UDP port (UDP_PORT).
+// The host demuxes by stream_type. The PL builds the whole header in its BRAM;
+// the PS does NO header math (DMA-into-pbuf rule). Keep this in sync with the
+// PL builders (data_generator_core.sv / lfp_dsp_block.sv) and net.py.
 //
 //   word 0  MAGIC      = 0xCAFEBABE
 //   word 1  TYPE_VER   = stream_type[7:0] | version[15:8] | flags[31:16]
@@ -86,6 +86,8 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define UNIFIED_VERSION         1
 #define UNIFIED_HEADER_WORDS    8
 #define STREAM_TYPE_BROADBAND   1
+#define STREAM_TYPE_LFP         2
+#define STREAM_TYPE_WAVELET     3   // reserved for the follow-on branch
 
 // Packet size calculation based on channel_enable bits.
 // channel_enable is now 8 bits: [3:0] = port 0 streams, [7:4] = port 1 (dual
@@ -114,7 +116,7 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 
 // Number of PL control registers (must match axi_lite_registers N_CTRL --
 // the status registers are read back starting right after the control block)
-#define PL_N_CTRL_REGS      25
+#define PL_N_CTRL_REGS      28
 
 // Control register offsets
 #define CTRL_REG_0_OFFSET   (0 * 4)   // Enable transmission, reset timestamp, debug mode
@@ -138,6 +140,19 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // enable, bank select, fast settle/digout/dsp config
 #define CTRL_REG_AUX_WRITE_OFFSET   (23 * 4)  // bank write port payload
 #define CTRL_REG_AUX_STROBE_OFFSET  (24 * 4)  // write/inject toggles + inject command
+
+// LFP/DSP engine control registers (PL regs 25..27; see lfp_dsp_block.sv)
+#define CTRL_REG_LFP_CFG_OFFSET     (25 * 4)  // [0]en [15:8]lane_mask [23:16]decim_R [31:24]num_taps
+#define CTRL_REG_LFP_COEF_OFFSET    (26 * 4)  // [17:0] signed Q1.17 coefficient data
+#define CTRL_REG_LFP_STROBE_OFFSET  (27 * 4)  // [0] coef write toggle, [1] coef pointer clear
+#define LFP_STROBE_COEF_TOGGLE      (1u << 0)
+#define LFP_STROBE_PTR_CLR          (1u << 1)
+// LFP output BRAM (decimated stream, PS read via 2nd axi_bram_ctrl)
+#define LFP_BRAM_BASE_ADDR          0x84000000
+#define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
+// Unified-port format: the LFP band now streams on the SAME UDP port as
+// broadband (UDP_PORT / udp_dest_port, default UDP_PORT), demuxed host-side by
+// stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 
 // CTRL_REG_AUX_CTRL bit fields
 #define AUX_CTRL_SEQ_EN             (1u << 0)
@@ -193,6 +208,7 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define STATUS_REG_10_OFFSET (STATUS_REG_BASE + 10 * 4)  // BRAM write address + FIFO count (added by wrapper)
 #define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
+#define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
 
 // STATUS_REG_11 bit fields
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
@@ -259,15 +275,14 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         0   // 1.0.0.0: GLANCE release -- broadband-only firmware (rebrand;
-                                           //      was internally v1.8). No on-PL LFP/DSP engine
-                                           //      (stream_type=2 producer): its control/status registers
-                                           //      (PL 25-27 + status 13), the lfp_stream drain path, and the
-                                           //      LFP status-struct fields are gone. status_response_t wire
-                                           //      size 264 B; keep net.py get_status + the _Static_assert in
-                                           //      sync. Unified 8-word header UNCHANGED (broadband =
-                                           //      stream_type=1). PL N_CTRL 25, N_STATUS 13.
-                                           //      --- prior internal history ---
+#define FIRMWARE_VERSION_MINOR         1   // 1.1.0.0: GLANCE + on-PL LFP/DSP engine (stream_type=2 producer):
+                                           //      the LFP control/status registers, the lfp_stream drain
+                                           //      path, and the LFP status-struct fields are present.
+                                           //      status_response_t wire size 288 B; keep net.py get_status +
+                                           //      the _Static_assert in sync. Unified 8-word header UNCHANGED
+                                           //      (broadband = stream_type 1, LFP = stream_type 2). PL N_CTRL 28.
+                                           //      --- prior internal history: 1.0 = broadband-only (LFP
+                                           //      stripped); before that ---
                                            // 1.7: lwIP TX headroom -- n_tx_descriptors 64->256, mem_size
                                            //      128K->256K (BSP lwip220 config) to eliminate the rare
                                            //      udp_sendto ERR_MEM drops under ISR-stall catch-up bursts.
@@ -368,6 +383,16 @@ typedef struct __attribute__((packed)) {
     // (live D5/digout are in aux_ctrl/aux_flags). 22 bytes.
     uint8_t  rhd_reg[22];
 
+    // LFP/DSP engine configuration + status (CTRL_REG_LFP_CFG + STATUS_REG_13).
+    // Per the "get_status reports everything configurable" rule. 12 bytes.
+    uint8_t  lfp_enable;        // engine enabled
+    uint8_t  lfp_lane_mask;     // which of 8 streams are LFP-filtered
+    uint8_t  lfp_decim_R;       // decimation factor (packets per output)
+    uint8_t  lfp_num_taps;      // active FIR length
+    uint32_t lfp_packets_sent;  // LFP UDP packets emitted
+    uint8_t  lfp_overrun;       // sticky compute-overrun flag
+    uint8_t  lfp_reserved[3];
+
     // Analytic chirp NCO config (CTRL_REG_3 read-back). Per the "get_status
     // reports everything configurable" rule. 8 bytes.
     uint8_t  chirp_mode;        // 1 = chirp debug signal enabled
@@ -393,14 +418,18 @@ typedef struct __attribute__((packed)) {
     // recv->transmit histogram, microsecond bucket edges [<16,16-25,25-33,33-50,50-100,>=100]
     uint32_t loop_hist[6];      // counts per bucket
 
-    // TX drop diagnostics (v1.6): split udp_send_errors by failure mode, and
-    // record WHEN drops happen. Each zero-copy PBUF_REF send holds one MEMP_PBUF
-    // entry (MEMP_NUM_PBUF) until the GEM TX-done reaps it; pbuf_alloc()==NULL =>
-    // that pool was momentarily empty, a udp_sendto err (ERR_MEM) => no TX BD/mem.
-    // Cleared by CMD_PERF_RESET. 56 bytes (keep net.py + _Static_assert in sync).
+    // TX drop diagnostics (v1.6): split udp_send_errors by stream + failure mode,
+    // and record WHEN drops happen. Each zero-copy PBUF_REF send holds one
+    // MEMP_PBUF entry (MEMP_NUM_PBUF, shared by broadband + LFP) until the GEM
+    // TX-done reaps it; pbuf_alloc()==NULL => that pool was momentarily empty,
+    // a udp_sendto err (ERR_MEM) => no TX BD/mem. Cleared by CMD_PERF_RESET.
+    // 68 bytes (keep net.py + _Static_assert in sync).
     uint32_t bb_pbuf_alloc_fail;  // broadband: pbuf_alloc returned NULL
     uint32_t bb_send_err;         // broadband: udp_sendto() != ERR_OK
     int32_t  bb_last_send_err;    // broadband: last err_t (ERR_MEM = -1, ...)
+    uint32_t lfp_pbuf_alloc_fail; // LFP: pbuf_alloc returned NULL
+    uint32_t lfp_send_err;        // LFP: udp_sendto() != ERR_OK
+    int32_t  lfp_last_send_err;   // LFP: last err_t
     uint32_t first_drop_pkt;      // packets_received_count at the first broadband drop
     uint32_t last_drop_pkt;       // ... at the most recent broadband drop
     uint32_t memp_num_pbuf;       // = MEMP_NUM_PBUF (shared zero-copy pool size)
@@ -457,6 +486,8 @@ extern uint32_t loop_hist[PERF_HIST_BUCKETS];
 // TX drop diagnostics (v1.6)
 extern uint32_t bb_pbuf_alloc_fail, bb_send_err;
 extern int32_t  bb_last_send_err;
+extern uint32_t lfp_pbuf_alloc_fail, lfp_send_err;
+extern int32_t  lfp_last_send_err;
 extern uint32_t first_drop_pkt, last_drop_pkt;
 extern uint32_t drop_ring[8];
 extern uint32_t drop_ring_idx;
@@ -588,5 +619,29 @@ void collect_status_data(status_response_t* status);
 void abort_tcp_connections(void);
 void stop_tcp_server(void);
 void stop_udp_stream(void);
+
+// ============================================================================
+// LFP/DSP ENGINE (Tier-1) -- control + streaming
+// ============================================================================
+// Control (pl_control.c): config latches while streaming is stopped.
+// NOTE: the LFP lane mask is NO LONGER a separate parameter -- it MIRRORS the
+// broadband channel-enable mask in the PL (single source of truth). The PL
+// builds the complete LFP wire packet (header + samples) in its output BRAM, so
+// the PS just CDMAs it into a pbuf and sends it.
+void pl_lfp_set_config(uint8_t enable, uint8_t decim_R, uint8_t num_taps);
+void pl_lfp_coef_begin(void);                             // clear the coef write pointer
+void pl_lfp_coef_push(int32_t coef);                      // write one 18-bit Q1.17 tap
+void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
+uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
+
+// Streaming (network.c): drain the LFP output BRAM -> UDP on the unified port
+// (udp_dest_port, default UDP_PORT), demuxed host-side by stream_type=2.
+void lfp_stream_init(void);
+void lfp_stream_service(void);   // call from the core-0 maintenance loop
+
+// Tracked config / counters (mirrored into status_response_t). The lane mask is
+// the broadband channel_enable (reported via pl_get_current_channel_enable()).
+extern uint8_t  lfp_cfg_enable, lfp_cfg_decim_R, lfp_cfg_num_taps;
+extern uint32_t lfp_udp_packets_sent;
 
 #endif // MAIN_H
