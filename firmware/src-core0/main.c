@@ -694,6 +694,13 @@ int main() {
 #if BRAM_READ_METHOD == BRAM_READ_DMA
   pl_dma_init();  // AXI CDMA + non-cacheable DDR staging buffer for the read path
 #endif
+
+  // Bring up the LFP/DSP engine with its baked-in default filter so LFP streams
+  // out of the box (stream_type=2 on the unified port) with NO host configuration.
+  // Default = CIC^4(/5) + halfband(/2) = /10 -> 3 kHz, using the 43-tap comp-FIR
+  // baked into lfp_halfband's coef RAM. The host can still reconfigure the params
+  // and coefficients (e.g. fewer taps for lower group delay) or disable at runtime.
+  pl_lfp_set_config(/*enable=*/1, /*decim_R=*/10, /*num_taps=*/43);
   // ========================================================================
 
   // ========================================================================

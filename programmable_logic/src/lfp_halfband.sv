@@ -78,7 +78,25 @@ module lfp_halfband #(
     logic signed [COEF_W-1:0] coef_ram [0:RING_DEPTH-1];
     logic signed [COEF_W-1:0] coef_rdata;
     logic        [RING_AW-1:0] coef_rd_addr;
-    initial for (int ii = 0; ii < RING_DEPTH; ii++) coef_ram[ii] = '0;
+    // Default filter baked into the BRAM at FPGA config: the 43-tap CIC-comp-FIR
+    // halfband (= net.py design_cic_comp_fir), i.e. the shipped
+    // CIC^4(/5)+halfband(/2)=/10 -> 3 kHz LFP default. Symmetric / linear phase.
+    // The host can overwrite any tap at runtime via CMD_LFP_WRITE_COEF, so runtime
+    // reconfiguration (e.g. shorter taps for lower group delay) is unaffected.
+    localparam int LFP_HB_DEFAULT_NTAPS = 43;
+    localparam logic [COEF_W-1:0] LFP_HB_DEFAULT_COEF [0:LFP_HB_DEFAULT_NTAPS-1] = '{
+        18'h3ffea, 18'h00077, 18'h000aa, 18'h3ff1e, 18'h3fdd0, 18'h0009d,
+        18'h004c9, 18'h00190, 18'h3f837, 18'h3f900, 18'h00950, 18'h01084,
+        18'h3f9db, 18'h3e266, 18'h3f9c0, 18'h02bb8, 18'h022b5, 18'h3cb0f,
+        18'h3a032, 18'h0241b, 18'h11675, 18'h1926b, 18'h11675, 18'h0241b,
+        18'h3a032, 18'h3cb0f, 18'h022b5, 18'h02bb8, 18'h3f9c0, 18'h3e266,
+        18'h3f9db, 18'h01084, 18'h00950, 18'h3f900, 18'h3f837, 18'h00190,
+        18'h004c9, 18'h0009d, 18'h3fdd0, 18'h3ff1e, 18'h000aa, 18'h00077,
+        18'h3ffea };
+    initial begin
+        for (int ii = 0; ii < RING_DEPTH; ii++)
+            coef_ram[ii] = (ii < LFP_HB_DEFAULT_NTAPS) ? LFP_HB_DEFAULT_COEF[ii] : '0;
+    end
     always_ff @(posedge clk) begin
         if (coef_wr_en) coef_ram[coef_wr_addr] <= coef_wr_data;
         coef_rdata <= coef_ram[coef_rd_addr];
