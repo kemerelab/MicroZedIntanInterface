@@ -158,7 +158,7 @@ CMD_PING = 0x60
 # Aux command sequencer / override layer (mirror firmware/src-core0/network.c)
 CMD_AUX_WRITE_WORD = 0x70   # param1 = slot | bank<<8 | is_len<<16; param2 = addr<<16 | data
 CMD_AUX_BANK_SELECT = 0x71  # param1 = slot; param2 = bank
-CMD_AUX_SEQ_EN = 0x72       # param1 = 0/1
+# 0x72 retired (was CMD_AUX_SEQ_EN): the aux command engine is always on
 CMD_READ_REGISTER = 0x73    # param1 = reg -> 4-byte {cipo1, cipo0} response
 CMD_WRITE_REGISTER = 0x74   # param1 = reg; param2 = value -> 4-byte echo response
 CMD_SET_FAST_SETTLE = 0x75  # param1 = amp: sw|gpio_en<<1|pin<<4; param2 = dsp: same layout
@@ -1868,11 +1868,6 @@ def aux_bank_select(sock, slot, bank):
     print(f"[AUX] Slot {slot} -> bank {bank}: {'OK' if ok else 'FAILED'}")
     return ok
 
-def aux_seq_enable(sock, enable):
-    ok, _ = send_binary_command(sock, CMD_AUX_SEQ_EN, 1 if enable else 0)
-    print(f"[AUX] Sequencer {'enabled' if enable else 'disabled'}: {'OK' if ok else 'FAILED'}")
-    return ok
-
 def read_register(sock, reg):
     """Read an RHD register at runtime (injected via the sequencer; requires
     streaming + sequencer enabled). Returns (cipo0_value, cipo1_value)."""
@@ -1920,14 +1915,12 @@ def set_digout(sock, sw=False, gpio_en=False, pin=0, reg3_static=0x00):
     return ok
 
 def aux_demo_setup(sock):
-    """Load the default slot programs and enable the sequencer:
+    """Load the default slot programs (the aux command engine is always on):
     slot 0 = Reg-3 carrier (digout mirror), slot 1 = accel sweep @10 kHz,
     slot 2 = supply/temp/link housekeeping."""
-    if not (aux_upload_bank(sock, 0, 0, AUX_SLOT0_DEFAULT) and
+    return (aux_upload_bank(sock, 0, 0, AUX_SLOT0_DEFAULT) and
             aux_upload_bank(sock, 1, 0, AUX_SLOT1_DEFAULT) and
-            aux_upload_bank(sock, 2, 0, AUX_SLOT2_DEFAULT)):
-        return False
-    return aux_seq_enable(sock, True)
+            aux_upload_bank(sock, 2, 0, AUX_SLOT2_DEFAULT))
 
 def get_status(sock):
     """Get full status from device"""
@@ -2031,7 +2024,7 @@ def get_status(sock):
         'udp_dest_port': udp_dest_port,
         'udp_packet_format': udp_packet_format,
         'udp_bytes_sent': udp_bytes_sent,
-        'aux_seq_enabled': bool(aux_flags & 0x01),
+        'aux_engine_on': bool(aux_flags & 0x01),   # always True (aux-default)
         'aux_fast_settle': bool(aux_flags & 0x02),
         'aux_digout': bool(aux_flags & 0x04),
         'aux_dsp_reset': bool(aux_flags & 0x08),
@@ -2133,9 +2126,8 @@ def print_status(status):
     print(f"Packet Format: 0x{status['udp_packet_format']:04X}")
     print(f"Bytes Sent: {status['udp_bytes_sent']}")
 
-    print("\n--- Aux Sequencer ---")
-    print(f"Enabled: {status['aux_seq_enabled']}, "
-          f"Fast Settle: {status['aux_fast_settle']}, "
+    print("\n--- Aux Command Engine (always on) ---")
+    print(f"Fast Settle: {status['aux_fast_settle']}, "
           f"Digout: {status['aux_digout']}, "
           f"DSP Reset: {status['aux_dsp_reset']}")
     ba = status['aux_bank_active']
@@ -2508,7 +2500,7 @@ def tcp_control():
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
         print(f"  auto_cable_detect - Automated cable detection!")
-        print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
+        print(f"  Aux: aux_demo, aux_bank <slot> <bank>, aux")
         print(f"       read_reg <r>, write_reg <r> <v>")
         print(f"       fast_settle <0|1> [dsp] | gpio <pin> | off")
         print(f"       digout <0|1> | gpio <pin> | hiz")
@@ -2672,11 +2664,6 @@ def tcp_control():
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
                     aux_demo_setup(sock)
-                elif cmd.startswith("aux_en "):
-                    try:
-                        aux_seq_enable(sock, int(cmd.split()[1]))
-                    except (ValueError, IndexError):
-                        print("Usage: aux_en <0|1>")
                 elif cmd.startswith("aux_bank "):
                     try:
                         parts = cmd.split()
@@ -2740,8 +2727,7 @@ def tcp_control():
                     print("  (LFP lane mask = the broadband channel_enable mask -- pick lanes")
                     print("   with set_channels; run lfp_config + set_channels BEFORE lfp_on)")
                     print("Aux sequencer (bank-programmable aux commands):")
-                    print("  aux_demo            - load default slot programs + enable")
-                    print("  aux_en <0|1>        - enable/disable the sequencer")
+                    print("  aux_demo            - load the default slot programs")
                     print("  aux_bank <slot> <bank> - atomic bank swap (live)")
                     print("  aux                 - decode last packet's command echo")
                     print("  read_reg <r> / write_reg <r> <v> - runtime RHD register access")

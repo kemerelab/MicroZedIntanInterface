@@ -421,8 +421,8 @@ const uint16_t cable_length_cmd_sequence[35] = {
 // ============================================================================
 // AUX COMMAND SEQUENCER CONTROL
 // ============================================================================
-// The banked aux sequencer sources COPI cycles 32..34 when AUX_CTRL_SEQ_EN is
-// set. Banks are double-buffered: upload to the standby bank (allowed DURING
+// The banked aux command engine ALWAYS sources COPI cycles 32..34 (aux-default).
+// Banks are double-buffered: upload to the standby bank (allowed DURING
 // acquisition), select it, then confirm the swap landed (bank_active poll).
 
 // One word through the bank write port: payload to reg 23, then flip the
@@ -480,31 +480,9 @@ int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
     return 0;
 }
 
-void pl_aux_seq_enable(int enable) {
-    uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
-    if (enable) {
-        Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl | AUX_CTRL_SEQ_EN);
-        send_message("Aux sequencer ENABLED\r\n");
-    } else {
-        // Ordering matters: once SEQ_EN drops, the override layer can no
-        // longer reach the chip, so clear the fast-settle/dsp/digout sources
-        // first and let one packet carry the OFF injection.
-        uint32_t live = AUX_CTRL_FS_SW | AUX_CTRL_FS_GPIO_EN |
-                        AUX_CTRL_DSP_SW | AUX_CTRL_DSP_GPIO_EN |
-                        AUX_CTRL_DIGOUT_SW | AUX_CTRL_DIGOUT_GPIO_EN;
-        if (ctrl & live) {
-            Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl & ~live);
-            usleep(200);   // > 2 packets at 30 ksps
-            ctrl &= ~live;
-        }
-        Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl & ~AUX_CTRL_SEQ_EN);
-        send_message("Aux sequencer DISABLED\r\n");
-    }
-}
-
-int pl_aux_seq_is_enabled(void) {
-    return (Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET) & AUX_CTRL_SEQ_EN) ? 1 : 0;
-}
+// pl_aux_seq_enable / pl_aux_seq_is_enabled retired: the aux engine is always on
+// (aux-default). There is no enable/disable, and hence no OFF-injection ordering
+// to manage -- clearing fast-settle now always reaches the chip.
 
 // cfg carries the AUX_CTRL fast-settle + DSP fields (bits [13:4])
 void pl_aux_set_fast_settle(uint32_t cfg) {
@@ -533,12 +511,12 @@ void pl_aux_set_digout(uint32_t cfg) {
                  (unsigned)((cfg & AUX_CTRL_REG3_STATIC_MASK) >> AUX_CTRL_REG3_STATIC_SHIFT));
 }
 
-// One-shot command injection via slot 3 (sequencer freezes that slot's
-// program for the packet). Requires streaming + sequencer enabled; the
-// response returns two SPI commands later and is captured into STATUS_REG_12.
+// One-shot command injection via the inject slot (the engine freezes that slot's
+// program for the packet). Requires streaming; the response returns two SPI
+// commands later and is captured into STATUS_REG_12.
 int pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms) {
-    if (!pl_is_transmission_active() || !pl_aux_seq_is_enabled()) {
-        send_message("ERROR: inject requires streaming + aux sequencer enabled\r\n");
+    if (!pl_is_transmission_active()) {
+        send_message("ERROR: inject requires streaming\r\n");
         return 0;
     }
     uint32_t ack_before = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET) & AUX_STATUS_INJECT_ACK;

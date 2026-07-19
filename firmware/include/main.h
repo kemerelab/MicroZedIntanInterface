@@ -154,8 +154,7 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // broadband (UDP_PORT / udp_dest_port, default UDP_PORT), demuxed host-side by
 // stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 
-// CTRL_REG_AUX_CTRL bit fields
-#define AUX_CTRL_SEQ_EN             (1u << 0)
+// CTRL_REG_AUX_CTRL bit fields  (bit 0 reserved: aux engine is always on)
 #define AUX_CTRL_BANK_SEL_SHIFT     1          // [3:1] bank select, 1 bit per slot
 #define AUX_CTRL_BANK_SEL_MASK      (0x7u << 1)
 #define AUX_CTRL_FS_SW              (1u << 4)  // software amp fast settle level
@@ -212,7 +211,7 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 
 // STATUS_REG_11 bit fields
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
-#define AUX_STATUS_SEQ_EN            (1u << 3) // per-packet latched aux_seq_en
+#define AUX_STATUS_ENGINE_ON         (1u << 3) // always 1 (aux engine always on)
 #define AUX_STATUS_FS_ACTIVE         (1u << 4)
 #define AUX_STATUS_DIGOUT            (1u << 5)
 #define AUX_STATUS_DSP_ACTIVE        (1u << 6)
@@ -578,8 +577,6 @@ void pl_aux_write_length(int slot, int bank, int loop_idx, int end_idx);
 int  pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop_idx);
 void pl_aux_select_bank(int slot, int bank);
 int  pl_aux_confirm_bank(int slot, int bank, int timeout_ms);
-void pl_aux_seq_enable(int enable);
-int  pl_aux_seq_is_enabled(void);
 void pl_aux_set_fast_settle(uint32_t cfg);   // AUX_CTRL fs/dsp bit fields [13:4]
 void pl_aux_set_digout(uint32_t cfg);        // AUX_CTRL digout fields [18:14] + reg3_static [31:24]
 int  pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms);

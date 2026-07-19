@@ -57,7 +57,7 @@ ID   | Command          | Param1              | Param2
 // Aux command sequencer / override layer (Epic A)
 #define CMD_AUX_WRITE_WORD  0x70   // param1 = slot | bank<<8 | is_len<<16; param2 = addr<<16 | data
 #define CMD_AUX_BANK_SELECT 0x71   // param1 = slot; param2 = bank (confirms swap before ACK)
-#define CMD_AUX_SEQ_EN      0x72   // param1 = 0/1
+// 0x72 retired (was CMD_AUX_SEQ_EN): the aux command engine is always on
 #define CMD_READ_REGISTER   0x73   // param1 = reg; responds 4-byte {cipo1,cipo0} result
 #define CMD_WRITE_REGISTER  0x74   // param1 = reg; param2 = value; responds 4-byte echo
 #define CMD_SET_FAST_SETTLE 0x75   // param1 = amp: sw | gpio_en<<1 | pin<<4; param2 = dsp: same layout
@@ -487,11 +487,6 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
                          slot, bank, status == ACK_SUCCESS ? "OK" : "TIMEOUT");
             break;
         }
-
-        case CMD_AUX_SEQ_EN:
-            pl_aux_seq_enable(cmd->param1 ? 1 : 0);
-            send_message("Binary Command: AUX_SEQ_EN %u\r\n", cmd->param1 ? 1 : 0);
-            break;
 
         case CMD_READ_REGISTER: {
             uint32_t result = 0;
