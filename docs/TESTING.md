@@ -20,9 +20,8 @@ bash run_dualport_dropout_tb.sh     # THE broadband integrity check (run this fi
 | `dualport_dropout_tb.sv` | `run_dualport_dropout_tb.sh` | **Broadband data integrity**: every data word out of the wrapper is byte‑exact vs the RTL sine reference across both cable ports, and SEQ/timestamp advance +1/packet with no gaps. This is the canonical "no dropout / no loss" proof. |
 | `chirp_tb.sv` | `run_chirp_tb.sh` | The analytic **chirp NCO** (debug‑mode synthetic sweep) is bit‑exact vs the Python reference (`gen_chirp_vectors.py`). Captures the 35 data words/packet off the FIFO write interface (7‑word header skipped). |
 | `fifo_bram_dualport_tb.sv` | `run_fifo_bram_dualport_tb.sh` | FIFO→BRAM dual‑port write/read path. |
-| `aux_command_sequencer_tb.sv` | `run_aux_seq_tb.sh` | Aux command sequencer (banked COPI programs + atomic bank swap). |
-| `override_layer_tb.sv` | `run_override_tb.sh` | Fast‑settle / digout / DSP‑reset override layer. |
-| `data_generator_aux_tb.sv` | `run_aux_integration_tb.sh` | Core + aux sequencer integration. |
+| `aux_command_engine_tb.sv` | `run_aux_engine_tb.sh` | The merged **aux command engine** (banked looping store + real‑time fast‑settle / digout / DSP‑reset override + one‑shot injection), checked against expected values using the named roles from `acq_frame_pkg`. |
+| `data_generator_aux_wire_tb.sv` | `run_aux_wire_tb.sh` | Aux **wire‑level integration**: decodes the serialized COPI out of the real core and verifies the always‑on aux commands (channel CONVERTs, the programmed aux loop, fast‑settle replace / D5‑force, injection) reach the chip. |
 | `axi_lite_write_tb.sv`, `tb_axi_read_bram_ctrl.sv` | `run_axi_write_tb.sh`, `run_axi_read_sim.sh` | AXI‑Lite register write + BRAM‑controller read paths. |
 
 Regenerate the chirp reference vectors (only if you change the NCO): `python3 gen_chirp_vectors.py`.

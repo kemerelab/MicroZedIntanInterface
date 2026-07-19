@@ -10,8 +10,8 @@ python3 "$HERE/gen_chirp_vectors.py" || exit 1
 cp "$HERE/chirp_exp.hex" "$WORK/" || exit 1
 
 cd "$WORK" || exit 99
-xvlog -sv "$SRC/data_generator_core.sv" "$SRC/aux_command_sequencer.sv" \
-      "$SRC/override_layer.sv" "$HERE/chirp_tb.sv" || exit 1
+xvlog -sv "$SRC/acq_frame_pkg.sv" "$SRC/data_generator_core.sv" "$SRC/aux_command_engine.sv" \
+      "$HERE/chirp_tb.sv" || exit 1
 xvlog "$SRC/CIPO_phase_selector.v" || exit 1
 xelab -debug off -timescale 1ns/1ps work.chirp_tb -s tb_snap || exit 1
 xsim tb_snap -R | tee sim.log
