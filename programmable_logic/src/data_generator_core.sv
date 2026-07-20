@@ -264,57 +264,9 @@ test_signal_gen test_signal_gen_inst (
 // ============================================================================
 // AUX COMMAND ENGINE + OVERRIDE (always on -> un-programmed = legacy static aux)
 // ============================================================================
-// Control register decode (regs 22..24, already PL-domain after the CDC):
-//   reg 22: [0] reserved, [2:1] prog_bank_select (slot-1, slot-2 live bank),
-//           [3] reserved, [4] fs_sw, [5] fs_gpio_en, [8:6] fs_gpio_sel,
-//           [9] dsp_sw, [10] dsp_gpio_en, [13:11] dsp_gpio_sel,
-//           [14] digout_sw, [15] digout_gpio_en, [18:16] digout_gpio_sel,
-//           [31:24] reg3_static (host-owned Reg-3 bits D7..D1; D0 substituted)
-//   reg 23: write port payload: [15:0] data, [21:16] addr,
-//           [23:22] target (0 = slot-1 program, 1 = slot-2 program,
-//                           2 = slot-0 RT command register),
-//           [24] bank, [25] is_length
-//   reg 24: [0] write toggle (edge = strobe one word), [1] inject toggle,
-//           [31:16] inject command (one-shot slot-2 injection)
-// reg 22 bit 0 (was aux_seq_en) is reserved: the aux engine is always on. Only
-// the two cycling programs (slots 1,2) have a bank; slot 0 is a plain register.
-wire [1:0]  aux_bank_sel    = ctrl_regs_pl[22*32 + 1 +: 2];
-wire        aux_fs_sw       = ctrl_regs_pl[22*32 + 4];
-wire        aux_fs_gpio_en  = ctrl_regs_pl[22*32 + 5];
-wire [2:0]  aux_fs_gpio_sel = ctrl_regs_pl[22*32 + 6 +: 3];
-wire        aux_dsp_sw      = ctrl_regs_pl[22*32 + 9];
-wire        aux_dsp_gpio_en = ctrl_regs_pl[22*32 + 10];
-wire [2:0]  aux_dsp_gpio_sel = ctrl_regs_pl[22*32 + 11 +: 3];
-wire        aux_dig_sw      = ctrl_regs_pl[22*32 + 14];
-wire        aux_dig_gpio_en = ctrl_regs_pl[22*32 + 15];
-wire [2:0]  aux_dig_gpio_sel = ctrl_regs_pl[22*32 + 16 +: 3];
-wire [7:0]  aux_reg3_static = ctrl_regs_pl[22*32 + 24 +: 8];
-wire [15:0] aux_wr_data     = ctrl_regs_pl[23*32 + 0 +: 16];
-wire [5:0]  aux_wr_addr     = ctrl_regs_pl[23*32 + 16 +: 6];
-wire [1:0]  aux_wr_target   = ctrl_regs_pl[23*32 + 22 +: 2];
-wire        aux_wr_bank     = ctrl_regs_pl[23*32 + 24];
-wire        aux_wr_is_len   = ctrl_regs_pl[23*32 + 25];
-wire        aux_wr_toggle   = ctrl_regs_pl[24*32 + 0];
-wire        aux_inj_toggle  = ctrl_regs_pl[24*32 + 1];
-wire [15:0] aux_inj_cmd     = ctrl_regs_pl[24*32 + 16 +: 16];
-
-// Toggle -> 1-cycle pulse converters (payload regs are written by the host in
-// prior AXI transactions, so they are long stable when the toggle flips).
-logic aux_wr_toggle_d, aux_inj_toggle_d;
-logic aux_wr_en, aux_inj_req;
-always_ff @(posedge clk) begin
-    if (!rstn) begin
-        aux_wr_toggle_d  <= 1'b0;
-        aux_inj_toggle_d <= 1'b0;
-        aux_wr_en        <= 1'b0;
-        aux_inj_req      <= 1'b0;
-    end else begin
-        aux_wr_toggle_d  <= aux_wr_toggle;
-        aux_inj_toggle_d <= aux_inj_toggle;
-        aux_wr_en        <= aux_wr_toggle  ^ aux_wr_toggle_d;
-        aux_inj_req      <= aux_inj_toggle ^ aux_inj_toggle_d;
-    end
-end
+// Aux control registers 22..24 are decoded INSIDE aux_command_engine (bank
+// select, fast-settle/DSP/digout config, the write port, inject/write toggles).
+// The framing loop just forwards the three raw register words to the engine.
 
 // Packet strobes. packet_start = first state of each transmitted packet (same
 // instant digital_in is latched); seq_advance = last state (use-then-advance,
@@ -338,26 +290,11 @@ aux_command_engine #(.ADDR_W(6)) aux_engine_inst (
     .seq_advance        (seq_advance),
     .packet_start       (packet_start),
     .transmission_active(transmission_active),
-    .prog_bank_select   (aux_bank_sel),
-    .wr_en              (aux_wr_en),
-    .wr_target          (aux_wr_target),
-    .wr_bank            (aux_wr_bank),
-    .wr_is_length       (aux_wr_is_len),
-    .wr_addr            (aux_wr_addr),
-    .wr_data            (aux_wr_data),
-    .inject_req         (aux_inj_req),
-    .inject_cmd         (aux_inj_cmd),
     .digital_in         (digital_in),
-    .fs_sw              (aux_fs_sw),
-    .fs_gpio_en         (aux_fs_gpio_en),
-    .fs_gpio_sel        (aux_fs_gpio_sel),
-    .dsp_sw             (aux_dsp_sw),
-    .dsp_gpio_en        (aux_dsp_gpio_en),
-    .dsp_gpio_sel       (aux_dsp_gpio_sel),
-    .digout_sw          (aux_dig_sw),
-    .digout_gpio_en     (aux_dig_gpio_en),
-    .digout_gpio_sel    (aux_dig_gpio_sel),
-    .reg3_static        (aux_reg3_static),
+    // The engine decodes these three raw registers itself.
+    .aux_ctrl_reg       (ctrl_regs_pl[22*32 +: 32]),
+    .aux_write_reg      (ctrl_regs_pl[23*32 +: 32]),
+    .aux_strobe_reg     (ctrl_regs_pl[24*32 +: 32]),
     .aux_cmds           (aux_cmds_final),
     .dsp_force_h        (aux_dsp_force_h),
     .fast_settle_active (aux_fs_active),

@@ -1,13 +1,13 @@
 // aux_command_engine_tb.sv
 //
-// Spec-based self-checking testbench for aux_command_engine. Drives the engine at
-// the packet cadence (packet_start latches the override, seq_advance advances the
-// programs one entry) and checks the final aux_cmds + override outputs against
-// directly-expected values. Uses the named roles from acq_frame_pkg.
+// Spec-based self-checking testbench for aux_command_engine. Drives the engine
+// through its three raw control registers (reg 22/23/24) the same way the host
+// does -- so this also exercises the engine's own register decode + toggle->pulse
+// edge detection -- and checks the final aux_cmds + override outputs.
 //
 // Verifies the invariants of the reworked engine:
-//   * slot 0 is a single fixed RT register (set via wr_target 0) -- it does NOT
-//     cycle; the override fast-settle whole-replaces it and forces WRITE(0) D5.
+//   * slot 0 is a single fixed RT register (write target 0) -- it does NOT cycle;
+//     the override fast-settle whole-replaces it and forces WRITE(0) D5.
 //   * slots 1 & 2 are cycling programs (aux_program): step one entry per packet,
 //     loop end->loop, independent, atomic bank swap at the boundary.
 //   * slot 2 one-shot injection replaces one packet, freezes the index, resumes.
@@ -29,17 +29,12 @@ task automatic chk(input string what, input logic [15:0] got, input logic [15:0]
     if (got !== exp) begin n_errors++; $display("ERROR: %s got=%04h exp=%04h", what, got, exp); end
 endtask
 
-// DUT I/O
+// DUT I/O -- the engine now owns its register decode, so we drive the raw words.
 logic seq_advance = 0, packet_start = 0, transmission_active = 0;
-logic [1:0] prog_bank_select = '0;                 // [0]=slot1, [1]=slot2
-logic wr_en = 0; logic [1:0] wr_target = 0; logic wr_bank = 0, wr_is_length = 0;
-logic [5:0] wr_addr = 0; logic [15:0] wr_data = 0;
-logic inject_req = 0; logic [15:0] inject_cmd = 0;
-logic [7:0] digital_in = 0;
-logic fs_sw = 0, fs_gpio_en = 0; logic [2:0] fs_gpio_sel = 0;
-logic dsp_sw = 0, dsp_gpio_en = 0; logic [2:0] dsp_gpio_sel = 0;
-logic digout_sw = 0, digout_gpio_en = 0; logic [2:0] digout_gpio_sel = 0;
-logic [7:0] reg3_static = 8'h1C;      // temp on, digout HiZ=0
+logic [7:0]  digital_in = 0;
+logic [31:0] ctrl_reg   = 32'h1C00_0000;   // reg 22: reg3_static = 0x1C in [31:24]
+logic [31:0] write_reg  = 0;               // reg 23: write port payload
+logic [31:0] strobe_reg = 0;               // reg 24: toggles + inject command
 logic [N_AUX*16-1:0] aux_cmds;
 logic dsp_force_h, fast_settle_active, digout_state, inject_active;
 logic [N_AUX-1:0] bank_active;
@@ -49,15 +44,8 @@ aux_command_engine #(.ADDR_W(6)) dut (
     .clk(clk), .rstn(rstn),
     .seq_advance(seq_advance), .packet_start(packet_start),
     .transmission_active(transmission_active),
-    .prog_bank_select(prog_bank_select),
-    .wr_en(wr_en), .wr_target(wr_target), .wr_bank(wr_bank),
-    .wr_is_length(wr_is_length), .wr_addr(wr_addr), .wr_data(wr_data),
-    .inject_req(inject_req), .inject_cmd(inject_cmd),
     .digital_in(digital_in),
-    .fs_sw(fs_sw), .fs_gpio_en(fs_gpio_en), .fs_gpio_sel(fs_gpio_sel),
-    .dsp_sw(dsp_sw), .dsp_gpio_en(dsp_gpio_en), .dsp_gpio_sel(dsp_gpio_sel),
-    .digout_sw(digout_sw), .digout_gpio_en(digout_gpio_en), .digout_gpio_sel(digout_gpio_sel),
-    .reg3_static(reg3_static),
+    .aux_ctrl_reg(ctrl_reg), .aux_write_reg(write_reg), .aux_strobe_reg(strobe_reg),
     .aux_cmds(aux_cmds), .dsp_force_h(dsp_force_h),
     .fast_settle_active(fast_settle_active), .digout_state(digout_state),
     .inject_active(inject_active), .bank_active(bank_active), .slot_indices(slot_indices)
@@ -66,10 +54,22 @@ aux_command_engine #(.ADDR_W(6)) dut (
 function automatic logic [15:0] slot(input int s); return aux_cmds[s*16 +: 16]; endfunction
 function automatic logic [15:0] convert_default(input int s); return {2'b00, 6'(AUX_CYC0 + s), 8'h00}; endfunction
 
+// Host-style stimulus: payloads are set first, then a toggle flip strobes them.
+bit wr_tog = 0, inj_tog = 0;
+logic [15:0] inj_cmd_hold = 0;
+task automatic push_strobe;  strobe_reg = {inj_cmd_hold, 14'b0, inj_tog, wr_tog}; endtask
+
 // One write via the unified port. target IS the slot index (0=RT reg, 1/2=programs).
 task automatic aw(input int target, input bit bank, input bit is_len, input logic [5:0] addr, input logic [15:0] data);
-    @(negedge clk); wr_en = 1; wr_target = 2'(target); wr_bank = bank; wr_is_length = is_len; wr_addr = addr; wr_data = data;
-    @(negedge clk); wr_en = 0;
+    write_reg = {6'b0, is_len, bank, 2'(target), addr, data};
+    @(negedge clk);
+    wr_tog = ~wr_tog; push_strobe();        // engine turns the edge into a 1-cycle wr_en
+    repeat (4) @(negedge clk);
+endtask
+// Arm a one-shot injection (slot 2). Consumed at the next seq_advance.
+task automatic arm_inject(input logic [15:0] cmd);
+    inj_cmd_hold = cmd; inj_tog = ~inj_tog; push_strobe();
+    repeat (2) @(negedge clk);              // let inject_pending latch before end_packet
 endtask
 
 // Latch override state for the current packet (aux_cmds becomes valid ~now)
@@ -119,7 +119,7 @@ initial begin
     end_packet();
 
     // ---- C. WRITE(0) D5 force + fast-settle whole-replace on the RT slot ----
-    fs_sw = 1;              // ON edge on the next packet_start
+    ctrl_reg[4] = 1'b1;    // fs_sw ON edge on the next packet_start
     start_packet();
     chk("fs ON inject", slot(AUX_FS_SLOT), RHD_WR0_FS_ON);
     n_checks++; if (fast_settle_active !== 1'b1) begin n_errors++; $display("ERROR: fast_settle_active not set"); end
@@ -127,22 +127,21 @@ initial begin
     start_packet();        // steady ON: RT slot's WRITE(0) gets D5 forced, no whole-replace
     chk("fs steady D5", slot(AUX_FS_SLOT), 16'h8000 | (16'h1 << RHD_FS_BIT));
     end_packet();
-    fs_sw = 0;             // OFF edge
+    ctrl_reg[4] = 1'b0;    // fs_sw OFF edge
     start_packet();
     chk("fs OFF inject", slot(AUX_FS_SLOT), RHD_WR0_FS_OFF);
     end_packet();
 
     // ---- D. DSP reset follows dsp_sw (packet-latched) ----
-    dsp_sw = 1; start_packet();
+    ctrl_reg[9] = 1'b1; start_packet();
     n_checks++; if (dsp_force_h !== 1'b1) begin n_errors++; $display("ERROR: dsp_force_h not set"); end
     end_packet();
-    dsp_sw = 0; start_packet();
+    ctrl_reg[9] = 1'b0; start_packet();
     n_checks++; if (dsp_force_h !== 1'b0) begin n_errors++; $display("ERROR: dsp_force_h stuck"); end
     end_packet();
 
     // ---- E. one-shot injection on slot 2: replaces one packet, freezes, resumes ----
-    inject_cmd = 16'hFE00;                        // READ(62)
-    @(negedge clk); inject_req = 1; @(negedge clk); inject_req = 0;   // arm: inject_pending=1
+    arm_inject(16'hFE00);                         // READ(62); inject_pending latches
     end_packet();                                 // seq_advance consumes -> inject_active for the next packet
     start_packet();                               // the injected packet
     chk("inject on wire", slot(AUX_INJECT_SLOT), 16'hFE00);
@@ -154,7 +153,7 @@ initial begin
     end_packet();
 
     // ---- F. bank swap lands at a boundary; bank_active confirms (slot 1) ----
-    prog_bank_select[0] = 1;                       // slot 1 -> bank 1
+    ctrl_reg[1] = 1'b1;                           // prog_bank_select[0] -> slot 1 bank 1
     end_packet();                                 // request; swap applies at boundary
     start_packet();
     n_checks++; if (bank_active[AUX_PLAIN_SLOT] !== 1'b1) begin n_errors++; $display("ERROR: bank_active did not confirm swap"); end
