@@ -5,7 +5,7 @@ set -o pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../src"
 WORK="$(mktemp -d)"; cd "$WORK" || exit 99
-xvlog -sv "$SRC/acq_frame_pkg.sv" "$SRC/aux_command_engine.sv" "$SRC/data_generator_core.sv" \
+xvlog -sv "$SRC/acq_frame_pkg.sv" "$SRC/aux_command_engine.sv" "$SRC/aux_program.sv" "$SRC/data_generator_core.sv" "$SRC/test_signal_gen.sv" \
       "$HERE/data_generator_aux_wire_tb.sv" || exit 1
 xvlog "$SRC/CIPO_phase_selector.v" || exit 1
 xelab -debug off -timescale 1ns/1ps work.data_generator_aux_wire_tb -s tb_snap || exit 1

@@ -136,9 +136,9 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define CTRL_CHIRP_RATE_SHIFT    20
 #define CTRL_CHIRP_RATE_MASK     (0xFFFu << 20)
 
-// Aux command sequencer / override layer control registers (PL regs 22..24)
-#define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // enable, bank select, fast settle/digout/dsp config
-#define CTRL_REG_AUX_WRITE_OFFSET   (23 * 4)  // bank write port payload
+// Aux command engine / override control registers (PL regs 22..24)
+#define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // prog bank select + fast settle/digout/dsp config
+#define CTRL_REG_AUX_WRITE_OFFSET   (23 * 4)  // write port payload (RT reg / program)
 #define CTRL_REG_AUX_STROBE_OFFSET  (24 * 4)  // write/inject toggles + inject command
 
 // LFP/DSP engine control registers (PL regs 25..27; see lfp_dsp_block.sv)
@@ -155,8 +155,11 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 
 // CTRL_REG_AUX_CTRL bit fields  (bit 0 reserved: aux engine is always on)
-#define AUX_CTRL_BANK_SEL_SHIFT     1          // [3:1] bank select, 1 bit per slot
-#define AUX_CTRL_BANK_SEL_MASK      (0x7u << 1)
+// Program live-bank select: reg22 bit s selects slot s's bank. Only the two
+// cycling programs have a bank (s = 1, 2); slot 0 is a fixed register (bit 0
+// reserved, bit 3 free).
+#define AUX_CTRL_BANK_BIT(slot)     (1u << (slot))   // bank bit for slot in {1,2}
+#define AUX_CTRL_BANK_SEL_MASK      (0x3u << 1)       // [2:1]
 #define AUX_CTRL_FS_SW              (1u << 4)  // software amp fast settle level
 #define AUX_CTRL_FS_GPIO_EN         (1u << 5)
 #define AUX_CTRL_FS_GPIO_SEL_SHIFT  6          // [8:6] digital_in pin select
@@ -172,12 +175,14 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define AUX_CTRL_REG3_STATIC_SHIFT  24         // [31:24] RHD Reg-3 bits D7..D1 (D0 = live digout)
 #define AUX_CTRL_REG3_STATIC_MASK   (0xFFu << 24)
 
-// CTRL_REG_AUX_WRITE packing: [15:0] data, [21:16] addr, [23:22] slot,
-// [24] bank, [25] is_length (length record data = {2'b0,end[5:0],2'b0,loop[5:0]})
-#define AUX_WRITE_PACK(slot, bank, is_len, addr, data) \
+// CTRL_REG_AUX_WRITE packing: [15:0] data, [21:16] addr, [23:22] target,
+// [24] bank, [25] is_length (length record data = {2'b0,end[5:0],2'b0,loop[5:0]}).
+// target IS the slot index: 0 = slot-0 RT command register (single word;
+// bank/addr/is_length ignored), 1 = slot-1 program, 2 = slot-2 program.
+#define AUX_WRITE_PACK(target, bank, is_len, addr, data) \
     ( ((uint32_t)(data) & 0xFFFFu)            | \
       (((uint32_t)(addr) & 0x3Fu)   << 16)    | \
-      (((uint32_t)(slot) & 0x3u)    << 22)    | \
+      (((uint32_t)(target) & 0x3u)  << 22)    | \
       (((uint32_t)(bank) & 0x1u)    << 24)    | \
       (((uint32_t)(is_len) & 0x1u)  << 25) )
 #define AUX_LENGTH_DATA(loop_idx, end_idx) \
@@ -186,9 +191,9 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // CTRL_REG_AUX_STROBE bits
 #define AUX_STROBE_WRITE_TOGGLE     (1u << 0)
 #define AUX_STROBE_INJECT_TOGGLE    (1u << 1)
-#define AUX_STROBE_INJECT_CMD_SHIFT 16         // [31:16] injected command
+#define AUX_STROBE_INJECT_CMD_SHIFT 16         // [31:16] injected command (slot-2 one-shot)
 
-// Bank size (entries per bank; matches aux_command_sequencer ADDR_W=6)
+// Program size (entries per bank; matches aux_program ADDR_W=6)
 #define AUX_BANK_ENTRIES            64
 
 // Status register offsets (status block starts after the control block)
@@ -209,16 +214,17 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 #define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
 
-// STATUS_REG_11 bit fields
-#define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
+// STATUS_REG_11 bit fields. Slot 0 is the fixed RT register: its bank bit and
+// index always read 0 (only slots 1,2 cycle).
+#define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot (bit0=slot0=0)
 #define AUX_STATUS_ENGINE_ON         (1u << 3) // always 1 (aux engine always on)
 #define AUX_STATUS_FS_ACTIVE         (1u << 4)
 #define AUX_STATUS_DIGOUT            (1u << 5)
 #define AUX_STATUS_DSP_ACTIVE        (1u << 6)
 #define AUX_STATUS_INJECT_ACK        (1u << 7) // toggles when an injection result lands
-#define AUX_STATUS_IDX0_SHIFT        8         // [13:8]  slot-0 index
-#define AUX_STATUS_IDX1_SHIFT        16        // [21:16] slot-1 index
-#define AUX_STATUS_IDX2_SHIFT        24        // [29:24] slot-2 index
+#define AUX_STATUS_IDX0_SHIFT        8         // [13:8]  slot-0 index (always 0: RT register)
+#define AUX_STATUS_IDX1_SHIFT        16        // [21:16] slot-1 program index
+#define AUX_STATUS_IDX2_SHIFT        24        // [29:24] slot-2 program index
 #define AUX_STATUS_IDX_MASK          0x3Fu
 
 // RHD2000 SPI command encodings (datasheet-confirmed)

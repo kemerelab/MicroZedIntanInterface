@@ -1861,9 +1861,19 @@ def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
         print(f"[AUX] Slot {slot} bank {bank}: {len(cmds)} commands (loop at {loop_idx})")
     return ok
 
+def aux_set_rt_command(sock, cmd):
+    """Set slot 0's fixed RT command (cycle 32). Slot 0 does NOT cycle -- it is a
+    single register the override rewrites live (fast-settle whole-replace / Reg-3
+    digout). Writes target 0 with bank/addr ignored by the PL."""
+    ok, _ = send_binary_command(sock, CMD_AUX_WRITE_WORD, 0, cmd & 0xFFFF)
+    if ok:
+        print(f"[AUX] slot 0 RT command <- {rhd_decode(cmd)}")
+    return ok
+
 def aux_bank_select(sock, slot, bank):
-    """Atomically swap a slot to a bank at the next packet boundary.
-    The firmware confirms the swap (bank_active poll) before ACKing."""
+    """Atomically swap a cycling program (slot 1 or 2) to a bank at the next packet
+    boundary. The firmware confirms the swap (bank_active poll) before ACKing.
+    Slot 0 has no bank (the firmware treats a slot-0 select as a confirmed no-op)."""
     ok, _ = send_binary_command(sock, CMD_AUX_BANK_SELECT, slot & 3, bank & 1)
     print(f"[AUX] Slot {slot} -> bank {bank}: {'OK' if ok else 'FAILED'}")
     return ok
@@ -1915,10 +1925,12 @@ def set_digout(sock, sw=False, gpio_en=False, pin=0, reg3_static=0x00):
     return ok
 
 def aux_demo_setup(sock):
-    """Load the default slot programs (the aux command engine is always on):
-    slot 0 = Reg-3 carrier (digout mirror), slot 1 = accel sweep @10 kHz,
-    slot 2 = supply/temp/link housekeeping."""
-    return (aux_upload_bank(sock, 0, 0, AUX_SLOT0_DEFAULT) and
+    """Load the default aux commands (the aux command engine is always on):
+    slot 0 = fixed RT command (Reg-3 digout carrier, rewritten live by the
+             override) -- a single register that does NOT cycle;
+    slot 1 = accel sweep program @10 kHz (cycles);
+    slot 2 = supply/temp/link housekeeping program (cycles)."""
+    return (aux_set_rt_command(sock, AUX_SLOT0_DEFAULT[0]) and
             aux_upload_bank(sock, 1, 0, AUX_SLOT1_DEFAULT) and
             aux_upload_bank(sock, 2, 0, AUX_SLOT2_DEFAULT))
 
@@ -2131,8 +2143,8 @@ def print_status(status):
           f"Digout: {status['aux_digout']}, "
           f"DSP Reset: {status['aux_dsp_reset']}")
     ba = status['aux_bank_active']
-    print(f"Active Banks: slot0={ba & 1}, slot1={(ba >> 1) & 1}, slot2={(ba >> 2) & 1}")
-    print(f"Slot Indices: {status['aux_indices']}")
+    print(f"Active Banks: slot1={(ba >> 1) & 1}, slot2={(ba >> 2) & 1}  (slot0 = fixed RT register)")
+    print(f"Slot Indices: {status['aux_indices']}  (slot0 index always 0: RT register)")
     print(f"Last Inject Result: 0x{status['aux_read_result']:08X}")
     def _src(sw, gp, pin):
         return f"GPIO pin {pin}" if gp else ("software" if sw else "off")

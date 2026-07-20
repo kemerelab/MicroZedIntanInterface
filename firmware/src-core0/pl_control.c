@@ -436,6 +436,8 @@ static void aux_strobe_write(uint32_t payload) {
     usleep(2);   // > a few PL clocks for the CDC + strobe
 }
 
+// slot is the write target (= slot index): 0 = the fixed RT command register
+// (a single word; bank/addr are ignored by the PL), 1/2 = the cycling programs.
 void pl_aux_write_word(int slot, int bank, int addr, uint16_t data) {
     aux_strobe_write(AUX_WRITE_PACK(slot, bank, 0, addr, data));
 }
@@ -461,8 +463,9 @@ int pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop
 }
 
 void pl_aux_select_bank(int slot, int bank) {
+    if (slot == 0) return;                 // slot 0 is the fixed RT register: no bank
     uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
-    uint32_t bit = 1u << (AUX_CTRL_BANK_SEL_SHIFT + slot);
+    uint32_t bit = AUX_CTRL_BANK_BIT(slot); // reg22 bit s selects slot s's bank (s in {1,2})
     if (bank) ctrl |= bit; else ctrl &= ~bit;
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
 }
@@ -470,6 +473,7 @@ void pl_aux_select_bank(int slot, int bank) {
 // Confirm-before-reuse handshake: the swap latches at a packet boundary
 // (immediately when not streaming). Returns 1 once bank_active[slot]==bank.
 int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
+    if (slot == 0) return 1;               // RT register: no bank to swap -> always confirmed
     for (int waited = 0; waited <= timeout_ms * 1000; waited += 100) {
         uint32_t s11 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET);
         if (((s11 >> slot) & 1u) == (uint32_t)(bank ? 1 : 0))

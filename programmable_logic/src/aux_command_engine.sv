@@ -1,29 +1,36 @@
 // aux_command_engine.sv
 //
 // The single command source for the 3 auxiliary COPI positions of the RHD frame
-// (cycles AUX_CYC0..LAST_CYC). It merges what used to be three bolted-together
-// pieces -- aux_command_sequencer (banked looping store), override_layer (the
-// real-time fast-settle / digout / DSP-reset rewrite), and the core's aux mux --
-// into one module whose fixed roles are NAMED, not disguised as parameters:
+// (cycles AUX_CYC0..LAST_CYC). The three positions have DIFFERENT roles, so they
+// are wired as three NAMED things -- not a homogeneous array you loop over:
 //
-//   slot AUX_FS_SLOT     (cycle 32): the ONLY slot fast-settle whole-replaces
-//   slot AUX_PLAIN_SLOT  (cycle 33): plain looping program
-//   slot AUX_INJECT_SLOT (cycle 34): runtime READ/WRITE-register injection
+//   slot 0 (cycle 32, AUX_FS_SLOT)     : a single fixed RT command register.
+//                                        Does not cycle. The override rewrites it
+//                                        live (fast-settle whole-replace, Reg-3
+//                                        digout). Default CONVERT(32).
+//   slot 1 (cycle 33, AUX_PLAIN_SLOT)  : one cycling program (aux_program) --
+//                                        the ADC/accelerometer sweep.
+//   slot 2 (cycle 34, AUX_INJECT_SLOT) : one cycling program (aux_program) --
+//                                        the housekeeping rotation -- AND the
+//                                        target of one-shot register injection,
+//                                        which freezes the rotation for a packet.
 //
-// Aux is ALWAYS ON (there is no enable): the store powers up with each slot's
-// legacy CONVERT(AUX_CYC0+slot), so an un-programmed board emits exactly the
-// legacy static aux stream, and the override is pass-through until fast-settle /
-// digout / DSP-reset are actually requested. Removing the old `aux_seq_en` gate
-// also removes its footgun -- the fast-settle OFF injection can no longer be
-// stranded by "disable before clearing the config" (there is no disable).
+// Only the two slots that genuinely cycle instantiate the banked sequencer
+// (aux_program); the RT slot is a plain register. This is the whole point of the
+// module: the structure states which slots cycle and which don't.
 //
-// Pipeline: banked store -> per-packet index -> registered read -> override
-// rewrite -> aux_cmds. The command settles ~2500 clocks before it serializes.
+// Aux is ALWAYS ON (there is no enable): the RT register + both programs power up
+// with their legacy CONVERT(AUX_CYC0+slot), so an un-programmed board emits
+// exactly the legacy static aux stream, and the override is pass-through until
+// fast-settle / digout / DSP-reset are actually requested.
+//
+// Pipeline: RT reg / program read -> injection mux -> override rewrite -> aux_cmds.
+// The command settles ~2500 clocks before it serializes.
 
 import acq_frame_pkg::*;
 
 module aux_command_engine #(
-    parameter integer ADDR_W = 6              // log2(entries per bank) = 64
+    parameter integer ADDR_W = 6              // log2(entries per program bank) = 64
 )(
     input  logic clk,
     input  logic rstn,
@@ -33,18 +40,22 @@ module aux_command_engine #(
     input  logic packet_start,         // 1-cycle pulse at the FIRST state of each packet
     input  logic transmission_active,  // low => idle: indices park at 0, swaps apply now
 
-    // Bank selection (quasi-static, CDC-synced): one bit per aux slot
-    input  logic [N_AUX-1:0] bank_select,
+    // Live bank per cycling program: [0] = slot 1, [1] = slot 2 (CDC-synced)
+    input  logic [1:0]  prog_bank_select,
 
-    // Program write port (1-cycle pulse, PL clock domain)
+    // Unified write port (1-cycle pulse). wr_target is the SLOT INDEX:
+    //   0 (AUX_FS_SLOT)     = slot-0 RT command register (single word; bank/addr/
+    //                         is_length ignored),
+    //   1 (AUX_PLAIN_SLOT)  = slot-1 program,
+    //   2 (AUX_INJECT_SLOT) = slot-2 program.
     input  logic        wr_en,
-    input  logic [1:0]  wr_slot,
+    input  logic [1:0]  wr_target,
+    input  logic        wr_is_length,  // program length record (ignored for RT target)
     input  logic        wr_bank,
-    input  logic        wr_is_length,
     input  logic [ADDR_W-1:0] wr_addr,
-    input  logic [15:0] wr_data,       // length record: {2'b0, end[5:0], 2'b0, loop[5:0]}
+    input  logic [15:0] wr_data,       // length record: {.., end[13:8], .., loop[5:0]}
 
-    // One-shot injection (AUX_INJECT_SLOT only)
+    // One-shot injection (slot 2 only)
     input  logic        inject_req,
     input  logic [15:0] inject_cmd,
 
@@ -68,95 +79,62 @@ module aux_command_engine #(
     output logic                    fast_settle_active,
     output logic                    digout_state,
     output logic                    inject_active,
+    // Status: slot 0 has no bank/index (RT register) -> reported as 0.
     output logic [N_AUX-1:0]        bank_active,
     output logic [N_AUX*ADDR_W-1:0] slot_indices
 );
 
-localparam integer ENTRIES = (1 << ADDR_W);
+// Legacy static command per slot: CONVERT(AUX_CYC0 + slot) = {2'b00, ch, 8'h00}.
+localparam logic [15:0] RT_DEFAULT    = {2'b00, 6'(AUX_CYC0 + AUX_FS_SLOT),     8'h00}; // CONVERT(32)
+localparam logic [15:0] PROG1_DEFAULT = {2'b00, 6'(AUX_CYC0 + AUX_PLAIN_SLOT),  8'h00}; // CONVERT(33)
+localparam logic [15:0] PROG2_DEFAULT = {2'b00, 6'(AUX_CYC0 + AUX_INJECT_SLOT), 8'h00}; // CONVERT(34)
 
-// seq_hold high while idle: indices park at 0 and bank swaps apply immediately.
+// seq_hold high while idle: program indices park at 0 and bank swaps apply now.
 wire seq_hold = !transmission_active;
 
 // ===========================================================================
-// Banked, looping command store -- genuinely uniform across the N_AUX slots, so
-// this part IS a generate loop. The per-slot ROLES (inject) are named, not
-// derived from "the last slot".
+// slot 0 -- the fixed RT command register (no bank, no index). Written via the
+// unified write port with wr_target == 2; the override rewrites it downstream.
 // ===========================================================================
-logic [N_AUX*16-1:0] seq_cmds;   // raw (pre-override) sequencer outputs
-logic inject_pending;
-
-genvar s;
-generate
-for (s = 0; s < N_AUX; s++) begin : g_slot
-
-    logic [15:0] mem [0:2*ENTRIES-1];        // 2 banks x ENTRIES, distributed RAM
-    logic [ADDR_W-1:0] loop_idx_r [0:1];
-    logic [ADDR_W-1:0] end_idx_r  [0:1];
-    logic              active_bank;
-    logic [ADDR_W-1:0] index;
-    logic [15:0]       cmd_reg;
-
-    // Power-on: each slot replays its legacy static command CONVERT(AUX_CYC0+s),
-    // so an un-programmed board is bit-identical to the pre-sequencer aux stream.
-    initial begin
-        for (int e = 0; e < 2*ENTRIES; e++)
-            mem[e] = {2'b00, 6'(AUX_CYC0 + s), 8'h00};
-    end
-
-    // Program write port (mem intentionally not reset -> LUTRAM)
-    always_ff @(posedge clk) begin
-        if (wr_en && !wr_is_length && (wr_slot == 2'(s)))
-            mem[{wr_bank, wr_addr}] <= wr_data;
-    end
-
-    always_ff @(posedge clk) begin
-        if (!rstn) begin
-            loop_idx_r[0] <= '0;  end_idx_r[0] <= '0;
-            loop_idx_r[1] <= '0;  end_idx_r[1] <= '0;
-        end else if (wr_en && wr_is_length && (wr_slot == 2'(s))) begin
-            loop_idx_r[wr_bank] <= wr_data[0 +: ADDR_W];
-            end_idx_r[wr_bank]  <= wr_data[8 +: ADDR_W];
-        end
-    end
-
-    // Bank swap + index sequencing (advance one entry per packet, wrap end->loop)
-    always_ff @(posedge clk) begin
-        if (!rstn) begin
-            active_bank <= 1'b0;
-            index       <= '0;
-        end else if (seq_hold) begin
-            active_bank <= bank_select[s];
-            index       <= '0;
-        end else if (seq_advance) begin
-            if (bank_select[s] != active_bank) begin
-                active_bank <= bank_select[s];      // atomic swap at packet boundary
-                index       <= '0;
-            end else if ((s == AUX_INJECT_SLOT) && inject_active) begin
-                index <= index;                     // injection consumed this slot: freeze
-            end else begin
-                index <= (index == end_idx_r[active_bank])
-                         ? loop_idx_r[active_bank]
-                         : index + 1'b1;
-            end
-        end
-    end
-
-    always_ff @(posedge clk)
-        cmd_reg <= mem[{active_bank, index}];       // registered read
-
-    assign bank_active[s] = active_bank;
-    assign slot_indices[s*ADDR_W +: ADDR_W] = index;
-
-    if (s == AUX_INJECT_SLOT) begin : g_inject_mux
-        assign seq_cmds[s*16 +: 16] = inject_active ? inject_cmd : cmd_reg;
-    end else begin : g_plain
-        assign seq_cmds[s*16 +: 16] = cmd_reg;
-    end
+logic [15:0] rt_cmd_r;
+always_ff @(posedge clk) begin
+    if (!rstn)
+        rt_cmd_r <= RT_DEFAULT;
+    else if (wr_en && (wr_target == 2'(AUX_FS_SLOT)) && !wr_is_length)
+        rt_cmd_r <= wr_data;              // single word; a length write here is a no-op
 end
-endgenerate
+
+// ===========================================================================
+// slots 1 & 2 -- the two cycling programs. This is the ONLY banked-sequencer
+// machinery in the design (instantiated exactly twice).
+// ===========================================================================
+logic [15:0]       prog1_cmd, prog2_cmd;
+logic [ADDR_W-1:0] prog1_index, prog2_index;
+logic              prog1_bank, prog2_bank;
+
+aux_program #(.ADDR_W(ADDR_W), .DEFAULT_CMD(PROG1_DEFAULT)) prog1 (
+    .clk(clk), .rstn(rstn),
+    .seq_advance(seq_advance), .seq_hold(seq_hold),
+    .bank_select(prog_bank_select[0]),
+    .freeze(1'b0),                                   // slot 1 never freezes
+    .wr_en(wr_en && (wr_target == 2'(AUX_PLAIN_SLOT))),
+    .wr_is_length(wr_is_length), .wr_bank(wr_bank), .wr_addr(wr_addr), .wr_data(wr_data),
+    .cmd(prog1_cmd), .index(prog1_index), .bank_active(prog1_bank)
+);
+
+aux_program #(.ADDR_W(ADDR_W), .DEFAULT_CMD(PROG2_DEFAULT)) prog2 (
+    .clk(clk), .rstn(rstn),
+    .seq_advance(seq_advance), .seq_hold(seq_hold),
+    .bank_select(prog_bank_select[1]),
+    .freeze(inject_active),                          // hold housekeeping during injection
+    .wr_en(wr_en && (wr_target == 2'(AUX_INJECT_SLOT))),
+    .wr_is_length(wr_is_length), .wr_bank(wr_bank), .wr_addr(wr_addr), .wr_data(wr_data),
+    .cmd(prog2_cmd), .index(prog2_index), .bank_active(prog2_bank)
+);
 
 // One-shot injection control: arm any time; takes effect for the packet that
 // begins at the next boundary, then self-clears.
+logic inject_pending;
 always_ff @(posedge clk) begin
     if (!rstn) begin
         inject_pending <= 1'b0;
@@ -172,6 +150,12 @@ always_ff @(posedge clk) begin
     end
 end
 
+// Assemble the three raw (pre-override) slot commands by NAME.
+logic [N_AUX*16-1:0] seq_cmds;
+assign seq_cmds[AUX_FS_SLOT*16     +: 16] = rt_cmd_r;                                // slot 0
+assign seq_cmds[AUX_PLAIN_SLOT*16  +: 16] = prog1_cmd;                              // slot 1
+assign seq_cmds[AUX_INJECT_SLOT*16 +: 16] = inject_active ? inject_cmd : prog2_cmd; // slot 2
+
 // ===========================================================================
 // Real-time override rewrite (was override_layer). Live trigger levels; latched
 // once per packet at packet_start so a mid-packet pin change can't tear a
@@ -182,7 +166,7 @@ wire dsp_level_now    = dsp_sw    || (dsp_gpio_en    && digital_in[dsp_gpio_sel]
 wire digout_level_now = digout_sw || (digout_gpio_en && digital_in[digout_gpio_sel]);
 
 logic fs_state;      // live Reg-0 D5 value
-logic fs_inject;     // this packet: whole-replace the fast-settle slot
+logic fs_inject;     // this packet: whole-replace the RT slot with fast-settle
 logic dsp_state;
 logic digout_level;
 
@@ -201,7 +185,10 @@ wire [7:0] reg3_shadow = {reg3_static[7:1], digout_level};
 
 always_comb begin
     aux_cmds = seq_cmds;
-    // Coherent bit substitution on any WRITE(0)/WRITE(3) in any slot.
+    // Coherent live-bit substitution: ANY WRITE(0)/WRITE(3) in the aux group gets
+    // the live fast-settle / Reg-3-shadow bits. This loop is over the three
+    // ASSEMBLED commands for bit-coherence -- it does not assume the slots are
+    // interchangeable (their sources above are distinct and named).
     for (int s2 = 0; s2 < N_AUX; s2++) begin
         logic [15:0] c;
         c = seq_cmds[s2*16 +: 16];
@@ -211,7 +198,7 @@ always_comb begin
             c[7:0] = reg3_shadow;                     // WRITE(3,...): substitute Reg-3 shadow
         aux_cmds[s2*16 +: 16] = c;
     end
-    // Whole-command replacement: the fast-settle slot only (the invariant).
+    // Whole-command replacement on a fast-settle edge: the RT slot only.
     if (fs_inject)
         aux_cmds[AUX_FS_SLOT*16 +: 16] = fs_state ? RHD_WR0_FS_ON : RHD_WR0_FS_OFF;
 end
@@ -219,5 +206,12 @@ end
 assign dsp_force_h        = dsp_state;
 assign fast_settle_active = fs_state;
 assign digout_state       = digout_level;
+
+// Status: the RT slot (0) has no bank or index; report 0 there so the existing
+// 3-slot status layout is preserved (firmware/host read slot-0 fields as 0).
+assign bank_active = {prog2_bank, prog1_bank, 1'b0};
+assign slot_indices[AUX_FS_SLOT*ADDR_W     +: ADDR_W] = '0;
+assign slot_indices[AUX_PLAIN_SLOT*ADDR_W  +: ADDR_W] = prog1_index;
+assign slot_indices[AUX_INJECT_SLOT*ADDR_W +: ADDR_W] = prog2_index;
 
 endmodule

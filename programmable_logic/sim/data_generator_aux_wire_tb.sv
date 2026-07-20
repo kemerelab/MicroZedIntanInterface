@@ -101,13 +101,13 @@ initial begin
     set_ctrl(2, 32'h0000_0F00);    // channel_enable = 0x0F
     repeat (8) @(negedge clk); rstn = 1; repeat (8) @(negedge clk);
 
-    // program the plain slot with a 3-entry loop; FS slot with a WRITE(0,0) every packet
+    // slot 1 (plain): a 3-entry loop. slot 0 (RT register): a single WRITE(0,0)
+    // set via target 0 (bank/addr/length ignored -- it does not cycle).
     aux_write(AUX_PLAIN_SLOT, 0, 0, 0, 16'h2000);
     aux_write(AUX_PLAIN_SLOT, 0, 0, 1, 16'h2100);
     aux_write(AUX_PLAIN_SLOT, 0, 0, 2, 16'h2200);
     aux_write(AUX_PLAIN_SLOT, 0, 1, 0, {2'b00, 6'd2, 2'b00, 6'd0});    // loop 0..2
-    aux_write(AUX_FS_SLOT,    0, 0, 0, 16'h8000);                      // WRITE(0,0x00)
-    aux_write(AUX_FS_SLOT,    0, 1, 0, {2'b00, 6'd0, 2'b00, 6'd0});    // len 1
+    aux_write(AUX_FS_SLOT,    0, 0, 0, 16'h8000);                      // WRITE(0,0x00) -> rt_cmd
     // reg3_static + no aux enable bit needed (always on)
     set_ctrl(22, {8'h1C, 24'b0});
     repeat (4) @(negedge clk);
