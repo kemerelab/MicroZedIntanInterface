@@ -44,7 +44,7 @@ data_generator_core dut (
     .fifo_channel_mask(n_mask), .fifo_full(1'b0), .fifo_count(9'd0),
     .fifo_packet_end_flag(n_pkt_end),
     .csn(n_csn), .sclk(n_sclk), .copi(n_copi),
-    .cipo0(cipo0), .cipo1(cipo1), .cipo2(1'b0), .cipo3(1'b0),
+    .cipo_a0(cipo0), .cipo_a1(cipo1), .cipo_b0(1'b0), .cipo_b1(1'b0),
     .digital_in(digital_in)
 );
 

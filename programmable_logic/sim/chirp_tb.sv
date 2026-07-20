@@ -35,7 +35,7 @@ module chirp_tb;
         .fifo_channel_mask(mask), .fifo_full(1'b0), .fifo_count(9'd0),
         .fifo_packet_end_flag(pkt_end),
         .csn(csn), .sclk(sclk), .copi(copi),
-        .cipo0(1'b0), .cipo1(1'b0), .cipo2(1'b0), .cipo3(1'b0),
+        .cipo_a0(1'b0), .cipo_a1(1'b0), .cipo_b0(1'b0), .cipo_b1(1'b0),
         .digital_in(8'h00)
     );
 

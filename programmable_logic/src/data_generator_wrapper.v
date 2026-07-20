@@ -163,11 +163,11 @@ module data_generator #(
         .csn(csn),
         .sclk(sclk),
         .copi(copi),
-        .cipo0(cipo0),
-        .cipo1(cipo1),
+        .cipo_a0(cipo0),
+        .cipo_a1(cipo1),
         // Port B (cable B) CIPO inputs, from the second LVDS buffer.
-        .cipo2(cipo2),
-        .cipo3(cipo3),
+        .cipo_b0(cipo2),
+        .cipo_b1(cipo3),
 
         // Digital input
         .digital_in(digital_in),
