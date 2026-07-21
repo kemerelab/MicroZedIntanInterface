@@ -78,10 +78,11 @@ logic transmission_active;
 logic reset_timestamp_reg;
 logic debug_mode_reg;
 logic [31:0] loop_count_reg;
-logic [3:0] phase_a0_reg;
-logic [3:0] phase_a1_reg;
-logic [3:0] phase_b0_reg;       // port 1 (cable B) CIPO0 cable-delay phase
-logic [3:0] phase_b1_reg;       // port 1 (cable B) CIPO1 cable-delay phase
+// Cable-delay sample phase, one per CIPO line (see CIPO_combined_phase_selector).
+logic [3:0] phase_a0_reg;       // cable A, CIPO line 0
+logic [3:0] phase_a1_reg;       // cable A, CIPO line 1
+logic [3:0] phase_b0_reg;       // cable B, CIPO line 0
+logic [3:0] phase_b1_reg;       // cable B, CIPO line 1
 logic [7:0] channel_enable_reg;  // [3:0] = port 0 streams, [7:4] = port 1 streams
 // Protected COPI message words (36 x 16-bit words) - only updated when transmission inactive
 logic [15:0] copi_words_reg [0:35];
