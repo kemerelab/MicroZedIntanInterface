@@ -27,24 +27,47 @@ module test_signal_gen (
     // Current frame slot (drives per-channel phase + the debug channel offset).
     input  logic [5:0]   cycle_counter,
 
-    // Config (latched by the core while transmission is inactive).
-    input  logic         chirp_mode,     // 0 = fixed sine, 1 = swept chirp
-    input  logic [5:0]   chirp_stride,   // per-channel phase stride
-    input  logic [11:0]  chirp_fspan,    // f_max = fspan << CHIRP_FSPAN_SHIFT
-    input  logic [11:0]  chirp_rate,     // sweep-rate increment per packet
+    // Raw chirp config register (CTRL_REG_3). This module decodes AND latches it
+    // itself (below), so the framing loop never touches chirp fields.
+    input  logic [31:0]  chirp_cfg_reg,
+    // Low => idle: the config is captured now and frozen for the whole stream.
+    input  logic         transmission_active,
 
     // 8 x 16-bit synthetic lanes for the current slot (combinational; the core
     // samples it at the data-word write, same lane order as fifo_write_data).
     output logic [127:0] lanes
 );
 
-// ---- chirp NCO geometry (matches the CTRL_REG_3 encoding in the core) -------
+// ---- chirp NCO geometry -----------------------------------------------------
 localparam int CHIRP_PHW          = 32;              // phase/freq accumulator width
 localparam int CHIRP_LUT_IDX_HI   = CHIRP_PHW - 1;   // top 9 bits [31:23] index the LUT
 localparam int CHIRP_LUT_IDX_LO   = CHIRP_PHW - 9;
 localparam int CHIRP_FSPAN_SHIFT  = 16;              // f_span (12b) -> f_max in phase units
 localparam int CHIRP_RATE_SHIFT   = 9;               // sweep_rate (12b) -> freq incr/packet
 localparam int CHIRP_STRIDE_SHIFT = 24;              // per-channel phase-stride placement
+
+// ---- CTRL_REG_3 decode + latch ----------------------------------------------
+// Captured while idle, frozen during a stream (so a mid-stream host write can't
+// tear the sweep). Encoding:
+//   [0]     chirp_mode   (1 = swept chirp, 0 = fixed-frequency sine)
+//   [1]     reserved
+//   [7:2]   phase_stride (6-bit per-channel phase offset stride)
+//   [19:8]  f_span       (12-bit; f_max     = f_span     << CHIRP_FSPAN_SHIFT)
+//   [31:20] sweep_rate   (12-bit; incr/pkt  = sweep_rate << CHIRP_RATE_SHIFT)
+logic        chirp_mode;
+logic [5:0]  chirp_stride;
+logic [11:0] chirp_fspan;
+logic [11:0] chirp_rate;
+always_ff @(posedge clk) begin
+    if (!rstn) begin
+        chirp_mode <= 1'b0;  chirp_stride <= 6'd0;  chirp_fspan <= 12'd0;  chirp_rate <= 12'd0;
+    end else if (!transmission_active) begin
+        chirp_mode   <= chirp_cfg_reg[0];
+        chirp_stride <= chirp_cfg_reg[2  +: 6];
+        chirp_fspan  <= chirp_cfg_reg[8  +: 12];
+        chirp_rate   <= chirp_cfg_reg[20 +: 12];
+    end
+end
 
 // ---- 512-entry sine ROM (unsigned offset-binary, +-1/16 full scale) ---------
 logic [15:0] sine_lut [0:511];

@@ -13,12 +13,13 @@ module data_generator_core (
     input  logic        clk,
     input  logic        rstn,
 
-    // Control and status interfaces
-    // Regs 0..21 are the legacy map; 22..24 configure the aux command
-    // sequencer / override layer (see firmware/include/main.h).
+    // Control and status interfaces. 25 control registers (see main.h):
+    //   0..3   run control, channel/phase config, chirp config (CTRL_REG_3)
+    //   4..21  the 36-word COPI command table (host-set per-channel CONVERTs)
+    //   22..24 the aux command engine (decoded inside aux_command_engine)
     input  logic [32*25-1:0] ctrl_regs_pl,
-    output logic [32*10-1:0]  status_regs_pl,  // Only 10 registers, including mirroring 4 control - wrapper adds 11th
-    // Aux sequencer / override status (wrapper maps these to status regs 11/12)
+    output logic [32*10-1:0]  status_regs_pl,  // 10 regs here; the wrapper appends reg 11 (FIFO/BRAM)
+    // Aux engine status (the wrapper maps these to status regs 11/12)
     output logic [31:0] aux_status,
     output logic [31:0] aux_read_result,
     
@@ -85,42 +86,22 @@ logic [7:0] channel_enable_reg;  // [3:0] = port 0 streams, [7:4] = port 1 strea
 // Protected COPI message words (36 x 16-bit words) - only updated when transmission inactive
 logic [15:0] copi_words_reg [0:35];
 
-// Reserved control register, repurposed as the analytic-chirp config (CTRL_REG_3).
-// Compact single-register encoding (kept clear of STFT regs 28-30 / playback 31):
-//   [0]     chirp_mode  (1 = emit a memory-free swept-sine instead of the
-//                        fixed-frequency debug sine; independent of debug_mode_reg
-//                        which must also be set for any synthetic data)
-//   [1]     reserved    (future: log/exp sweep select)
-//   [7:2]   phase_stride (per-channel phase offset stride, 6-bit; applied as
-//                        channel_offset * (stride << CHIRP_STRIDE_SHIFT) so
-//                        channels are visibly distinguishable)
-//   [19:8]  f_span      (12-bit; f_max = f_span << CHIRP_FSPAN_SHIFT in 32-bit
-//                        phase-accumulator units -> ~0.46 Hz/step, full = ~1.9 kHz)
-//   [31:20] sweep_rate  (12-bit; freq_acc increment per packet =
-//                        sweep_rate << CHIRP_RATE_SHIFT; sets sweep speed/period)
-// See data_generator_core.sv chirp NCO block + docs/lfp-dsp-engine-design.md.
-// The chirp NCO + sine ROM themselves live in test_signal_gen; the core only
-// latches the config (below) and ticks the module once per packet.
-logic        chirp_mode_reg;
-logic [5:0]  chirp_stride_reg;
-logic [11:0] chirp_fspan_reg;
-logic [11:0] chirp_rate_reg;
+// The chirp/synthetic-signal config (CTRL_REG_3) is decoded and latched inside
+// test_signal_gen (instantiated below); the core just forwards the raw register.
+// debug_mode (CTRL_REG_0[3]) stays here -- it is the synthetic-vs-real data-path
+// select, applied at the FIFO data write, not a test_signal_gen field.
 
 // Safe control register updates - only when transmission is not active
 always_ff @(posedge clk) begin
     if (!rstn) begin
         reset_timestamp_reg <= 1'b0;
         debug_mode_reg <= 1'b0;
-        chirp_mode_reg <= 1'b0;
-        chirp_stride_reg <= 6'd0;
-        chirp_fspan_reg <= 12'd0;
-        chirp_rate_reg <= 12'd0;
         loop_count_reg <= 32'd0;
         phase_a0_reg <= 4'd0;
         phase_a1_reg <= 4'd0;
         phase_b0_reg <= 4'd0;
         phase_b1_reg <= 4'd0;
-        channel_enable_reg <= 8'b0000_1111;  // Default: port-0 all channels, port-1 off (bit-identical)
+        channel_enable_reg <= 8'b0000_1111;  // Default: cable A all 4 streams on, cable B off
         
         // Initialize COPI words to safe defaults
         for (int j = 0; j < 36; j++) begin
@@ -131,16 +112,11 @@ always_ff @(posedge clk) begin
         if (!transmission_active) begin
             reset_timestamp_reg <= ctrl_regs_pl[0*32 + 1];
             debug_mode_reg <= ctrl_regs_pl[0*32 + 3];
-            // Chirp config (CTRL_REG_3); latched while inactive like debug_mode.
-            chirp_mode_reg   <= ctrl_regs_pl[3*32 + 0];
-            chirp_stride_reg <= ctrl_regs_pl[3*32 + 2  +: 6];
-            chirp_fspan_reg  <= ctrl_regs_pl[3*32 + 8  +: 12];
-            chirp_rate_reg   <= ctrl_regs_pl[3*32 + 20 +: 12];
             loop_count_reg <= ctrl_regs_pl[1*32 +: 32];
-            // CTRL_REG_2 layout (widened for the second port; low bits unchanged
-            // so a host that only writes the original 4-bit channel_enable at
-            // [11:8] gets port-1 streams = 0 -> single-port path is unchanged):
-            //   [3:0] phase_a0, [7:4] phase_a1, [15:8] channel_enable (8-bit),
+            // CTRL_REG_2 layout. channel_enable is 8 bits at [15:8]; a host that
+            // writes only the low nibble [11:8] leaves cable-B streams ([15:12])
+            // at 0, i.e. cable A only.
+            //   [3:0] phase_a0, [7:4] phase_a1, [15:8] channel_enable,
             //   [19:16] phase_b0, [23:20] phase_b1
             phase_a0_reg <= ctrl_regs_pl[2*32 + 3  : 2*32 + 0];
             phase_a1_reg <= ctrl_regs_pl[2*32 + 7  : 2*32 + 4];
@@ -173,8 +149,9 @@ reg [31:0] cipo_a1_phase_selected;
 reg [31:0] cipo_b0_phase_selected;
 reg [31:0] cipo_b1_phase_selected;
 
-// Instantiate phase selector modules that correct for CIPO delay because of long cable length.
-// Port 1's two lines have their OWN phase (phase_b0/phase_b1) since cable B may differ in length.
+// One phase selector per CIPO line: each picks the sample point that compensates
+// the round-trip SCLK->CIPO cable delay. Every line has its own phase (cable A =
+// a0/a1, cable B = b0/b1) since the two cables can be different lengths.
 CIPO_combined_phase_selector cipo_a0_selector(
     .phase_select(phase_a0_reg),
     .CIPO4x(cipo_a0_4x_oversampled),
@@ -223,20 +200,21 @@ logic [31:0] loop_counter;
 logic [31:0] bb_seq;          // value stamped into the current packet's header
 logic [31:0] bb_seq_next;     // running counter (advances at packet end)
 
-// num_data_words for header AUX0[23:8]: number of 32-bit DATA words in this
-// packet = ceil(35 * popcount(channel_enable) / 2). Derived combinationally from
-// the (transmission-stable) channel_enable_reg.
-logic [3:0]  ce_popcount;
+// Number of enabled stream lanes (popcount of channel_enable). Used only to size
+// the packet: the header AUX0[23:8] carries bb_num_data_words = the count of
+// 32-bit DATA words = ceil(35 slots * num_enabled_lanes / 2). Combinational off
+// the transmission-stable channel_enable_reg.
+logic [3:0]  num_enabled_lanes;
 always_comb begin
-    ce_popcount = 4'd0;
+    num_enabled_lanes = 4'd0;
     for (int b = 0; b < 8; b++)
-        ce_popcount = ce_popcount + {3'd0, channel_enable_reg[b]};
+        num_enabled_lanes = num_enabled_lanes + {3'd0, channel_enable_reg[b]};
 end
-// 35 * popcount fits in 9 bits (max 35*8 = 280); +1 then >>1 = round-up /2.
-wire [15:0] bb_num_data_words = (16'(35 * ce_popcount) + 16'd1) >> 1;
+// 35 * lanes fits in 9 bits (max 35*8 = 280); +1 then >>1 = round-up /2.
+wire [15:0] bb_num_data_words = (16'(35 * num_enabled_lanes) + 16'd1) >> 1;
 
-// Synthetic debug/chirp data for the current slot -- generated by test_signal_gen
-// (below), sampled at the data-word write when debug_mode is set.
+// Synthetic data for the current slot -- fixed sine or swept chirp, produced by
+// test_signal_gen. Used at the FIFO data write only when debug_mode is set.
 logic [127:0] synth_lanes;
 
 // Helper signals for state machine logic
@@ -244,25 +222,23 @@ wire is_last_state = (state_counter == 7'd79);
 wire is_first_cycle = (cycle_counter == 6'd0);
 wire is_last_cycle = (cycle_counter == LAST_CYC);
 
-// Test-signal source: fixed sine or swept chirp, selected by chirp_mode_reg.
-// Ticked once per emitted packet (same instant the seq/NCO used to advance:
-// transmitting, FIFO not full, last state of the last cycle).
+// Test-signal source. It decodes/latches its own config (CTRL_REG_3) and marches
+// its sine index + chirp NCO once per emitted packet (pulsed here at the last
+// state of the last cycle while transmitting with the FIFO not full).
 wire synth_packet_advance = transmission_active && !fifo_full &&
                             is_last_cycle && is_last_state;
 test_signal_gen test_signal_gen_inst (
-    .clk           (clk),
-    .rstn          (rstn),
-    .packet_advance(synth_packet_advance),
-    .cycle_counter (cycle_counter),
-    .chirp_mode    (chirp_mode_reg),
-    .chirp_stride  (chirp_stride_reg),
-    .chirp_fspan   (chirp_fspan_reg),
-    .chirp_rate    (chirp_rate_reg),
-    .lanes         (synth_lanes)
+    .clk                (clk),
+    .rstn               (rstn),
+    .packet_advance     (synth_packet_advance),
+    .cycle_counter      (cycle_counter),
+    .chirp_cfg_reg      (ctrl_regs_pl[3*32 +: 32]),
+    .transmission_active(transmission_active),
+    .lanes              (synth_lanes)
 );
 
 // ============================================================================
-// AUX COMMAND ENGINE + OVERRIDE (always on -> un-programmed = legacy static aux)
+// AUX COMMAND ENGINE + OVERRIDE (always on; un-programmed => plain per-slot CONVERTs)
 // ============================================================================
 // Aux control registers 22..24 are decoded INSIDE aux_command_engine (bank
 // select, fast-settle/DSP/digout config, the write port, inject/write toggles).
@@ -280,10 +256,10 @@ logic [N_AUX*6-1:0]  aux_slot_indices;
 logic                aux_inject_active;
 logic                aux_dsp_force_h, aux_fs_active, aux_digout_state;
 
-// Aux is ALWAYS ON (aux-default). The engine wires a fixed RT register (slot 0)
-// plus two cycling programs (slots 1,2, aux_program) through the override; every
-// source powers up as CONVERT(AUX_CYC0+slot), so this is bit-identical to the
-// legacy static aux stream until a program/override is actually configured.
+// Aux is ALWAYS ON. The engine wires a fixed RT register (slot 0) plus two cycling
+// programs (slots 1,2, aux_program) through the override. Every source powers up
+// as CONVERT(AUX_CYC0+slot), so an un-programmed engine simply emits the plain
+// per-slot CONVERTs until a program or override is configured.
 aux_command_engine #(.ADDR_W(6)) aux_engine_inst (
     .clk                (clk),
     .rstn               (rstn),
@@ -304,37 +280,43 @@ aux_command_engine #(.ADDR_W(6)) aux_engine_inst (
     .slot_indices       (aux_slot_indices)
 );
 
-// Command-echo identity (command-bank-design.md). SPI readback alignment:
-// the response to the command issued at cycle C is captured at cycle C+2, so
-// packet word 34 = response to THIS packet's slot-1 command (cycle 32) and
-// packet words 0/1 = responses to the PREVIOUS packet's slot-2/3 commands
-// (cycles 33/34). The header therefore echoes {this slot-1, prev slot-2,
-// prev slot-3} -- each packet fully labels its own aux payload.
-logic [15:0] echo_slot2_prev, echo_slot3_prev;
-logic        echo_valid;           // 0 for the first packet after start
-logic        inject_result_pkt;    // word 1 of THIS packet answers an injection
+// Command-echo identity: the header echoes each aux command so the host can pair
+// it with its reply. SPI readback is +2 cycles, so the reply to the command at
+// cycle C lands at cycle (C+2) mod 35:
+//   fs slot     (cycle 32) -> reply in data word 34 of THIS packet
+//   plain slot  (cycle 33) -> reply at cycle 0 of the NEXT packet
+//   inject slot (cycle 34) -> reply at cycle 1 of the NEXT packet
+// So the header carries this packet's fs-slot command (header word 6) plus the
+// PREVIOUS packet's plain- and inject-slot commands (word 8) -- each reply is
+// fully labeled by the command that produced it.
+logic [15:0] echo_plain_prev, echo_inject_prev;   // prev packet's plain/inject commands
+logic        echo_valid;           // 0 for the first packet after start (no "prev" yet)
+logic        inject_result_pkt;    // the cycle-1 reply of THIS packet answers an injection
 always_ff @(posedge clk) begin
     if (!rstn) begin
-        echo_slot2_prev   <= 16'h0;
-        echo_slot3_prev   <= 16'h0;
+        echo_plain_prev   <= 16'h0;
+        echo_inject_prev  <= 16'h0;
         echo_valid        <= 1'b0;
         inject_result_pkt <= 1'b0;
     end else if (!transmission_active) begin
         echo_valid        <= 1'b0;
         inject_result_pkt <= 1'b0;
     end else if (seq_advance) begin
-        echo_slot2_prev   <= aux_cmds_final[31:16];
-        echo_slot3_prev   <= aux_cmds_final[47:32];
+        echo_plain_prev   <= aux_cmds_final[AUX_PLAIN_SLOT*16  +: 16];
+        echo_inject_prev  <= aux_cmds_final[AUX_INJECT_SLOT*16 +: 16];
         echo_valid        <= 1'b1;
         inject_result_pkt <= aux_inject_active;
     end
 end
 
-// One-shot injection result capture: the reply to the injected command (aux slot
-// AUX_INJECT_SLOT = cycle 34) lands in the CIPO capture at AUX_INJECT_REPLY_CYC =
-// (34 + SPI_READBACK_LAT) mod N_FRAME_CMDS = cycle 1 of the next packet, settled at
-// AUX_INJECT_REPLY_STATE. Latch it there and flip the ack toggle for the firmware
-// handshake. [15:0] of each CIPO word is the regular (non-DDR) stream.
+// Runtime register READ/WRITE readback. NOTE: this is NOT fast settle -- fast
+// settle is the override whole-replacing the fs slot (handled in the engine).
+// This is the separate "inject" path: when the firmware injects a one-shot RHD
+// READ/WRITE command into the inject slot (cycle 34, e.g. to read the chip ID or
+// a register), the chip's reply arrives +2 cycles later at cycle 1 of the NEXT
+// packet (AUX_INJECT_REPLY_CYC), settled at AUX_INJECT_REPLY_STATE. Latch it into
+// aux_read_result (the firmware's READ_REGISTER path) and flip the ack toggle so
+// the firmware knows the result landed. [15:0] of each CIPO word = regular (non-DDR).
 logic        aux_inj_ack;
 logic [31:0] aux_read_result_reg;
 always_ff @(posedge clk) begin
@@ -485,7 +467,7 @@ always_ff @(posedge clk) begin
             // Uses copi_words_reg[cycle_counter] as the source for each cycle's transmission  
             // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
 
-            if  (state_counter <= 7'd63) begin //removed part of conditional
+            if (state_counter <= 7'd63) begin   // COPI bits are shifted out during states 0..63
                 logic [3:0]  bit_index;
                 logic [1:0]  aux_slot;
                 logic [15:0] tx_word;
@@ -545,9 +527,9 @@ end
 // Register for latching digital inputs
 logic [7:0] digital_in_latched;
 
-// Latch digital inputs at the start of each packet
-// (Fast settle / digout GPIO triggers sample digital_in at the same instant,
-// inside override_layer.)
+// Latch digital inputs at the start of each packet. (The aux engine's override
+// samples digital_in at this same instant for its fast-settle / digout GPIO
+// triggers.)
 
 always_ff @(posedge clk) begin
     if (!rstn) begin
@@ -584,21 +566,19 @@ always_ff @(posedge clk) begin
 
         if (transmission_active && !fifo_full) begin
             // ---- Unified packet header (broadband, stream_type=1) -------------
-            // The 8-word common header + a 6-word broadband sub-block are written
-            // as 7 x 64-bit FIFO writes (states 0..6 of cycle 0), one 64-bit value
-            // per state -> 14 BRAM words ahead of the data. See
-            // docs/unified-packet-format.md. Every field of the OLD 10-word header
-            // is preserved (timestamp, digital_in/aux_flags/echo metadata, analog
-            // breadcrumbs); the DATA words below are byte-identical to before.
+            // An 8-word common header + a 6-word broadband sub-block, written as
+            // 7 x 64-bit FIFO writes (states 0..6 of cycle 0), one 64-bit value per
+            // state -> 14 BRAM words ahead of the data. See
+            // docs/unified-packet-format.md.
             //
             // BRAM word layout (LE), per 64-bit write {high32, low32}:
-            //   write0 (w0/w1):  MAGIC=0xCAFEBABE        | TYPE_VER=1|ver<<8|flags<<16
-            //   write1 (w2/w3):  TS_LO                   | TS_HI
-            //   write2 (w4/w5):  SEQ (broadband)         | AUX0=ce|num_data_words<<8
-            //   write3 (w6/w7):  AUX1=digital/aux/echo0  | RSVD=0
-            //   write4 (w8/w9):  echo1/echo2_prev        | analog ch0-1   (sub-block)
-            //   write5 (w10/w11):analog ch2-3            | analog ch4-5
-            //   write6 (w12/w13):analog ch6-7            | reserved=0
+            //   write0 (w0/w1):  MAGIC=0xCAFEBABE           | TYPE_VER=1|ver<<8|flags<<16
+            //   write1 (w2/w3):  TS_LO                      | TS_HI
+            //   write2 (w4/w5):  SEQ (broadband)            | AUX0=ce|num_data_words<<8
+            //   write3 (w6/w7):  AUX1=digital/flags/fs-echo | RSVD=0
+            //   write4 (w8/w9):  plain+inject echoes        | analog ch0-1   (sub-block)
+            //   write5 (w10/w11):analog ch2-3              | analog ch4-5
+            //   write6 (w12/w13):analog ch6-7              | reserved=0
             // Latch the per-packet broadband seq at the packet start, before it is
             // stamped into header word 4 (FIFO state 2). bb_seq_next advances at
             // the packet end below, so consecutive packets get +1 with no gap.
@@ -608,9 +588,9 @@ always_ff @(posedge clk) begin
             if (state_counter inside {7'd0, 7'd1, 7'd2, 7'd3, 7'd4, 7'd5, 7'd6}) begin
                 if (is_first_cycle) begin
                     fifo_write_en <= 1'b1;
-                    // Header is one 64-bit value -> exactly the low 4 segments,
-                    // upper 4 masked off (port-2 streams never appear in the
-                    // header).
+                    // Header is one 64-bit value -> exactly the low 4 segments;
+                    // the upper 4 (cable B streams) are masked off, as the header
+                    // never carries cable-B data.
                     fifo_channel_mask <= 8'b0000_1111;
                     fifo_packet_end_flag <= 1'b0;  // Header words are never at the end
                     case (state_counter)
@@ -621,37 +601,37 @@ always_ff @(posedge clk) begin
                         7'd2: fifo_write_data <= {
                             {8'd0, bb_num_data_words[15:0], channel_enable_reg}, // w5 AUX0
                             bb_seq};                                            // w4 SEQ
-                        // AUX1 (w6) = digital inputs + aux flags + command-echo
-                        // identity (the OLD header word 4):
+                        // AUX1 (w6) = digital inputs + aux flags + this packet's
+                        // fs-slot command echo:
                         //   [7:0] digital_in, [15:8] aux_flags,
-                        //   [31:16] this packet's fast-settle-slot command (reply @ data 34).
+                        //   [31:16] fs-slot command (its reply is data word 34).
                         // RSVD (w7) = 0.
                         7'd3: fifo_write_data <= {
                             32'h0,                                              // w7 RSVD
-                            aux_cmds_final[AUX_FS_SLOT*16 +: 16],               // w6[31:16] echo (fs slot)
+                            aux_cmds_final[AUX_FS_SLOT*16 +: 16],               // w6[31:16] fs-slot echo
                             aux_flags,                                          // w6[15:8]
                             digital_in_latched};                                // w6[7:0]
                         // ---- broadband sub-block (words 8..13) ----
-                        // w8 = the OLD header word 5 (prev-packet plain/inject-slot
-                        //      echoes); w9 = analog ch0-1 breadcrumb (0). w10..w13 =
-                        //      the 8 external-ADC breadcrumbs (currently 0) + a reserved
-                        //      word. Every old field preserved.
+                        // w8 = the previous packet's plain- and inject-slot command
+                        //      echoes (their replies land at cycles 0/1 of THIS
+                        //      packet); w9 = analog ch0-1 breadcrumb (0). w10..w13 =
+                        //      the 8 external-ADC breadcrumbs (currently 0) + reserved.
                         7'd4: fifo_write_data <= {
                             32'h0,                                              // w9 analog ch0-1 (breadcrumb)
-                            echo_slot3_prev,                                    // w8[31:16] prev inject-slot echo
-                            echo_slot2_prev};                                   // w8[15:0]  prev plain-slot echo
+                            echo_inject_prev,                                   // w8[31:16] prev inject-slot echo
+                            echo_plain_prev};                                   // w8[15:0]  prev plain-slot echo
                         7'd5: fifo_write_data <= 64'h0;  // w10 analog ch2-3 | w11 analog ch4-5
                         7'd6: fifo_write_data <= 64'h0;  // w12 analog ch6-7 | w13 reserved
                     endcase
                 end
             end
             
-            // Data writes - Pack both ports' CIPO lines into one 128-bit write
-            // with the 8-bit channel mask. Segment order (low->high):
-            //   port0 cipo_a0{reg,ddr}, port0 cipo_a1{reg,ddr},  (low 64 = bits[63:0])
-            //   port1 cipo_a0{reg,ddr}, port1 cipo_a1{reg,ddr}.  (high 64 = bits[127:64])
-            // When channel_enable_reg[7:4]==0 the high 64 bits are masked off and
-            // the packet is byte-identical to the single-port datapath.
+            // Data writes - Pack all four CIPO lines into one 128-bit write with
+            // the 8-bit channel mask. Each line contributes {regular, DDR} = 2x16.
+            // Segment order (low->high):
+            //   cable A: cipo_a0{reg,ddr}, cipo_a1{reg,ddr}   (low 64  = bits[63:0])
+            //   cable B: cipo_b0{reg,ddr}, cipo_b1{reg,ddr}   (high 64 = bits[127:64])
+            // channel_enable_reg[7:4]==0 masks off the high 64 bits (cable A only).
             if (state_counter == 7'd77) begin
                 fifo_write_en <= 1'b1;
                 fifo_channel_mask <= channel_enable_reg;  // 8-bit channel enable
@@ -668,8 +648,8 @@ always_ff @(posedge clk) begin
                                         cipo_a1_data[cycle_counter], cipo_a0_data[cycle_counter]};
                 end else begin
                     // Synthetic data: test_signal_gen produces the 8 lanes for this
-                    // slot (fixed sine or swept chirp per chirp_mode_reg), settled
-                    // well before this state. Byte-identical to the old inline code.
+                    // slot (fixed sine or swept chirp, its own config), settled well
+                    // before this state.
                     fifo_write_data <= synth_lanes;
                 end
             end
