@@ -1,13 +1,12 @@
-// Implemented as 3 major always blocks.
-// 1. Run the master cycled state machine. Maintain the timestamp consistently
-//    regardless of whether we acquiring/transmitting data. Process control data 
-//    (which comes from the AXI interface), like enable/disable transmission and
-//    reset timestamps.
-// 2. Run the data acquisiton state machine. This uses the cycles/states controlled
-//    by state machine #1.
-// 3. Run the data exfiltration state machine. This loads data, prefaced by a
-//    a header and a timestamp, into a FIFO for transmission via the dual port BRAM
-//    to the PS. (FIFO and BRAM are external to this file.)
+// data_generator_core: drives the RHD SPI bus and exfiltrates the samples.
+// Organized around three cooperating state machines:
+//   1. Master cycle: the free-running state/cycle counters and the master
+//      timestamp (which advances whether or not we are transmitting), plus AXI
+//      control (enable/disable transmission, reset timestamp).
+//   2. Acquisition: generates the COPI commands and samples the CIPO lines, using
+//      the cycles/states from (1).
+//   3. Exfiltration: packs a header + timestamp + data into a FIFO for transfer to
+//      the PS over the dual-port BRAM (FIFO and BRAM are external to this file).
 
 module data_generator_core (
     input  logic        clk,
@@ -23,8 +22,8 @@ module data_generator_core (
     output logic [31:0] aux_status,
     output logic [31:0] aux_read_result,
     
-    // FIFO interface (128-bit = up to 8 x 16-bit segments: 2 SPI ports x
-    // {regular,DDR} x {CIPO0,CIPO1}; gets packed to 32-bit for BRAM)
+    // FIFO interface (128-bit = up to 8 x 16-bit segments: 2 cables x 2 CIPO lines
+    // x {regular, DDR}; packed to 32-bit for the BRAM)
     output logic        fifo_write_en,
     output logic [127:0] fifo_write_data,
     output logic [7:0]  fifo_channel_mask,     // Which 16-bit segments are valid
@@ -38,10 +37,10 @@ module data_generator_core (
     output logic        csn,        // Chip select (active low)
     output logic        sclk,       // Serial clock
     output logic        copi,       // Controller Out, Peripheral In
-    input  logic        cipo_a0,      // Port 0 (cable A) Controller In, Peripheral Out 0
-    input  logic        cipo_a1,      // Port 0 (cable A) Controller In, Peripheral Out 1
-    input  logic        cipo_b0,      // Port 1 (cable B) CIPO0  (dual-port; tie 0 if unused)
-    input  logic        cipo_b1,      // Port 1 (cable B) CIPO1
+    input  logic        cipo_a0,      // cable A, CIPO line 0 (Controller-In, Peripheral-Out)
+    input  logic        cipo_a1,      // cable A, CIPO line 1
+    input  logic        cipo_b0,      // cable B, CIPO line 0 (dual-port; tie 0 if cable B unused)
+    input  logic        cipo_b1,      // cable B, CIPO line 1
 
     // External digital input
     input  logic [7:0]  digital_in,
@@ -58,7 +57,7 @@ module data_generator_core (
     // Live 64-bit master sample count, exposed so the LFP engine can stamp each
     // decimated frame with the master timestamp of the LAST broadband sample that
     // contributed to it (latched in lfp_dsp_block on the decimation tick). This is
-    // the SAME counter the broadband packet header stamps (header word 1).
+    // the SAME counter the broadband header carries as TS_LO/TS_HI (header words 2/3).
     output logic [63:0] dsp_master_timestamp,
     // Broadband channel-enable mask (single source of truth for the LFP lane
     // mask -- the LFP filters exactly the broadband-enabled lanes).
@@ -83,7 +82,7 @@ logic [3:0] phase_a0_reg;       // cable A, CIPO line 0
 logic [3:0] phase_a1_reg;       // cable A, CIPO line 1
 logic [3:0] phase_b0_reg;       // cable B, CIPO line 0
 logic [3:0] phase_b1_reg;       // cable B, CIPO line 1
-logic [7:0] channel_enable_reg;  // [3:0] = port 0 streams, [7:4] = port 1 streams
+logic [7:0] channel_enable_reg;  // [3:0] = cable A streams, [7:4] = cable B streams
 // Protected COPI message words (36 x 16-bit words) - only updated when transmission inactive
 logic [15:0] copi_words_reg [0:35];
 
@@ -134,13 +133,13 @@ always_ff @(posedge clk) begin
     end
 end
 
-// CIPO received data storage (4 separate 16-bit registers per cycle)
-logic [31:0] cipo_a0_data [0:34];  // Port 0 CIPO0 line, register A (low 16 bits) and B (upper 16 bits)
-logic [31:0] cipo_a1_data [0:34];  // Port 0 CIPO1 line
-logic [31:0] cipo_b0_data [0:34];  // Port 1 CIPO0 line (dual-port)
-logic [31:0] cipo_b1_data [0:34];  // Port 1 CIPO1 line
+// Per-cycle captured CIPO data, one 32-bit word per line = {DDR[31:16], regular[15:0]}.
+logic [31:0] cipo_a0_data [0:34];  // cable A, CIPO line 0
+logic [31:0] cipo_a1_data [0:34];  // cable A, CIPO line 1
+logic [31:0] cipo_b0_data [0:34];  // cable B, CIPO line 0
+logic [31:0] cipo_b1_data [0:34];  // cable B, CIPO line 1
 
-// Registers for COPI data from the 4 CIPO lines (2 per port)
+// Per-line 4x-oversampled CIPO capture + the phase-selected result.
 reg [73:0] cipo_a0_4x_oversampled;
 reg [73:0] cipo_a1_4x_oversampled;
 reg [73:0] cipo_b0_4x_oversampled;
@@ -333,7 +332,7 @@ always_ff @(posedge clk) begin
     end
 end
 
-// Packet metadata flags (header word 2 bits [15:8]). The aux engine is always on.
+// Packet metadata flags -- header word 6 bits [15:8] (see the header layout below).
 logic [7:0] aux_flags;
 assign aux_flags = {2'b00,
                     inject_result_pkt,   // [5]
@@ -397,9 +396,9 @@ end
 /*
 Complete Serial Protocol Timing (80-state machine):
 
-State 0:  CSn=0, SCLK=0, COPI=0 (default) [first of 35 cycles - fifo enqueue magic header words]
-State 1:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (setup bit 15) 
-State 2:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (clock bit 15) [first of 35 cycles - fifo enqueue timestamp words]
+State 0:  CSn=0, SCLK=0, COPI=0 (default)
+State 1:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (setup bit 15)
+State 2:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (clock bit 15)
 State 3:  CSn=0, SCLK=1, COPI=copi_words[cycle_counter][15] (hold)
 State 4:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][15] (transition)
 State 5:  CSn=0, SCLK=0, COPI=copi_words[cycle_counter][14] (setup bit 14)
@@ -525,20 +524,15 @@ always_ff @(posedge clk) begin
 end
 
 
-// Digital input
-// Register for latching digital inputs
+// Digital inputs, latched at the start of each packet. (The aux engine's override
+// samples digital_in at this same instant for its fast-settle / digout GPIO triggers.)
 logic [7:0] digital_in_latched;
-
-// Latch digital inputs at the start of each packet. (The aux engine's override
-// samples digital_in at this same instant for its fast-settle / digout GPIO
-// triggers.)
 
 always_ff @(posedge clk) begin
     if (!rstn) begin
         digital_in_latched <= 8'h0;
     end else begin
         if (transmission_active && is_first_cycle && state_counter == 7'd0) begin
-            // Latch digital inputs at the beginning of each packet
             digital_in_latched <= digital_in;
         end
     end
@@ -700,15 +694,14 @@ assign status_regs_pl[0*32 +: 32] = {
     transmission_active   // [0] - 1 bit
 };
 
-// Status Register 1: Reflected control parameters (registered versions).
-// channel_enable[3:0] stays at [23:20] (unchanged position for existing
-// firmware/host); the new port-1 nibble channel_enable[7:4] goes in the
-// former reserved [27:24]. phase_b0/phase_b1 are read back via the CTRL_REG_2
-// mirror (status reg 8).
+// Status Register 1: reflected control parameters (registered versions).
+// channel_enable is split -- cable A at [23:20], cable B at [27:24]. phase_a0/a1
+// are here ([15:12]/[19:16]); phase_b0/b1 read back via the CTRL_REG_2 mirror
+// (status reg 8).
 assign status_regs_pl[1*32 +: 32] = {
     4'd0,                     // [31:28] - reserved
-    channel_enable_reg[7:4],  // [27:24] - port-1 channel enable
-    channel_enable_reg[3:0],  // [23:20] - port-0 channel enable
+    channel_enable_reg[7:4],  // [27:24] - cable B channel enable
+    channel_enable_reg[3:0],  // [23:20] - cable A channel enable
     phase_a1_reg,               // [19:16] - 4 bits
     phase_a0_reg,               // [15:12] - 4 bits
     8'd0,                     // [11:4] - reserved
