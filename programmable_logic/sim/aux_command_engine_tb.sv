@@ -5,12 +5,13 @@
 // does -- so this also exercises the engine's own register decode + toggle->pulse
 // edge detection -- and checks the final aux_cmds + override outputs.
 //
-// Verifies the invariants of the reworked engine:
-//   * slot 0 is a single fixed RT register (write target 0) -- it does NOT cycle;
-//     the override fast-settle whole-replaces it and forces WRITE(0) D5.
-//   * slots 1 & 2 are cycling programs (aux_program): step one entry per packet,
-//     loop end->loop, independent, atomic bank swap at the boundary.
-//   * slot 2 one-shot injection replaces one packet, freezes the index, resumes.
+// Verifies the invariants of the engine (two registers + one program):
+//   * slot 0 is a fixed RT register (write target 0) -- does NOT cycle; the
+//     override fast-settle whole-replaces it and forces WRITE(0) D5.
+//   * slot 1 is the one cycling program (aux_program): steps one entry per packet,
+//     loops end->loop, atomic bank swap at the boundary.
+//   * slot 2 is a fixed register (write target 2); a one-shot injection whole-
+//     replaces it for one packet, then it reverts.
 //
 // Run: bash programmable_logic/sim/run_aux_engine_tb.sh  ("RESULT: PASS")
 
@@ -88,9 +89,9 @@ initial begin
     // slot 1 (plain): a 3-entry looping program.
     aw(AUX_PLAIN_SLOT, 0, 0, 0, 16'h2000); aw(AUX_PLAIN_SLOT, 0, 0, 1, 16'h2100); aw(AUX_PLAIN_SLOT, 0, 0, 2, 16'h2200);
     aw(AUX_PLAIN_SLOT, 0, 1, 0, {2'b00, 6'd2, 2'b00, 6'd0});          // loop 0..2
-    // slot 2 (inject/housekeeping): a 2-entry looping program.
-    aw(AUX_INJECT_SLOT, 0, 0, 0, 16'hFF00); aw(AUX_INJECT_SLOT, 0, 0, 1, 16'hE800);
-    aw(AUX_INJECT_SLOT, 0, 1, 0, {2'b00, 6'd1, 2'b00, 6'd0});         // loop 0..1
+    // slot 2 (inject): a single command register -- injection whole-replaces it
+    // for one packet. No length record; it does NOT cycle.
+    aw(AUX_INJECT_SLOT, 0, 0, 0, 16'hAB00);                          // -> inject_base_r
     // slot 0 (RT register): a single WRITE(0,x) so the D5 force + FS whole-replace
     // can act on it. No length record -- it is a register, not a program.
     aw(AUX_FS_SLOT, 0, 0, 0, 16'h8000);                              // WRITE(0, 0x00) -> rt_cmd
@@ -98,24 +99,23 @@ initial begin
     aw(AUX_PLAIN_SLOT, 1, 0, 0, 16'h3000); aw(AUX_PLAIN_SLOT, 1, 0, 1, 16'h3100);
     aw(AUX_PLAIN_SLOT, 1, 1, 0, {2'b00, 6'd1, 2'b00, 6'd0});          // loop 0..1
 
-    // ---- B. run: walk packets, check the loop, independence, and RT stability ----
+    // ---- B. run: only slot 1 cycles; slots 0 and 2 are fixed registers ----
     transmission_active = 1; @(negedge clk);
     start_packet();  // packet 0 (index 0)
-    chk("p0 plain[0]",  slot(AUX_PLAIN_SLOT),  16'h2000);
-    chk("p0 inject[0]", slot(AUX_INJECT_SLOT), 16'hFF00);
-    chk("p0 rt fixed",  slot(AUX_FS_SLOT),     16'h8000);  // RT register holds
+    chk("p0 plain[0]",   slot(AUX_PLAIN_SLOT),  16'h2000);
+    chk("p0 inject fix", slot(AUX_INJECT_SLOT), 16'hAB00);  // slot-2 register holds
+    chk("p0 rt fixed",   slot(AUX_FS_SLOT),     16'h8000);  // RT register holds
     end_packet();
     start_packet();  // packet 1
-    chk("p1 plain[1]",  slot(AUX_PLAIN_SLOT),  16'h2100);
-    chk("p1 inject[1]", slot(AUX_INJECT_SLOT), 16'hE800);
+    chk("p1 plain[1]",   slot(AUX_PLAIN_SLOT),  16'h2100);
+    chk("p1 inject fix", slot(AUX_INJECT_SLOT), 16'hAB00);  // slot 2 does NOT cycle
     end_packet();
-    start_packet();  // packet 2: plain idx2, inject wraps to 0
-    chk("p2 plain[2]",  slot(AUX_PLAIN_SLOT),  16'h2200);
-    chk("p2 inject[0]", slot(AUX_INJECT_SLOT), 16'hFF00);
-    chk("p2 rt fixed",  slot(AUX_FS_SLOT),     16'h8000);  // RT still does NOT cycle
+    start_packet();  // packet 2
+    chk("p2 plain[2]",   slot(AUX_PLAIN_SLOT),  16'h2200);
+    chk("p2 rt fixed",   slot(AUX_FS_SLOT),     16'h8000);  // RT still does NOT cycle
     end_packet();
     start_packet();  // packet 3: plain wraps to 0
-    chk("p3 plain wrap", slot(AUX_PLAIN_SLOT), 16'h2000);
+    chk("p3 plain wrap", slot(AUX_PLAIN_SLOT),  16'h2000);
     end_packet();
 
     // ---- C. WRITE(0) D5 force + fast-settle whole-replace on the RT slot ----
@@ -140,16 +140,15 @@ initial begin
     n_checks++; if (dsp_force_h !== 1'b0) begin n_errors++; $display("ERROR: dsp_force_h stuck"); end
     end_packet();
 
-    // ---- E. one-shot injection on slot 2: replaces one packet, freezes, resumes ----
+    // ---- E. one-shot injection on slot 2: replaces one packet, then reverts ----
     arm_inject(16'hFE00);                         // READ(62); inject_pending latches
     end_packet();                                 // seq_advance consumes -> inject_active for the next packet
     start_packet();                               // the injected packet
     chk("inject on wire", slot(AUX_INJECT_SLOT), 16'hFE00);
     n_checks++; if (inject_active !== 1'b1) begin n_errors++; $display("ERROR: inject_active not set"); end
-    end_packet();                                 // seq_advance: slot-2 index frozen (no skip)
-    start_packet();                               // resume: plays the un-skipped slot-2 entry
-    n_checks++; if (slot(AUX_INJECT_SLOT) !== 16'hFF00 && slot(AUX_INJECT_SLOT) !== 16'hE800) begin
-        n_errors++; $display("ERROR: inject resume plays %04h (expected a slot-2 program entry)", slot(AUX_INJECT_SLOT)); end
+    end_packet();
+    start_packet();                               // revert: slot 2 back to its register value
+    chk("inject revert", slot(AUX_INJECT_SLOT), 16'hAB00);
     end_packet();
 
     // ---- F. bank swap lands at a boundary; bank_active confirms (slot 1) ----

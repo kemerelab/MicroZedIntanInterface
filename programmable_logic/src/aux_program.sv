@@ -2,25 +2,20 @@
 //
 // ONE cycling auxiliary-command program: a double-buffered command store that
 // steps one entry per acquisition packet and loops end->loop. This is the only
-// place the "banked sequencer" machinery lives -- it is instantiated exactly
-// twice, for the two aux slots that actually cycle (slot 1 = the ADC/accel
-// sweep, slot 2 = the housekeeping rotation). The fixed RT slot (slot 0) is a
-// plain register in aux_command_engine and does NOT use this module.
+// place the "banked sequencer" machinery lives -- it is instantiated exactly ONCE,
+// for slot 1 (the accelerometer / aux-ADC sweep). The other two aux slots are
+// fixed command registers in aux_command_engine and do NOT use this module.
 //
-// Double buffer: two banks per program; bank_select picks the live bank and a
-// change takes effect atomically at the next packet boundary (host uploads into
-// the standby bank, then flips). Power-on fills every entry with DEFAULT_CMD so
-// an un-programmed board emits the legacy static CONVERT for this slot.
-//
-// `freeze` holds the index for one advance -- slot 2 asserts it during a one-shot
-// register injection so the housekeeping rotation resumes exactly where it left
-// off (housekeeping may be missed for that packet, which is fine).
+// Double buffer: two banks; bank_select picks the live bank and a change takes
+// effect atomically at the next packet boundary (host uploads into the standby
+// bank, then flips). Power-on fills every entry with DEFAULT_CMD so an
+// un-programmed board emits the plain CONVERT for this slot.
 
 import acq_frame_pkg::*;
 
 module aux_program #(
     parameter integer      ADDR_W      = 6,        // log2(entries per bank) = 64
-    parameter logic [15:0] DEFAULT_CMD = 16'h0     // power-on command (legacy static)
+    parameter logic [15:0] DEFAULT_CMD = 16'h0     // power-on command (plain CONVERT)
 )(
     input  logic              clk,
     input  logic              rstn,
@@ -28,7 +23,6 @@ module aux_program #(
     input  logic              seq_advance,   // 1-cycle pulse at the END of each active packet
     input  logic              seq_hold,      // idle: park index at 0, apply bank swap now
     input  logic              bank_select,   // requested live bank (quasi-static, CDC-synced)
-    input  logic              freeze,        // hold the index for this advance (slot-2 inject)
 
     // Program write port (already qualified for THIS program by the engine)
     input  logic              wr_en,
@@ -82,8 +76,6 @@ always_ff @(posedge clk) begin
         if (bank_select != active_bank) begin
             active_bank <= bank_select;      // atomic swap at the packet boundary
             idx         <= '0;
-        end else if (freeze) begin
-            idx <= idx;                      // injection consumed this slot: hold
         end else begin
             idx <= (idx == end_idx_r[active_bank])
                    ? loop_idx_r[active_bank]

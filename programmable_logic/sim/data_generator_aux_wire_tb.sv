@@ -131,12 +131,12 @@ initial begin
     next_packet(pkt); if (pkt[FS_CYC] != RHD_WR0_FS_OFF) next_packet(pkt);
     chk("fs OFF inject", pkt[FS_CYC], RHD_WR0_FS_OFF);
 
-    // ---- one-shot injection appears on the inject slot for one packet ----
+    // ---- one-shot injection whole-replaces the inject slot for one packet ----
     aux_inject(16'hFE00);                        // READ(62)
     next_packet(pkt); if (pkt[INJECT_CYC] != 16'hFE00) next_packet(pkt);
     chk("inject on wire", pkt[INJECT_CYC], 16'hFE00);
-    next_packet(pkt);                            // resumes an inject-slot program entry (default CONVERT here)
-    n_checks++; if (pkt[INJECT_CYC] == 16'hFE00) begin n_errors++; $display("ERROR: injection stuck on wire"); end
+    next_packet(pkt);                            // reverts to slot 2's register default (CONVERT 34)
+    chk("inject revert", pkt[INJECT_CYC], convert_word(AUX_CYC0 + AUX_INJECT_SLOT));
 
     set_ctrl(0, 32'h0);
     repeat (50) @(negedge clk);

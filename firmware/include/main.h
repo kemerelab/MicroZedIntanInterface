@@ -155,11 +155,10 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 
 // CTRL_REG_AUX_CTRL bit fields  (bit 0 reserved: aux engine is always on)
-// Program live-bank select: reg22 bit s selects slot s's bank. Only the two
-// cycling programs have a bank (s = 1, 2); slot 0 is a fixed register (bit 0
-// reserved, bit 3 free).
-#define AUX_CTRL_BANK_BIT(slot)     (1u << (slot))   // bank bit for slot in {1,2}
-#define AUX_CTRL_BANK_SEL_MASK      (0x3u << 1)       // [2:1]
+// Program live-bank select: only slot 1 (the sole cycling program) has a bank,
+// at reg22 bit 1. Slots 0 and 2 are fixed command registers (no bank).
+#define AUX_CTRL_BANK_BIT(slot)     (1u << (slot))   // slot == 1 -> reg22 bit 1
+#define AUX_CTRL_BANK_SEL_MASK      (0x1u << 1)       // [1] only
 #define AUX_CTRL_FS_SW              (1u << 4)  // software amp fast settle level
 #define AUX_CTRL_FS_GPIO_EN         (1u << 5)
 #define AUX_CTRL_FS_GPIO_SEL_SHIFT  6          // [8:6] digital_in pin select

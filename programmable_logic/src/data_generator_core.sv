@@ -725,12 +725,13 @@ assign status_regs_pl[7*32 +: 32] = ctrl_regs_pl[1*32 +: 32]; // reflected
 assign status_regs_pl[8*32 +: 32] = ctrl_regs_pl[2*32 +: 32]; // reflected
 assign status_regs_pl[9*32 +: 32] = ctrl_regs_pl[3*32 +: 32]; // reflected
 
-// Status register 11 will be added by wrapper (FIFO/BRAM). Aux sequencer
-// status goes out via dedicated ports -> wrapper status regs 11/12:
-//   aux_status: [2:0] bank_active, [3] aux engine active (always 1),
-//               [4] fast_settle_active, [5] digout_state, [6] dsp_force_h,
-//               [7] inject ack toggle, [13:8] slot-0 index, [21:16] slot-1
-//               index, [29:24] slot-2 index.
+// Status register 11 will be added by wrapper (FIFO/BRAM). Aux engine status
+// goes out via dedicated ports -> wrapper status regs 11/12:
+//   aux_status: [2:0] bank_active (only bit 1 = slot-1 program can be set),
+//               [3] aux engine active (always 1), [4] fast_settle_active,
+//               [5] digout_state, [6] dsp_force_h, [7] inject ack toggle,
+//               [21:16] slot-1 program index. The slot-0/slot-2 index fields
+//               ([13:8]/[29:24]) are always 0 -- those slots are registers.
 //   aux_read_result: {cipo_a1_regular[15:0], cipo_a0_regular[15:0]} of the last
 //               injected command's response (firmware READ_REGISTER path).
 assign aux_status = {
