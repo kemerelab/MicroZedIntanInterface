@@ -565,9 +565,10 @@ void pl_print_status(void);
 // Debug
 void pl_dump_bram_data(uint32_t start_addr, uint32_t word_count);
 
-// COPI command management
-void pl_set_copi_commands(const uint16_t copi_array[35]);
-int pl_set_copi_commands_safe(const uint16_t copi_array[35], const char* sequence_name);
+// COPI command management. The table is 32 words -- one command per channel cycle
+// (0..31). The 3 aux cycles (32..34) are sourced by the aux command engine.
+void pl_set_copi_commands(const uint16_t copi_array[32]);
+int pl_set_copi_commands_safe(const uint16_t copi_array[32], const char* sequence_name);
 
 // COPI sequence selection
 void pl_set_convert_sequence(void);
@@ -592,9 +593,9 @@ int  pl_write_rhd_register(int reg, uint8_t value, uint32_t *result);
 // Command to go through all possible cable lengths for cable optimization
 void pl_run_full_cable_test(void);
 
-extern const uint16_t convert_cmd_sequence[35];
-extern const uint16_t initialization_cmd_sequence[35];
-extern const uint16_t cable_length_cmd_sequence[35];
+extern const uint16_t convert_cmd_sequence[32];
+extern const uint16_t initialization_cmd_sequence[32];
+extern const uint16_t cable_length_cmd_sequence[32];
 
 // ============================================================================
 // DEBUG FUNCTIONS

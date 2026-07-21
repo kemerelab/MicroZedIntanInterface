@@ -83,8 +83,10 @@ logic [3:0] phase_a1_reg;       // cable A, CIPO line 1
 logic [3:0] phase_b0_reg;       // cable B, CIPO line 0
 logic [3:0] phase_b1_reg;       // cable B, CIPO line 1
 logic [7:0] channel_enable_reg;  // [3:0] = cable A streams, [7:4] = cable B streams
-// Protected COPI message words (36 x 16-bit words) - only updated when transmission inactive
-logic [15:0] copi_words_reg [0:35];
+// Host-set COPI command for each of the 32 channel cycles (0..31); latched only
+// while transmission is inactive. The 3 aux cycles (32..34) are sourced by the
+// aux engine, not this table.
+logic [15:0] channel_copi_cmds [0:31];
 
 // The chirp/synthetic-signal config (CTRL_REG_3) is decoded and latched inside
 // test_signal_gen (instantiated below); the core just forwards the raw register.
@@ -103,9 +105,9 @@ always_ff @(posedge clk) begin
         phase_b1_reg <= 4'd0;
         channel_enable_reg <= 8'b0000_1111;  // Default: cable A all 4 streams on, cable B off
         
-        // Initialize COPI words to safe defaults
-        for (int j = 0; j < 36; j++) begin
-            copi_words_reg[j] <= 16'h0;
+        // Initialize the channel command table to safe defaults
+        for (int j = 0; j < 32; j++) begin
+            channel_copi_cmds[j] <= 16'h0;
         end
     end else begin
         // Only update control registers when transmission is not active
@@ -124,10 +126,11 @@ always_ff @(posedge clk) begin
             phase_b0_reg <= ctrl_regs_pl[2*32 + 16 +: 4];
             phase_b1_reg <= ctrl_regs_pl[2*32 + 20 +: 4];
             
-            // Update COPI words from control registers 4-21 (18 registers total)
-            for (int j = 0; j < 18; j++) begin
-                copi_words_reg[2*j]     <= ctrl_regs_pl[(j+4)*32 +: 16];      // Low 16 bits
-                copi_words_reg[2*j + 1] <= ctrl_regs_pl[(j+4)*32 + 16 +: 16]; // High 16 bits
+            // Load the 32 channel commands from control registers 4-19 (16
+            // registers, two 16-bit words each). Regs 20-21 are now unused.
+            for (int j = 0; j < 16; j++) begin
+                channel_copi_cmds[2*j]     <= ctrl_regs_pl[(j+4)*32 +: 16];      // Low 16 bits
+                channel_copi_cmds[2*j + 1] <= ctrl_regs_pl[(j+4)*32 + 16 +: 16]; // High 16 bits
             end
         end
     end
@@ -465,7 +468,7 @@ always_ff @(posedge clk) begin
             end
                 
             // COPI data transmission - MSB first, set on states 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60
-            // Uses copi_words_reg[cycle_counter] as the source for each cycle's transmission  
+            // Channel cycles (0..31) source their command from channel_copi_cmds.
             // Bit index is just the bitwise NOT of state_counter[5:2] (since 15-x = ~x for 4-bit x)
 
             if (state_counter <= 7'd63) begin   // COPI bits are shifted out during states 0..63
@@ -481,7 +484,7 @@ always_ff @(posedge clk) begin
                 if (cycle_counter >= N_CHAN_CMDS)
                     tx_word = aux_cmds_final[aux_slot*16 +: 16];
                 else
-                    tx_word = copi_words_reg[cycle_counter];
+                    tx_word = channel_copi_cmds[cycle_counter];
                 // DSP reset ("digital fast settle"): force bit H on the channel
                 // CONVERTs (cycles 0..N_CHAN_CMDS-1) while requested.
                 if (aux_dsp_force_h &&
