@@ -256,10 +256,11 @@ logic [N_AUX*6-1:0]  aux_slot_indices;
 logic                aux_inject_active;
 logic                aux_dsp_force_h, aux_fs_active, aux_digout_state;
 
-// Aux is ALWAYS ON. The engine wires a fixed RT register (slot 0) plus two cycling
-// programs (slots 1,2, aux_program) through the override. Every source powers up
-// as CONVERT(AUX_CYC0+slot), so an un-programmed engine simply emits the plain
-// per-slot CONVERTs until a program or override is configured.
+// Aux is ALWAYS ON. The engine wires two fixed command registers (slot 0 = RT /
+// override, slot 2 = inject) plus one cycling program (slot 1 = accel, aux_program)
+// through the override. Every source powers up as CONVERT(AUX_CYC0+slot), so an
+// un-programmed engine simply emits the plain per-slot CONVERTs until a program,
+// override, or injection is configured.
 aux_command_engine #(.ADDR_W(6)) aux_engine_inst (
     .clk                (clk),
     .rstn               (rstn),

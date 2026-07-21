@@ -516,9 +516,9 @@ void pl_aux_set_digout(uint32_t cfg) {
                  (unsigned)((cfg & AUX_CTRL_REG3_STATIC_MASK) >> AUX_CTRL_REG3_STATIC_SHIFT));
 }
 
-// One-shot command injection via the inject slot (the engine freezes that slot's
-// program for the packet). Requires streaming; the response returns two SPI
-// commands later and is captured into STATUS_REG_12.
+// One-shot command injection via the inject slot (the engine whole-replaces the
+// slot-2 register for one packet). Requires streaming; the response returns two
+// SPI commands later and is captured into STATUS_REG_12.
 int pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms) {
     if (!pl_is_transmission_active()) {
         send_message("ERROR: inject requires streaming\r\n");

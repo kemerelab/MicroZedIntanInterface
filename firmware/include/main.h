@@ -213,8 +213,9 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 #define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
 
-// STATUS_REG_11 bit fields. Slot 0 is the fixed RT register: its bank bit and
-// index always read 0 (only slots 1,2 cycle).
+// STATUS_REG_11 bit fields. Only slot 1 (the accel program) cycles: its bank bit
+// and index are the only ones that move. Slots 0 and 2 are fixed registers -- their
+// bank bits and index fields always read 0.
 #define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot (bit0=slot0=0)
 #define AUX_STATUS_ENGINE_ON         (1u << 3) // always 1 (aux engine always on)
 #define AUX_STATUS_FS_ACTIVE         (1u << 4)

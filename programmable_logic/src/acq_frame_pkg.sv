@@ -23,12 +23,12 @@ package acq_frame_pkg;
     localparam int LAST_CYC     = N_FRAME_CMDS - 1;            // last cycle (= 34)
 
     // ---- fixed roles of the aux positions (index 0..N_AUX-1 within the aux group) ----
-    // These are three DIFFERENT things, not a homogeneous array: only slots 1 and
-    // 2 cycle (each is one aux_program); slot 0 is a fixed register. See
+    // These are three DIFFERENT things, not a homogeneous array: only slot 1 cycles
+    // (it is the one aux_program); slots 0 and 2 are fixed command registers. See
     // aux_command_engine.sv.
     localparam int AUX_FS_SLOT     = 0;  // cycle 32: fixed RT register; fast-settle whole-replaces it
-    localparam int AUX_PLAIN_SLOT  = 1;  // cycle 33: cycling program (ADC/accel sweep)
-    localparam int AUX_INJECT_SLOT = 2;  // cycle 34: cycling program (housekeeping) + inject target
+    localparam int AUX_PLAIN_SLOT  = 1;  // cycle 33: the one cycling program (ADC/accel sweep)
+    localparam int AUX_INJECT_SLOT = 2;  // cycle 34: fixed register + one-shot inject target
 
     // ---- SPI readback pipeline ----
     // The chip's reply to the command at cycle C is captured at cycle C+SPI_READBACK_LAT.
