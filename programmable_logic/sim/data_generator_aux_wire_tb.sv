@@ -98,7 +98,7 @@ localparam int INJECT_CYC = AUX_CYC0 + AUX_INJECT_SLOT;
 initial begin
     load_convert_table();
     set_ctrl(1, 32'd0);            // loop_count = 0 (continuous)
-    set_ctrl(2, 32'h0000_0F00);    // channel_enable = 0x0F
+    set_ctrl(2, 32'h000F_0000);    // channel_enable = 0x0F (CTRL_REG_2 [23:16])
     repeat (8) @(negedge clk); rstn = 1; repeat (8) @(negedge clk);
 
     // slot 1 (plain): a 3-entry loop. slot 0 (RT register): a single WRITE(0,0)

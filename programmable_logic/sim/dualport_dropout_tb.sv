@@ -92,9 +92,9 @@ initial begin
     repeat (5) @(negedge clk);
 
     // enable transmission + debug mode (reg0 bit0 + bit3), infinite loop,
-    // channel_enable = 0xFF at CTRL_REG_2[15:8]
+    // channel_enable = 0xFF at CTRL_REG_2[23:16]
     ctrl[1*32 +: 32] = 32'd0;
-    ctrl[2*32 +: 32] = 32'h0000_FF00;
+    ctrl[2*32 +: 32] = 32'h00FF_0000;
     ctrl[0*32 +: 32] = 32'h0000_0009;
 
     // run long enough for many full packets (each ~2800 clocks)

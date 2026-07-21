@@ -236,15 +236,16 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define CTRL_ENABLE_TRANSMISSION (1 << 0)
 #define CTRL_RESET_TIMESTAMP     (1 << 1)
 #define CTRL_DEBUG_MODE          (1 << 3)   // Debug mode (send dummy data) [3]
-// CTRL_REG_2 layout (dual-port): [3:0] phase0, [7:4] phase1,
-//   [15:8] channel_enable (8-bit: [3:0]=port0, [7:4]=port1),
-//   [19:16] phase2 (port1 cipo0), [23:20] phase3 (port1 cipo1)
-#define CTRL_PHASE0_MASK         (0xF << 0)  // phase0 [3:0]  (port0 cipo0)
-#define CTRL_PHASE1_MASK         (0xF << 4)  // phase1 [7:4]  (port0 cipo1)
-#define CTRL_CHANNEL_ENABLE_MASK (0xFF << 8) // channel_enable [15:8]
-#define CTRL_CHANNEL_ENABLE_SHIFT 8
-#define CTRL_PHASE2_MASK         (0xF << 16) // phase2 [19:16] (port1 cipo0)
-#define CTRL_PHASE3_MASK         (0xF << 20) // phase3 [23:20] (port1 cipo1)
+// CTRL_REG_2 layout. All four CIPO cable-delay phases are adjacent in the low
+// 16 bits; channel_enable follows:
+//   [3:0] phase_a0, [7:4] phase_a1, [11:8] phase_b0, [15:12] phase_b1,
+//   [23:16] channel_enable (8-bit: [19:16]=cable A, [23:20]=cable B)
+#define CTRL_PHASE0_MASK         (0xF << 0)   // phase_a0 [3:0]   (cable A, line 0)
+#define CTRL_PHASE1_MASK         (0xF << 4)   // phase_a1 [7:4]   (cable A, line 1)
+#define CTRL_PHASE2_MASK         (0xF << 8)   // phase_b0 [11:8]  (cable B, line 0)
+#define CTRL_PHASE3_MASK         (0xF << 12)  // phase_b1 [15:12] (cable B, line 1)
+#define CTRL_CHANNEL_ENABLE_MASK (0xFF << 16) // channel_enable [23:16]
+#define CTRL_CHANNEL_ENABLE_SHIFT 16
 
 // Status register 0 bits (dynamic status + counters)
 #define STATUS_TRANSMISSION_ACTIVE   (1 << 0)

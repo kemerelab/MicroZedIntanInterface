@@ -54,14 +54,14 @@ void pl_set_phase_select(int phase0, int phase1) {
 }
 
 // Port B (second cable) CIPO phase / cable-length compensation. Independent of
-// port A because the two cables may be different lengths. Bits [23:16] of
-// CTRL_REG_2: phase2 [19:16] (port-B cipo0), phase3 [23:20] (port-B cipo1).
+// port A because the two cables may be different lengths. In CTRL_REG_2:
+// phase2 [11:8] (cable B, line 0), phase3 [15:12] (cable B, line 1).
 void pl_set_phase_select_b(int phase2, int phase3) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
 
     ctrl_reg_2 &= ~(CTRL_PHASE2_MASK | CTRL_PHASE3_MASK);
-    ctrl_reg_2 |= ((phase2 & 0xF) << 16);
-    ctrl_reg_2 |= ((phase3 & 0xF) << 20);
+    ctrl_reg_2 |= ((phase2 & 0xF) << 8);
+    ctrl_reg_2 |= ((phase3 & 0xF) << 12);
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
     send_message("PL phase select (port B) phase2=%d, phase3=%d\r\n", phase2, phase3);
 }
@@ -107,7 +107,7 @@ void pl_set_channel_enable(int channel_enable) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
 
     ctrl_reg_2 &= ~CTRL_CHANNEL_ENABLE_MASK; // Clear existing channel enable bits
-    ctrl_reg_2 |= ((channel_enable & 0xFF) << CTRL_CHANNEL_ENABLE_SHIFT); // 8-bit, [15:8]
+    ctrl_reg_2 |= ((channel_enable & 0xFF) << CTRL_CHANNEL_ENABLE_SHIFT); // 8-bit, [23:16]
 
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
     send_message("PL channel enable set to 0x%02X (port0=0x%X port1=0x%X)\r\n",

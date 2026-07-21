@@ -115,16 +115,15 @@ always_ff @(posedge clk) begin
             reset_timestamp_reg <= ctrl_regs_pl[0*32 + 1];
             debug_mode_reg <= ctrl_regs_pl[0*32 + 3];
             loop_count_reg <= ctrl_regs_pl[1*32 +: 32];
-            // CTRL_REG_2 layout. channel_enable is 8 bits at [15:8]; a host that
-            // writes only the low nibble [11:8] leaves cable-B streams ([15:12])
-            // at 0, i.e. cable A only.
-            //   [3:0] phase_a0, [7:4] phase_a1, [15:8] channel_enable,
-            //   [19:16] phase_b0, [23:20] phase_b1
-            phase_a0_reg <= ctrl_regs_pl[2*32 + 3  : 2*32 + 0];
-            phase_a1_reg <= ctrl_regs_pl[2*32 + 7  : 2*32 + 4];
-            channel_enable_reg <= ctrl_regs_pl[2*32 + 8 +: 8];
-            phase_b0_reg <= ctrl_regs_pl[2*32 + 16 +: 4];
-            phase_b1_reg <= ctrl_regs_pl[2*32 + 20 +: 4];
+            // CTRL_REG_2 layout: the four CIPO phases are adjacent in the low 16
+            // bits, then channel_enable. [3:0] phase_a0, [7:4] phase_a1,
+            // [11:8] phase_b0, [15:12] phase_b1, [23:16] channel_enable (8-bit:
+            // [19:16] = cable A streams, [23:20] = cable B).
+            phase_a0_reg <= ctrl_regs_pl[2*32 + 0  +: 4];
+            phase_a1_reg <= ctrl_regs_pl[2*32 + 4  +: 4];
+            phase_b0_reg <= ctrl_regs_pl[2*32 + 8  +: 4];
+            phase_b1_reg <= ctrl_regs_pl[2*32 + 12 +: 4];
+            channel_enable_reg <= ctrl_regs_pl[2*32 + 16 +: 8];
             
             // Load the 32 channel commands from control registers 4-19 (16
             // registers, two 16-bit words each). Regs 20-21 are now unused.
