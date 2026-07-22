@@ -1,6 +1,13 @@
 # build_bitstream.tcl
 open_project ./vivado_project/klab_project.xpr
 
+# Each block-design module (data_generator, axi_lite_registers, ...) is synthesized
+# OUT-OF-CONTEXT as its own run. `reset_run synth_1` resets ONLY the top and does NOT
+# cascade to these child runs; Vivado's out-of-date detection can also miss edits to
+# the underlying RTL in sources_1. The result is a stale sub-module DCP stitched into
+# an otherwise-fresh top build -- SILENT: fresh timestamp/SHA, old logic. Reset every
+# synthesis run so all modules re-synthesize from the current sources.
+foreach r [get_runs -filter {IS_SYNTHESIS && NAME != "synth_1"}] { reset_run $r }
 reset_run synth_1
 launch_runs synth_1 -jobs 4
 wait_on_run synth_1

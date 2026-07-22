@@ -282,7 +282,13 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         1   // 1.1.0.0: GLANCE + on-PL LFP/DSP engine (stream_type=2 producer):
+#define FIRMWARE_VERSION_MINOR         2   // 1.2.0.0: aux accel sweep moved to slot 0 (intra-packet reply @
+                                           //      data word 34); slot 1 = fs register (default 'I' = READ(40)),
+                                           //      slot 2 = inject register (default temp = CONVERT(49)); program
+                                           //      bank-select bit -> reg22[0]. PL + firmware + plugin move
+                                           //      together -- version bumped so a running-firmware mismatch is
+                                           //      visible in net.py get_status / the plugin (was silently 1.1.0.0).
+                                           // 1.1.0.0: GLANCE + on-PL LFP/DSP engine (stream_type=2 producer):
                                            //      the LFP control/status registers, the lfp_stream drain
                                            //      path, and the LFP status-struct fields are present.
                                            //      status_response_t wire size 288 B; keep net.py get_status +
