@@ -19,10 +19,11 @@
 // So: two registers (slots 0, 2) + one program (slot 1). slot 0 is rewritten by the
 // real-time override; slot 2 by one-shot injection. Neither register cycles.
 //
-// Aux is ALWAYS ON (there is no enable): every source powers up as
-// CONVERT(AUX_CYC0+slot), so an un-programmed engine simply emits the plain
-// per-slot CONVERTs, and the override is pass-through until fast-settle / digout /
-// DSP-reset are requested.
+// Aux is ALWAYS ON (there is no enable). At power-on the engine runs the standard
+// acquisition config: slot 1 boots into the accelerometer / aux-ADC sweep (reads
+// channels 32/33/34, one per packet), and slots 0/2 read aux 32/34. The override
+// is pass-through and injection is idle until fast-settle / digout / DSP-reset /
+// a register access is requested.
 //
 // Pipeline: register / program read -> injection mux -> override rewrite -> aux_cmds.
 // The command settles ~2500 clocks before it serializes.
@@ -62,10 +63,14 @@ module aux_command_engine #(
     output logic [N_AUX*ADDR_W-1:0] slot_indices
 );
 
-// Power-on command per slot: CONVERT(AUX_CYC0 + slot) = {2'b00, ch, 8'h00}.
+// slot-0 / slot-2 register power-on commands: each reads its own aux channel.
 localparam logic [15:0] RT_DEFAULT     = {2'b00, 6'(AUX_CYC0 + AUX_FS_SLOT),     8'h00}; // CONVERT(32)
-localparam logic [15:0] PROG_DEFAULT   = {2'b00, 6'(AUX_CYC0 + AUX_PLAIN_SLOT),  8'h00}; // CONVERT(33)
 localparam logic [15:0] INJECT_DEFAULT = {2'b00, 6'(AUX_CYC0 + AUX_INJECT_SLOT), 8'h00}; // CONVERT(34)
+// slot-1 boot program: the accelerometer / aux-ADC sweep -- reads aux channels
+// 32, 33, 34 one per packet (each axis at 30kHz/3 ~= 10 kHz).
+localparam logic [15:0] SWEEP_0 = {2'b00, 6'(AUX_CYC0 + 0), 8'h00};   // CONVERT(32)
+localparam logic [15:0] SWEEP_1 = {2'b00, 6'(AUX_CYC0 + 1), 8'h00};   // CONVERT(33)
+localparam logic [15:0] SWEEP_2 = {2'b00, 6'(AUX_CYC0 + 2), 8'h00};   // CONVERT(34)
 
 // seq_hold high while idle: the program index parks at 0 and a bank swap applies now.
 wire seq_hold = !transmission_active;
@@ -138,7 +143,9 @@ logic [15:0]       prog_cmd;
 logic [ADDR_W-1:0] prog_index;
 logic              prog_bank;
 
-aux_program #(.ADDR_W(ADDR_W), .DEFAULT_CMD(PROG_DEFAULT)) prog (
+aux_program #(.ADDR_W(ADDR_W),
+              .INIT_LEN(3),
+              .INIT_CMDS({16'h0, SWEEP_2, SWEEP_1, SWEEP_0})) prog (   // boot: sweep 32/33/34
     .clk(clk), .rstn(rstn),
     .seq_advance(seq_advance), .seq_hold(seq_hold),
     .bank_select(prog_bank_select),

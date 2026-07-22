@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compile + run the fifo_bram_interface dual-port widening testbench under xsim.
 # Extracts the UNMODIFIED 64-bit packer from main (bbcadfe) as
-# fifo_bram_interface_legacy for the bit-identity comparison.
+# fifo_bram_interface_baseline for the bit-identity comparison.
 # Usage:  source /opt/Xilinx/2025.1/Vivado/settings64.sh && bash run_fifo_bram_dualport_tb.sh
 set -o pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,12 +16,12 @@ WORK="$(mktemp -d)"
 # `logic x = expr;` is a run-once static initializer under xsim, which would
 # latch stale data. Synthesis-neutral; same transform applied to the new module.
 git -C "$REPO" show "$BASELINE_COMMIT:programmable_logic/src/fifo_bram_interface.sv" \
-  > "$WORK/legacy_raw.sv" || exit 1
+  > "$WORK/baseline_raw.sv" || exit 1
 
-python3 - "$WORK/legacy_raw.sv" "$WORK/fifo_bram_interface_legacy.sv" <<'PY'
+python3 - "$WORK/baseline_raw.sv" "$WORK/fifo_bram_interface_baseline.sv" <<'PY'
 import sys, re
 src = open(sys.argv[1]).read()
-src = re.sub(r'\bfifo_bram_interface\b', 'fifo_bram_interface_legacy', src)
+src = re.sub(r'\bfifo_bram_interface\b', 'fifo_bram_interface_baseline', src)
 # strip initializers from the four block-local reads
 src = src.replace('logic [68:0] fifo_entry = write_fifo[fifo_read_ptr];',
                   'logic [68:0] fifo_entry;')
@@ -40,7 +40,7 @@ PY
 [ $? -eq 0 ] || exit 1
 
 cd "$WORK" || exit 99
-xvlog -sv "$SRC/fifo_bram_interface.sv" "$WORK/fifo_bram_interface_legacy.sv" \
+xvlog -sv "$SRC/fifo_bram_interface.sv" "$WORK/fifo_bram_interface_baseline.sv" \
       "$HERE/fifo_bram_dualport_tb.sv" || exit 1
 xelab -debug off -timescale 1ns/1ps work.fifo_bram_dualport_tb -s tb_snap || exit 1
 xsim tb_snap -R | tee sim.log

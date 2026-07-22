@@ -18,7 +18,7 @@
 //     w6 AUX1=digital_in/aux metadata, w7 RSVD=0.
 //   * the per-stream SEQ advances by exactly 1 per packet (the loss check).
 //   * BROADBAND CONTENT PRESERVED: every DATA word still matches the SAME sine
-//     reference as the legacy format (the framing changed, the data did not),
+//     reference as the original format (the framing changed, the data did not),
 //     and the timestamp advances by exactly 1 per packet -- so re-framing lost
 //     nothing.
 //
@@ -72,7 +72,7 @@ initial begin
 end
 
 // Expected 4 packed BRAM words for cycle `c` at debug index `ddi`. This is the
-// SAME reference the legacy testbench used -- the data did not change, only the
+// SAME reference the original testbench used -- the data did not change, only the
 // framing -- so a match proves the broadband DATA content is preserved.
 function automatic void ref_cycle_words(input int c, input int ddi, output logic [31:0] w [0:3]);
     int coff = (c >= 2) ? (c - 2) : 0;
@@ -171,7 +171,7 @@ initial begin
 
                 // ---- BROADBAND CONTENT PRESERVED: brute-force the debug index,
                 //      then compare EVERY data word to the SAME sine reference
-                //      the legacy format used. A 0-mismatch match proves the data
+                //      the original format used. A 0-mismatch match proves the data
                 //      payload is byte-identical to before (only framing changed). ----
                 begin
                     int best_ddi = -1, best_mism = 99999;
@@ -203,7 +203,7 @@ initial begin
                                     ew[0], ew[1], ew[2], ew[3]);
                         end
                     end else
-                        $display("BROADBAND CONTENT PRESERVED: all 35 cycles' data match the legacy sine reference EXACTLY");
+                        $display("BROADBAND CONTENT PRESERVED: all 35 cycles' data match the reference sine EXACTLY");
                 end
             end
 

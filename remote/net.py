@@ -1508,13 +1508,13 @@ def design_lfp_lowpass(num_taps, cutoff_hz=1250.0, fs=30000.0, window="kaiser",
     transition band fs/(2*R_pass) .. fs/(2*R). For R=10 (3 kHz, Nyquist 1.5 kHz)
     the default ~131-tap Kaiser(beta=6.5) gives <1 dB ripple to 1 kHz, ~21 dB at
     1.5 kHz, and >46 dB rejection of any band that folds onto the 0-1 kHz
-    passband. 'hamming' reproduces the legacy 2 kHz designer."""
+    passband. 'hamming' uses the classic Hamming-window design."""
     import math
     fc = cutoff_hz / fs                       # normalized cutoff (cycles/sample)
     M = num_taps - 1
     if window == "kaiser":
         win = _kaiser_window(num_taps, beta)
-    else:  # legacy Hamming
+    else:  # Hamming window
         win = [0.54 - 0.46 * math.cos(2 * math.pi * n / M) for n in range(num_taps)]
     h = []
     for n in range(num_taps):

@@ -4,7 +4,7 @@
 //
 //  TEST 1 (bit-identity): co-simulate the NEW 128-bit packer against the
 //    UNMODIFIED 64-bit packer from main (extracted by the run script as
-//    fifo_bram_interface_legacy). Drive both with the SAME port-0 traffic
+//    fifo_bram_interface_baseline). Drive both with the SAME port-0 traffic
 //    (new gets it in the low 64 bits + low mask nibble, upper = 0). The BRAM
 //    write stream (en/addr/din/we) and the packet-boundary address must match
 //    on EVERY clock -- proving the single-port path is byte-for-byte today's.
@@ -43,10 +43,10 @@ fifo_bram_interface dut_new (
     .bram_clk(n_bclk), .bram_rst(n_brst)
 );
 
-// ---- LEGACY (64-bit) ----
+// ---- BASELINE (64-bit) ----
 logic l_full; logic [8:0] l_count; logic [13:0] l_bramaddr_status;
 logic [15:0] l_baddr; logic [31:0] l_bdin; logic l_ben; logic [3:0] l_bwe; logic l_bclk, l_brst;
-fifo_bram_interface_legacy dut_leg (
+fifo_bram_interface_baseline dut_leg (
     .clk(clk), .rstn(rstn),
     .fifo_write_en(we), .fifo_write_data(wdata[63:0]), .fifo_channel_mask(wmask[3:0]),
     .fifo_packet_end_flag(wend), .fifo_full(l_full), .fifo_count(l_count),
@@ -56,7 +56,7 @@ fifo_bram_interface_legacy dut_leg (
 );
 
 // ---- TEST 1 comparator ----
-// The new packer walks 4 chunks/entry vs the legacy's 2, so individual writes
+// The new packer walks 4 chunks/entry vs the baseline's 2, so individual writes
 // land on different CYCLES. The bit-identity invariant is the SEQUENCE of BRAM
 // writes (addr, din) and the final packet-boundary address -- collect both
 // modules' write streams into queues and compare the sequences.

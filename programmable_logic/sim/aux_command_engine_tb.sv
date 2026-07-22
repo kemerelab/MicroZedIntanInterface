@@ -81,9 +81,19 @@ task automatic end_packet;    @(negedge clk); seq_advance = 1; @(negedge clk); s
 initial begin
     repeat (4) @(negedge clk); rstn = 1; repeat (4) @(negedge clk);
 
-    // ---- A. power-on default = CONVERT(AUX_CYC0+slot) for every slot ----
+    // ---- A. power-on state: slots 0/2 read their aux channel; slot 1 boots the sweep ----
     transmission_active = 0; start_packet();
-    for (int s = 0; s < N_AUX; s++) chk($sformatf("poweron slot%0d", s), slot(s), convert_default(s));
+    chk("poweron slot0", slot(AUX_FS_SLOT),     convert_default(0));  // CONVERT(32)
+    chk("poweron slot1", slot(AUX_PLAIN_SLOT),  convert_default(0));  // sweep entry 0 = CONVERT(32)
+    chk("poweron slot2", slot(AUX_INJECT_SLOT), convert_default(2));  // CONVERT(34)
+
+    // ---- A2. the slot-1 boot sweep cycles 32 -> 33 -> 34 -> 32, no host upload ----
+    transmission_active = 1; @(negedge clk);
+    start_packet(); chk("boot sweep p0",   slot(AUX_PLAIN_SLOT), convert_default(0)); end_packet();  // 32
+    start_packet(); chk("boot sweep p1",   slot(AUX_PLAIN_SLOT), convert_default(1)); end_packet();  // 33
+    start_packet(); chk("boot sweep p2",   slot(AUX_PLAIN_SLOT), convert_default(2)); end_packet();  // 34
+    start_packet(); chk("boot sweep wrap", slot(AUX_PLAIN_SLOT), convert_default(0)); end_packet();  // 32
+    transmission_active = 0; repeat (2) @(negedge clk);
 
     // ---- program while idle ----
     // slot 1 (plain): a 3-entry looping program.

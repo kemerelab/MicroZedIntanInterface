@@ -8,14 +8,16 @@
 //
 // Double buffer: two banks; bank_select picks the live bank and a change takes
 // effect atomically at the next packet boundary (host uploads into the standby
-// bank, then flips). Power-on fills every entry with DEFAULT_CMD so an
-// un-programmed board emits the plain CONVERT for this slot.
+// bank, then flips). Power-on loads the INIT_CMDS boot program (INIT_LEN entries,
+// looping 0..INIT_LEN-1) into both banks, so the slot runs its boot program
+// immediately with no host setup.
 
 import acq_frame_pkg::*;
 
 module aux_program #(
-    parameter integer      ADDR_W      = 6,        // log2(entries per bank) = 64
-    parameter logic [15:0] DEFAULT_CMD = 16'h0     // power-on command (plain CONVERT)
+    parameter integer      ADDR_W    = 6,          // log2(entries per bank) = 64
+    parameter integer      INIT_LEN  = 1,          // boot program length (loops entries 0..INIT_LEN-1)
+    parameter logic [63:0] INIT_CMDS = 64'h0       // boot program: entry i at INIT_CMDS[i*16 +: 16] (<= 4)
 )(
     input  logic              clk,
     input  logic              rstn,
@@ -45,10 +47,13 @@ logic              active_bank;
 logic [ADDR_W-1:0] idx;
 logic [15:0]       cmd_reg;
 
-// Power-on: legacy static command for this slot (mem intentionally not reset -> LUTRAM).
+// Power-on: load the INIT_CMDS boot program into both banks (mem intentionally
+// not reset -> LUTRAM). Entries past the program repeat its last command.
 initial
-    for (int e = 0; e < 2*ENTRIES; e++)
-        mem[e] = DEFAULT_CMD;
+    for (int e = 0; e < 2*ENTRIES; e++) begin
+        int unsigned p = (e % ENTRIES);
+        mem[e] = (p < INIT_LEN) ? INIT_CMDS[p*16 +: 16] : INIT_CMDS[(INIT_LEN-1)*16 +: 16];
+    end
 
 always_ff @(posedge clk)
     if (wr_en && !wr_is_length)
@@ -56,8 +61,8 @@ always_ff @(posedge clk)
 
 always_ff @(posedge clk) begin
     if (!rstn) begin
-        loop_idx_r[0] <= '0;  end_idx_r[0] <= '0;
-        loop_idx_r[1] <= '0;  end_idx_r[1] <= '0;
+        loop_idx_r[0] <= '0;  end_idx_r[0] <= ADDR_W'(INIT_LEN - 1);
+        loop_idx_r[1] <= '0;  end_idx_r[1] <= ADDR_W'(INIT_LEN - 1);
     end else if (wr_en && wr_is_length) begin
         loop_idx_r[wr_bank] <= wr_data[0 +: ADDR_W];
         end_idx_r[wr_bank]  <= wr_data[8 +: ADDR_W];

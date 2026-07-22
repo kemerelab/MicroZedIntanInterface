@@ -18,9 +18,8 @@ module data_generator #(
     
     // Control and status interfaces
     // Widths must match axi_lite_registers (N_CTRL=28, N_STATUS=13). Control
-    // regs 0..21 are the legacy map; 22..24 configure the aux command
-    // sequencer / override layer; 25..27 configure the LFP/DSP engine. Status
-    // 11 = aux status, 12 = read result.
+    // regs 0..21 = acquisition/framing config; 22..24 = the aux command engine;
+    // 25..27 = the LFP/DSP engine. Status 11 = aux status, 12 = read result.
     input  wire [32*28-1:0] ctrl_regs_pl,
     output wire [32*14-1:0]  status_regs_pl,
     

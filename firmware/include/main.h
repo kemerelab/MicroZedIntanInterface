@@ -95,9 +95,8 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 //
 // BROADBAND framing (stream_type=1): the 8-word common header + a 6-word
 // broadband sub-block = 14 header words ahead of the data. The sub-block
-// carries the previous-packet aux echoes + the 8 external-ADC breadcrumbs --
-// every field of the legacy 10-word header is preserved; the DATA words are
-// byte-identical to before (see docs/unified-packet-format.md, NO DATA LOSS).
+// carries the previous-packet aux echoes + the 8 external-ADC breadcrumbs
+// (see docs/unified-packet-format.md, NO DATA LOSS).
 //   AUX0 (w5) = channel_enable[7:0] | num_data_words[23:8]
 //   AUX1 (w6) = digital_in[7:0] | aux_flags[15:8] | echo0[31:16]
 #define BB_SUBBLOCK_WORDS       6
