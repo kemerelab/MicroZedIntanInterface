@@ -153,11 +153,12 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // broadband (UDP_PORT / udp_dest_port, default UDP_PORT), demuxed host-side by
 // stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
 
-// CTRL_REG_AUX_CTRL bit fields  (bit 0 reserved: aux engine is always on)
-// Program live-bank select: only slot 1 (the sole cycling program) has a bank,
-// at reg22 bit 1. Slots 0 and 2 are fixed command registers (no bank).
-#define AUX_CTRL_BANK_BIT(slot)     (1u << (slot))   // slot == 1 -> reg22 bit 1
-#define AUX_CTRL_BANK_SEL_MASK      (0x1u << 1)       // [1] only
+// CTRL_REG_AUX_CTRL bit fields
+// Program live-bank select: only slot 0 (the sole cycling program -- the accel
+// sweep) has a bank, at reg22 bit 0. Slots 1 and 2 are fixed command registers
+// (no bank).
+#define AUX_CTRL_BANK_BIT(slot)     (1u << (slot))   // slot == 0 -> reg22 bit 0
+#define AUX_CTRL_BANK_SEL_MASK      (0x1u << 0)       // [0] only
 #define AUX_CTRL_FS_SW              (1u << 4)  // software amp fast settle level
 #define AUX_CTRL_FS_GPIO_EN         (1u << 5)
 #define AUX_CTRL_FS_GPIO_SEL_SHIFT  6          // [8:6] digital_in pin select
@@ -175,8 +176,9 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 
 // CTRL_REG_AUX_WRITE packing: [15:0] data, [21:16] addr, [23:22] target,
 // [24] bank, [25] is_length (length record data = {2'b0,end[5:0],2'b0,loop[5:0]}).
-// target IS the slot index: 0 = slot-0 RT command register (single word;
-// bank/addr/is_length ignored), 1 = slot-1 program, 2 = slot-2 program.
+// target IS the slot index: 0 = slot-0 program (accel sweep; banked), 1 = slot-1
+// fs command register, 2 = slot-2 inject command register (registers are single
+// words; their bank/addr/is_length are ignored).
 #define AUX_WRITE_PACK(target, bank, is_len, addr, data) \
     ( ((uint32_t)(data) & 0xFFFFu)            | \
       (((uint32_t)(addr) & 0x3Fu)   << 16)    | \
@@ -212,18 +214,18 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 #define STATUS_REG_13_OFFSET (STATUS_REG_BASE + 13 * 4)  // LFP: [15:0] BRAM wr byte-addr, [16] overrun
 
-// STATUS_REG_11 bit fields. Only slot 1 (the accel program) cycles: its bank bit
-// and index are the only ones that move. Slots 0 and 2 are fixed registers -- their
+// STATUS_REG_11 bit fields. Only slot 0 (the accel program) cycles: its bank bit
+// and index are the only ones that move. Slots 1 and 2 are fixed registers -- their
 // bank bits and index fields always read 0.
-#define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot (bit0=slot0=0)
+#define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot (bit0=slot0 program)
 #define AUX_STATUS_ENGINE_ON         (1u << 3) // always 1 (aux engine always on)
 #define AUX_STATUS_FS_ACTIVE         (1u << 4)
 #define AUX_STATUS_DIGOUT            (1u << 5)
 #define AUX_STATUS_DSP_ACTIVE        (1u << 6)
 #define AUX_STATUS_INJECT_ACK        (1u << 7) // toggles when an injection result lands
-#define AUX_STATUS_IDX0_SHIFT        8         // [13:8]  slot-0 index (always 0: RT register)
-#define AUX_STATUS_IDX1_SHIFT        16        // [21:16] slot-1 program index
-#define AUX_STATUS_IDX2_SHIFT        24        // [29:24] slot-2 program index
+#define AUX_STATUS_IDX0_SHIFT        8         // [13:8]  slot-0 program index
+#define AUX_STATUS_IDX1_SHIFT        16        // [21:16] slot-1 index (always 0: fs register)
+#define AUX_STATUS_IDX2_SHIFT        24        // [29:24] slot-2 index (always 0: inject register)
 #define AUX_STATUS_IDX_MASK          0x3Fu
 
 // RHD2000 SPI command encodings (datasheet-confirmed)

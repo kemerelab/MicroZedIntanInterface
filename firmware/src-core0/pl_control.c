@@ -454,9 +454,9 @@ int pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop
 }
 
 void pl_aux_select_bank(int slot, int bank) {
-    if (slot != 1) return;                 // only slot 1 (the program) has a bank
+    if (slot != 0) return;                 // only slot 0 (the program) has a bank
     uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
-    uint32_t bit = AUX_CTRL_BANK_BIT(slot); // slot 1 -> reg22 bit 1
+    uint32_t bit = AUX_CTRL_BANK_BIT(slot); // slot 0 -> reg22 bit 0
     if (bank) ctrl |= bit; else ctrl &= ~bit;
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
 }
@@ -464,7 +464,7 @@ void pl_aux_select_bank(int slot, int bank) {
 // Confirm-before-reuse handshake: the swap latches at a packet boundary
 // (immediately when not streaming). Returns 1 once bank_active[slot]==bank.
 int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
-    if (slot != 1) return 1;               // only slot 1 has a bank; others confirmed trivially
+    if (slot != 0) return 1;               // only slot 0 has a bank; others confirmed trivially
     for (int waited = 0; waited <= timeout_ms * 1000; waited += 100) {
         uint32_t s11 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET);
         if (((s11 >> slot) & 1u) == (uint32_t)(bank ? 1 : 0))

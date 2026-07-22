@@ -4,7 +4,7 @@
 // rewrite) reach the chip correctly by decoding the serialized COPI wire out of
 // the real data_generator_core. Verifies:
 //   - channel cycles 0..N_CHAN_CMDS-1 carry the host CONVERT table
-//   - aux cycle AUX_CYC0+AUX_PLAIN_SLOT loops its programmed 3-entry program
+//   - aux cycle AUX_CYC0+AUX_SWEEP_SLOT loops its programmed 3-entry program
 //   - aux cycle AUX_CYC0+AUX_FS_SLOT: software fast settle -> WRITE(0,0xFE) for one
 //     packet, then steady, then WRITE(0,0xDE) on the OFF edge
 //   - a one-shot injection appears on the inject slot for exactly one packet
@@ -91,8 +91,8 @@ task automatic next_packet(output logic [15:0] w [0:N_FRAME_CMDS-1]);
 endtask
 
 logic [15:0] pkt [0:N_FRAME_CMDS-1];
+localparam int SWEEP_CYC  = AUX_CYC0 + AUX_SWEEP_SLOT;
 localparam int FS_CYC     = AUX_CYC0 + AUX_FS_SLOT;
-localparam int PLAIN_CYC  = AUX_CYC0 + AUX_PLAIN_SLOT;
 localparam int INJECT_CYC = AUX_CYC0 + AUX_INJECT_SLOT;
 
 initial begin
@@ -101,25 +101,25 @@ initial begin
     set_ctrl(2, 32'h000F_0000);    // channel_enable = 0x0F (CTRL_REG_2 [23:16])
     repeat (8) @(negedge clk); rstn = 1; repeat (8) @(negedge clk);
 
-    // slot 1 (plain): a 3-entry loop. slot 0 (RT register): a single WRITE(0,0)
-    // set via target 0 (bank/addr/length ignored -- it does not cycle).
-    aux_write(AUX_PLAIN_SLOT, 0, 0, 0, 16'h2000);
-    aux_write(AUX_PLAIN_SLOT, 0, 0, 1, 16'h2100);
-    aux_write(AUX_PLAIN_SLOT, 0, 0, 2, 16'h2200);
-    aux_write(AUX_PLAIN_SLOT, 0, 1, 0, {2'b00, 6'd2, 2'b00, 6'd0});    // loop 0..2
-    aux_write(AUX_FS_SLOT,    0, 0, 0, 16'h8000);                      // WRITE(0,0x00) -> rt_cmd
+    // slot 0 (program): a 3-entry loop. slot 1 (fs register): a single WRITE(0,0)
+    // set via target 1 (bank/addr/length ignored -- it does not cycle).
+    aux_write(AUX_SWEEP_SLOT, 0, 0, 0, 16'h2000);
+    aux_write(AUX_SWEEP_SLOT, 0, 0, 1, 16'h2100);
+    aux_write(AUX_SWEEP_SLOT, 0, 0, 2, 16'h2200);
+    aux_write(AUX_SWEEP_SLOT, 0, 1, 0, {2'b00, 6'd2, 2'b00, 6'd0});    // loop 0..2
+    aux_write(AUX_FS_SLOT,    0, 0, 0, 16'h8000);                      // WRITE(0,0x00) -> fs_cmd
     // reg3_static + no aux enable bit needed (always on)
     set_ctrl(22, {8'h1C, 24'b0});
     repeat (4) @(negedge clk);
     set_ctrl(0, 32'h1);            // start transmission
 
-    // packet 0: channel cycles carry the CONVERT table; plain slot plays entry 0
+    // packet 0: channel cycles carry the CONVERT table; sweep slot plays entry 0
     next_packet(pkt);
     for (int i = 0; i < N_CHAN_CMDS; i++) chk($sformatf("p0 conv[%0d]", i), pkt[i], convert_word(i));
-    chk("p0 plain[0]", pkt[PLAIN_CYC], 16'h2000);
-    next_packet(pkt); chk("p1 plain[1]", pkt[PLAIN_CYC], 16'h2100);
-    next_packet(pkt); chk("p2 plain[2]", pkt[PLAIN_CYC], 16'h2200);
-    next_packet(pkt); chk("p3 plain wrap", pkt[PLAIN_CYC], 16'h2000);
+    chk("p0 sweep[0]", pkt[SWEEP_CYC], 16'h2000);
+    next_packet(pkt); chk("p1 sweep[1]", pkt[SWEEP_CYC], 16'h2100);
+    next_packet(pkt); chk("p2 sweep[2]", pkt[SWEEP_CYC], 16'h2200);
+    next_packet(pkt); chk("p3 sweep wrap", pkt[SWEEP_CYC], 16'h2000);
 
     // ---- fast settle ON edge -> WRITE(0,0xFE) on the FS slot for one packet ----
     set_ctrl(22, {8'h1C, 19'b0, 1'b1, 4'b0});   // fs_sw = bit 4
@@ -135,8 +135,8 @@ initial begin
     aux_inject(16'hFE00);                        // READ(62)
     next_packet(pkt); if (pkt[INJECT_CYC] != 16'hFE00) next_packet(pkt);
     chk("inject on wire", pkt[INJECT_CYC], 16'hFE00);
-    next_packet(pkt);                            // reverts to slot 2's register default (CONVERT 34)
-    chk("inject revert", pkt[INJECT_CYC], convert_word(AUX_CYC0 + AUX_INJECT_SLOT));
+    next_packet(pkt);                            // reverts to slot 2's register default (CONVERT 49, temperature)
+    chk("inject revert", pkt[INJECT_CYC], convert_word(49));
 
     set_ctrl(0, 32'h0);
     repeat (50) @(negedge clk);

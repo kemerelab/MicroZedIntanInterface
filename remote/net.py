@@ -217,13 +217,14 @@ def rhd_decode(cmd):
         return "CALIBRATE"
     return f"0x{cmd:04X}"
 
-# Default aux commands. Only slot 1 cycles (the accelerometer sweep); slots 0 and
+# Default aux commands. Only slot 0 cycles (the accelerometer sweep); slots 1 and
 # 2 are single command registers.
-AUX_SLOT0_DEFAULT = [rhd_write(3, 0x02)]   # slot 0 RT: Reg-3 digout carrier (rewritten by shadow)
-AUX_SLOT1_DEFAULT = [rhd_convert(32), rhd_convert(33), rhd_convert(34)]  # slot 1 accel sweep @10 kHz
-# Housekeeping (supply/temp/chip-ID/'INTAN' ROM) is no longer a standing slot-2
-# program -- read it on demand via read_register (chip ID reg 63, #amps 62,
-# 'INTAN' ROM 40-44) or an injected CONVERT(48/49) for supply/temp.
+AUX_SLOT0_DEFAULT = [rhd_convert(32), rhd_convert(33), rhd_convert(34)]  # slot 0 accel sweep @10 kHz
+AUX_SLOT1_DEFAULT = [rhd_read(40)]     # slot 1 fs register: INTAN ROM 'I' (register 40)
+AUX_SLOT2_DEFAULT = [rhd_convert(49)]  # slot 2 inject register: temperature aux-ADC channel
+# Deeper housekeeping (supply, chip-ID, #amps, full 'INTAN' ROM) is read on demand
+# via read_register (chip ID reg 63, #amps 62, 'INTAN' ROM 40-44) or an injected
+# CONVERT(48) for supply voltage.
 HOUSEKEEPING_REGS = {"chip_id": 63, "num_amps": 62, "intan_rom": [40, 41, 42, 43, 44]}
 
 # ACK status codes
@@ -1863,19 +1864,20 @@ def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
         print(f"[AUX] Slot {slot} bank {bank}: {len(cmds)} commands (loop at {loop_idx})")
     return ok
 
-def aux_set_rt_command(sock, cmd):
-    """Set slot 0's fixed RT command (cycle 32). Slot 0 does NOT cycle -- it is a
-    single register the override rewrites live (fast-settle whole-replace / Reg-3
-    digout). Writes target 0 with bank/addr ignored by the PL."""
-    ok, _ = send_binary_command(sock, CMD_AUX_WRITE_WORD, 0, cmd & 0xFFFF)
+def aux_set_register(sock, slot, cmd):
+    """Set a fixed command register (slot 1 = fs / override, slot 2 = inject). These
+    slots do NOT cycle -- each is a single register the PL sets from the write port
+    (bank/addr ignored). Slot 1 is rewritten live by the override (fast-settle
+    whole-replace / Reg-3 digout); slot 2 is whole-replaced by injection."""
+    ok, _ = send_binary_command(sock, CMD_AUX_WRITE_WORD, slot & 3, cmd & 0xFFFF)
     if ok:
-        print(f"[AUX] slot 0 RT command <- {rhd_decode(cmd)}")
+        print(f"[AUX] slot {slot} register <- {rhd_decode(cmd)}")
     return ok
 
 def aux_bank_select(sock, slot, bank):
-    """Atomically swap a cycling program (slot 1 or 2) to a bank at the next packet
+    """Atomically swap the cycling program (slot 0) to a bank at the next packet
     boundary. The firmware confirms the swap (bank_active poll) before ACKing.
-    Slot 0 has no bank (the firmware treats a slot-0 select as a confirmed no-op)."""
+    Slots 1 and 2 have no bank (the firmware treats their select as a confirmed no-op)."""
     ok, _ = send_binary_command(sock, CMD_AUX_BANK_SELECT, slot & 3, bank & 1)
     print(f"[AUX] Slot {slot} -> bank {bank}: {'OK' if ok else 'FAILED'}")
     return ok
@@ -1928,13 +1930,15 @@ def set_digout(sock, sw=False, gpio_en=False, pin=0, reg3_static=0x00):
 
 def aux_demo_setup(sock):
     """Load the default aux commands (the aux command engine is always on):
-    slot 0 = fixed RT command (Reg-3 digout carrier, rewritten live by the
-             override) -- a register, does NOT cycle;
-    slot 1 = accelerometer sweep program @10 kHz -- the ONLY cycling slot;
-    slot 2 = the inject register (left at its default; injection whole-replaces it
-             on demand). Housekeeping is read on demand (read_register), not streamed."""
-    return (aux_set_rt_command(sock, AUX_SLOT0_DEFAULT[0]) and
-            aux_upload_bank(sock, 1, 0, AUX_SLOT1_DEFAULT))
+    slot 0 = accelerometer sweep program @10 kHz -- the ONLY cycling slot; its reply
+             pairs intra-packet at data word 34;
+    slot 1 = the fs register (INTAN ROM 'I'), rewritten live by the override on a
+             fast-settle edge -- a register, does NOT cycle;
+    slot 2 = the inject register (temperature channel); injection whole-replaces it
+             on demand. Deeper housekeeping is read on demand (read_register)."""
+    return (aux_upload_bank(sock, 0, 0, AUX_SLOT0_DEFAULT) and
+            aux_set_register(sock, 1, AUX_SLOT1_DEFAULT[0]) and
+            aux_set_register(sock, 2, AUX_SLOT2_DEFAULT[0]))
 
 def get_status(sock):
     """Get full status from device"""
@@ -2145,8 +2149,8 @@ def print_status(status):
           f"Digout: {status['aux_digout']}, "
           f"DSP Reset: {status['aux_dsp_reset']}")
     ba = status['aux_bank_active']
-    print(f"Active Bank: slot1={(ba >> 1) & 1}  (slots 0 and 2 are fixed registers)")
-    print(f"Slot Indices: {status['aux_indices']}  (only slot 1 cycles; 0/2 always 0)")
+    print(f"Active Bank: slot0={ba & 1}  (slots 1 and 2 are fixed registers)")
+    print(f"Slot Indices: {status['aux_indices']}  (only slot 0 cycles; 1/2 always 0)")
     print(f"Last Inject Result: 0x{status['aux_read_result']:08X}")
     def _src(sw, gp, pin):
         return f"GPIO pin {pin}" if gp else ("software" if sw else "off")

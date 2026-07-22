@@ -81,9 +81,9 @@ writes these as 7 × 64-bit FIFO header writes). Word map (32-bit LE):
 | 2 / 3 | 64-bit master timestamp |
 | 4 | `SEQ` (broadband per-stream, +1/packet; resets to 0 on START) |
 | 5 | `AUX0` = `channel_enable[7:0]` \| `num_data_words[23:8]` |
-| 6 | `AUX1` = `digital_in[7:0]` \| `aux_flags[15:8]` \| `echo0[31:16]` (old header w4) |
+| 6 | `AUX1` = `digital_in[7:0]` \| `aux_flags[15:8]` \| `echo_sweep[31:16]` (this packet's slot-0/accel command; its reply is data word 34) |
 | 7 | `RSVD` = 0 |
-| 8 | sub-block: prev-packet slot-2/3 aux echoes (old header w5) |
+| 8 | sub-block: prev-packet slot-1 (fs) \| slot-2 (inject) aux echoes = `{echo_inject[31:16], echo_fs[15:0]}` (replies land at data words 0/1) |
 | 9..12 | sub-block: the 8 external-ADC breadcrumbs (currently 0) |
 | 13 | sub-block: reserved (0) |
 | 14.. | DATA words — **byte-identical** to the legacy format |

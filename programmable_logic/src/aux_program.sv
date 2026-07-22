@@ -3,7 +3,7 @@
 // ONE cycling auxiliary-command program: a double-buffered command store that
 // steps one entry per acquisition packet and loops end->loop. This is the only
 // place the "banked sequencer" machinery lives -- it is instantiated exactly ONCE,
-// for slot 1 (the accelerometer / aux-ADC sweep). The other two aux slots are
+// for slot 0 (the accelerometer / aux-ADC sweep). The other two aux slots are
 // fixed command registers in aux_command_engine and do NOT use this module.
 //
 // Double buffer: two banks; bank_select picks the live bank and a change takes

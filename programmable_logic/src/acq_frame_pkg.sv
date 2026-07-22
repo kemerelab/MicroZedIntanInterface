@@ -23,17 +23,27 @@ package acq_frame_pkg;
     localparam int LAST_CYC     = N_FRAME_CMDS - 1;            // last cycle (= 34)
 
     // ---- fixed roles of the aux positions (index 0..N_AUX-1 within the aux group) ----
-    // These are three DIFFERENT things, not a homogeneous array: only slot 1 cycles
-    // (it is the one aux_program); slots 0 and 2 are fixed command registers. See
-    // aux_command_engine.sv.
-    localparam int AUX_FS_SLOT     = 0;  // cycle 32: fixed RT register; fast-settle whole-replaces it
-    localparam int AUX_PLAIN_SLOT  = 1;  // cycle 33: the one cycling program (ADC/accel sweep)
+    // These are three DIFFERENT things, not a homogeneous array: only slot 0 cycles
+    // (it is the one aux_program -- the accelerometer / aux-ADC sweep); slots 1 and 2
+    // are fixed command registers. See aux_command_engine.sv.
+    //
+    // The sweep is on slot 0 (cycle 32) DELIBERATELY: with the +2 SPI readback its reply
+    // lands in data word 34 of the SAME packet (AUX_SWEEP_REPLY_CYC), so the host pairs
+    // each accel axis with its command echo INTRA-packet -- label and sample travel
+    // together, and a dropped packet can never desync the axis. The two register slots
+    // (cycles 33/34) answer in the next packet; only the injection needs cross-packet
+    // tracking.
+    localparam int AUX_SWEEP_SLOT  = 0;  // cycle 32: the one cycling program (accel/aux-ADC sweep)
+    localparam int AUX_FS_SLOT     = 1;  // cycle 33: fixed register; fast-settle whole-replaces it
     localparam int AUX_INJECT_SLOT = 2;  // cycle 34: fixed register + one-shot inject target
 
     // ---- SPI readback pipeline ----
     // The chip's reply to the command at cycle C is captured at cycle C+SPI_READBACK_LAT.
     localparam int SPI_READBACK_LAT     = 2;
-    // So the injected command (cycle AUX_CYC0+AUX_INJECT_SLOT = 34) is answered in the NEXT
+    // The sweep (cycle AUX_CYC0+AUX_SWEEP_SLOT = 32) is answered in the SAME packet at
+    // (32 + 2) = data word 34 -- intra-packet, the whole point of putting it on slot 0.
+    localparam int AUX_SWEEP_REPLY_CYC  = (AUX_CYC0 + AUX_SWEEP_SLOT + SPI_READBACK_LAT) % N_FRAME_CMDS;
+    // The injected command (cycle AUX_CYC0+AUX_INJECT_SLOT = 34) is answered in the NEXT
     // packet at (34 + 2) mod 35 = cycle 1 -- derived here, never hardcoded downstream.
     localparam int AUX_INJECT_REPLY_CYC = (AUX_CYC0 + AUX_INJECT_SLOT + SPI_READBACK_LAT) % N_FRAME_CMDS;
     // Within that reply cycle the CIPO word[1] settles at SPI state 76 and is latched one

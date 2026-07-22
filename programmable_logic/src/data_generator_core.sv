@@ -240,7 +240,7 @@ test_signal_gen test_signal_gen_inst (
 );
 
 // ============================================================================
-// AUX COMMAND ENGINE + OVERRIDE (always on; un-programmed => plain per-slot CONVERTs)
+// AUX COMMAND ENGINE + OVERRIDE (always on; boots slot0=accel sweep, slot1='I', slot2=temp)
 // ============================================================================
 // Aux control registers 22..24 are decoded INSIDE aux_command_engine (bank
 // select, fast-settle/DSP/digout config, the write port, inject/write toggles).
@@ -258,11 +258,11 @@ logic [N_AUX*6-1:0]  aux_slot_indices;
 logic                aux_inject_active;
 logic                aux_dsp_force_h, aux_fs_active, aux_digout_state;
 
-// Aux is ALWAYS ON. The engine wires two fixed command registers (slot 0 = RT /
-// override, slot 2 = inject) plus one cycling program (slot 1 = accel, aux_program)
-// through the override. Every source powers up as CONVERT(AUX_CYC0+slot), so an
-// un-programmed engine simply emits the plain per-slot CONVERTs until a program,
-// override, or injection is configured.
+// Aux is ALWAYS ON. The engine wires one cycling program (slot 0 = accel sweep,
+// aux_program) plus two fixed command registers (slot 1 = fs / override, slot 2 =
+// inject) through the override. At power-on slot 0 sweeps the accel axes, slot 1
+// reads the INTAN 'I' register, and slot 2 reads the temperature channel; the
+// override is pass-through and injection idle until one is configured.
 aux_command_engine #(.ADDR_W(6)) aux_engine_inst (
     .clk                (clk),
     .rstn               (rstn),
@@ -286,18 +286,20 @@ aux_command_engine #(.ADDR_W(6)) aux_engine_inst (
 // Command-echo identity: the header echoes each aux command so the host can pair
 // it with its reply. SPI readback is +2 cycles, so the reply to the command at
 // cycle C lands at cycle (C+2) mod 35:
-//   fs slot     (cycle 32) -> reply in data word 34 of THIS packet
-//   plain slot  (cycle 33) -> reply at cycle 0 of the NEXT packet
+//   sweep slot  (cycle 32) -> reply in data word 34 of THIS packet
+//   fs slot     (cycle 33) -> reply at cycle 0 of the NEXT packet
 //   inject slot (cycle 34) -> reply at cycle 1 of the NEXT packet
-// So the header carries this packet's fs-slot command (header word 6) plus the
-// PREVIOUS packet's plain- and inject-slot commands (word 8) -- each reply is
-// fully labeled by the command that produced it.
-logic [15:0] echo_plain_prev, echo_inject_prev;   // prev packet's plain/inject commands
+// The accel sweep is on slot 0 so its command echo (header word 6) and its reply
+// (data word 34) ride the SAME packet -- the host de-interleaves each axis without
+// crossing a packet boundary. Word 8 still carries the PREVIOUS packet's fs- and
+// inject-slot commands for their next-packet replies; of those only the injection
+// needs tracking (the fs read is a fixed housekeeping label).
+logic [15:0] echo_fs_prev, echo_inject_prev;   // prev packet's fs/inject register commands
 logic        echo_valid;           // 0 for the first packet after start (no "prev" yet)
 logic        inject_result_pkt;    // the cycle-1 reply of THIS packet answers an injection
 always_ff @(posedge clk) begin
     if (!rstn) begin
-        echo_plain_prev   <= 16'h0;
+        echo_fs_prev      <= 16'h0;
         echo_inject_prev  <= 16'h0;
         echo_valid        <= 1'b0;
         inject_result_pkt <= 1'b0;
@@ -305,7 +307,7 @@ always_ff @(posedge clk) begin
         echo_valid        <= 1'b0;
         inject_result_pkt <= 1'b0;
     end else if (seq_advance) begin
-        echo_plain_prev   <= aux_cmds_final[AUX_PLAIN_SLOT*16  +: 16];
+        echo_fs_prev      <= aux_cmds_final[AUX_FS_SLOT*16     +: 16];
         echo_inject_prev  <= aux_cmds_final[AUX_INJECT_SLOT*16 +: 16];
         echo_valid        <= 1'b1;
         inject_result_pkt <= aux_inject_active;
@@ -574,7 +576,7 @@ always_ff @(posedge clk) begin
             //   write1 (w2/w3):  TS_LO                      | TS_HI
             //   write2 (w4/w5):  SEQ (broadband)            | AUX0=ce|num_data_words<<8
             //   write3 (w6/w7):  AUX1=digital/flags/fs-echo | RSVD=0
-            //   write4 (w8/w9):  plain+inject echoes        | analog ch0-1   (sub-block)
+            //   write4 (w8/w9):  fs+inject echoes           | analog ch0-1   (sub-block)
             //   write5 (w10/w11):analog ch2-3              | analog ch4-5
             //   write6 (w12/w13):analog ch6-7              | reserved=0
             // Latch the per-packet broadband seq at the packet start, before it is
@@ -600,24 +602,25 @@ always_ff @(posedge clk) begin
                             {8'd0, bb_num_data_words[15:0], channel_enable_reg}, // w5 AUX0
                             bb_seq};                                            // w4 SEQ
                         // AUX1 (w6) = digital inputs + aux flags + this packet's
-                        // fs-slot command echo:
+                        // sweep-slot command echo:
                         //   [7:0] digital_in, [15:8] aux_flags,
-                        //   [31:16] fs-slot command (its reply is data word 34).
+                        //   [31:16] sweep-slot command (its reply is data word 34) --
+                        //   this is the accel axis label, paired intra-packet.
                         // RSVD (w7) = 0.
                         7'd3: fifo_write_data <= {
                             32'h0,                                              // w7 RSVD
-                            aux_cmds_final[AUX_FS_SLOT*16 +: 16],               // w6[31:16] fs-slot echo
+                            aux_cmds_final[AUX_SWEEP_SLOT*16 +: 16],            // w6[31:16] sweep-slot echo (accel axis)
                             aux_flags,                                          // w6[15:8]
                             digital_in_latched};                                // w6[7:0]
                         // ---- broadband sub-block (words 8..13) ----
-                        // w8 = the previous packet's plain- and inject-slot command
+                        // w8 = the previous packet's fs- and inject-slot command
                         //      echoes (their replies land at cycles 0/1 of THIS
                         //      packet); w9 = analog ch0-1 breadcrumb (0). w10..w13 =
                         //      the 8 external-ADC breadcrumbs (currently 0) + reserved.
                         7'd4: fifo_write_data <= {
                             32'h0,                                              // w9 analog ch0-1 (breadcrumb)
                             echo_inject_prev,                                   // w8[31:16] prev inject-slot echo
-                            echo_plain_prev};                                   // w8[15:0]  prev plain-slot echo
+                            echo_fs_prev};                                      // w8[15:0]  prev fs-slot echo
                         7'd5: fifo_write_data <= 64'h0;  // w10 analog ch2-3 | w11 analog ch4-5
                         7'd6: fifo_write_data <= 64'h0;  // w12 analog ch6-7 | w13 reserved
                     endcase
@@ -724,11 +727,11 @@ assign status_regs_pl[9*32 +: 32] = ctrl_regs_pl[3*32 +: 32]; // reflected
 
 // Status register 11 will be added by wrapper (FIFO/BRAM). Aux engine status
 // goes out via dedicated ports -> wrapper status regs 11/12:
-//   aux_status: [2:0] bank_active (only bit 1 = slot-1 program can be set),
+//   aux_status: [2:0] bank_active (only bit 0 = slot-0 program can be set),
 //               [3] aux engine active (always 1), [4] fast_settle_active,
 //               [5] digout_state, [6] dsp_force_h, [7] inject ack toggle,
-//               [21:16] slot-1 program index. The slot-0/slot-2 index fields
-//               ([13:8]/[29:24]) are always 0 -- those slots are registers.
+//               [13:8] slot-0 program index. The slot-1/slot-2 index fields
+//               ([21:16]/[29:24]) are always 0 -- those slots are registers.
 //   aux_read_result: {cipo_a1_regular[15:0], cipo_a0_regular[15:0]} of the last
 //               injected command's response (firmware READ_REGISTER path).
 assign aux_status = {
