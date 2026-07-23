@@ -1139,7 +1139,6 @@ class DataValidator:
         global cable_test_mode, cable_test_packets_captured, manual_cable_test_mode
 
         self.packet_count += 1
-        self.last_packet_raw = data
 
         if cable_test_mode:
             if cable_test_packets_captured < 17:
@@ -1178,13 +1177,18 @@ class DataValidator:
             return None
 
         try:
+            # Full unpack: the aux command path (echoes in words 6/8, the slot-0 accel
+            # reply at data word 34) IS what we're testing, so every data word must be
+            # available -- and the historical net.py did this full unpack at 30k, so it
+            # was never the throughput problem. struct.unpack accepts the memoryview
+            # from recv_into directly (no copy). words is a plain int tuple, safe to keep.
             words = struct.unpack(f'<{self.expected_packet_size_words}I', data)
             self.last_packet_words = words
 
             # Feed packets to the cable detector during detection. Detection runs
             # with channel_enable=0xFF (both ports), so its packets are the
-            # dual-port DETECTION_PACKET_SIZE_BYTES (616), not the single-port
-            # manual-cable-test size. The detector only queues while capturing.
+            # dual-port DETECTION_PACKET_SIZE_BYTES (616). The detector only queues
+            # while capturing.
             if self.cable_detector and len(data) == DETECTION_PACKET_SIZE_BYTES:
                 self.cable_detector.capture_packet(words)
 
@@ -1226,19 +1230,16 @@ class DataValidator:
                 elapsed = now - self.start_time
                 total_rate = self.packet_count / elapsed if elapsed > 0 else 0
                 inst_rate = (self.packet_count - self.last_packet_count) / (now - self.last_stats_time) if (now - self.last_stats_time) > 0 else 0
-                
                 if len(words) >= BB_HEADER_WORDS + 4:
                     h = BB_HEADER_WORDS
                     data_sample = (f"Data: [0x{words[h]:08X}, 0x{words[h+1]:08X}, "
                                    f"0x{words[h+2]:08X}, 0x{words[h+3]:08X}]")
                 else:
-                    data_sample = f"Data: [packet too short]"
-
+                    data_sample = "Data: [packet too short]"
                 print(f"[INFO] Packet {self.packet_count}: ts={timestamp} seq={seq}, "
                       f"Rate: {total_rate:.1f} pkt/s (avg), {inst_rate:.1f} pkt/s (inst), "
                       f"Errors: {self.error_count} (seq_gaps={self.seq_gaps})")
                 print(f"       {data_sample}")
-                
                 self.last_stats_time = now
                 self.last_packet_count = self.packet_count
 
@@ -1409,36 +1410,34 @@ class UnifiedSink:
         return True
 
     def _recv_loop(self):
-        # SINGLE-THREAD hot path, kept as LEAN as the historical udp_listener that
-        # sustained 30k for years: recvfrom -> validate_packet, inline, one thread.
-        # recvfrom() releases the GIL while it blocks; validate runs on the same
-        # thread -- no queue, no second thread, no GIL handoff (that two-thread
-        # queue.Queue design capped ~25k). And NO redundant header pre-parse:
-        # validate_packet already checks magic + stream_type, so re-unpacking the
-        # header here just to demux cost ~4% for nothing (the data port only carries
-        # broadband). Same datagram structure, same validate_packet -- only the
-        # plumbing that carries a datagram to it changed.
-        recvfrom = self._sock.recvfrom
+        # SINGLE-THREAD, ZERO-COPY hot path. recv_into a REUSED bytearray so NO fresh
+        # bytes object is allocated per datagram -- recvfrom() allocated a ~600B copy
+        # per packet = ~18 MB/s of malloc/free churn at 30k/s, the memory pressure we
+        # care about. The parser gets a memoryview (no data copy) and unpacks only the
+        # 5-word header; validate_packet unpacks the 145 data words LAZILY, only when a
+        # consumer needs them. One thread: recv_into releases the GIL while it blocks,
+        # then validate runs on the same thread -- no queue, no handoff (the two-thread
+        # queue.Queue design capped ~25k). Same datagram structure; only plumbing changed.
+        recv_into = self._sock.recv_into
+        buf = bytearray(4096)
+        view = memoryview(buf)
         validate = validator.validate_packet
         while self._running:
             try:
-                data, addr = recvfrom(4096)
+                n = recv_into(buf)              # no allocation, no copy -- fills buf
             except socket.timeout:
                 continue
             except OSError:
                 break
-            self.last_addr = addr
-            psize = validator.expected_packet_size_bytes
-            total = len(data)
-            if total == psize:              # one packet per datagram (the norm)
+            if not n:
+                continue
+            # The board sends exactly one packet per datagram (single-sample latency),
+            # so no re-chunking. validate_packet returns the timestamp for a good
+            # broadband packet, None otherwise.
+            if validate(view[:n]) is not None:
                 self.bb_pkts += 1
-                validate(data)
-            elif psize > 0:                 # defensive: coalesced datagrams
-                for off in range(0, total - psize + 1, psize):
-                    self.bb_pkts += 1
-                    validate(data[off:off + psize])
             else:
-                self.other_pkts += 1        # board packet size not known yet
+                self.other_pkts += 1
 
     def stop(self):
         self._running = False
