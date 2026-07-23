@@ -71,45 +71,84 @@ def _open_beacon_socket(quiet=False):
     return sock
 
 
-def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False, rebind_interval=5.0):
-    """Listen for the device discovery beacon on UDP BEACON_PORT and return the
-    first valid board (dict incl. 'ip' from the datagram source), or None if none
-    arrives within `timeout`. Fully passive -- sends nothing to the board.
+def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False, rebind_interval=5.0,
+                   data_port=None):
+    """Listen for the device discovery beacon on UDP BEACON_PORT and return the first
+    valid board (dict incl. 'ip' from the datagram source), or None if none arrives
+    within `timeout`. Fully passive -- sends nothing to the board.
 
-    Re-creates the listening socket every `rebind_interval` s. This matters when
-    the board-facing interface appears or flaps DURING discovery -- e.g. a USB-C
-    Ethernet adapter re-enumerating on a board power-cycle takes the interface
-    down then up. A socket bound while that interface was down won't reliably
-    receive its broadcasts once it returns; a fresh bind after it's up does."""
+    If `data_port` is given, ALSO listen there for a live broadband DATA packet: when
+    the board is already up and streaming (e.g. to OpenEphys) we adopt its source IP
+    the instant a packet arrives, instead of waiting out the full beacon timeout for a
+    ~1 Hz broadcast that directed-broadcast filtering or the host stack may be dropping.
+
+    Re-creates the listening socket every `rebind_interval` s. This matters when the
+    board-facing interface appears or flaps DURING discovery -- e.g. a USB-C Ethernet
+    adapter re-enumerating on a board power-cycle takes the interface down then up. A
+    socket bound while that interface was down won't reliably receive its broadcasts
+    once it returns; a fresh bind after it's up does."""
+    import select
     deadline = time.time() + timeout
     while time.time() < deadline:
         # Diagnostic: which local IP would reach the board right now? If it's not
         # on the board's subnet, the board-facing interface isn't up yet (this is
         # a pure route lookup -- no packet is sent to the board).
         if not quiet:
-            print(f"[DISCOVERY] listening on UDP {BEACON_PORT} "
-                  f"(local route toward {ZYNQ_IP}: {get_local_ip()})")
-        sock = _open_beacon_socket(quiet)
-        if sock is None:
+            print(f"[DISCOVERY] listening on UDP {BEACON_PORT}"
+                  + (f" + data {data_port}" if data_port else "")
+                  + f" (local route toward {ZYNQ_IP}: {get_local_ip()})")
+        bsock = _open_beacon_socket(quiet)
+        if bsock is None:
             time.sleep(1.0)
             continue
+        # Optional passive listener on the data port -- if the board is already
+        # streaming, its source address reveals it without any beacon.
+        dsock = None
+        if data_port is not None:
+            try:
+                dsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                dsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if hasattr(socket, 'SO_REUSEPORT'):
+                    try:
+                        dsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                    except OSError:
+                        pass
+                dsock.bind(('', data_port))
+            except OSError:
+                if dsock is not None:
+                    dsock.close()
+                dsock = None
+        socks = [s for s in (bsock, dsock) if s is not None]
         try:
             sub_deadline = min(deadline, time.time() + rebind_interval)
             while time.time() < sub_deadline:
-                remaining = sub_deadline - time.time()
-                sock.settimeout(max(0.2, min(remaining, 3.0)))
-                try:
-                    data, addr = sock.recvfrom(2048)
-                except socket.timeout:
-                    continue
-                dev = _parse_beacon(data)
-                if dev is None:
-                    continue             # not our beacon; keep listening
-                dev['src_ip'] = addr[0]
-                dev['ip'] = addr[0]      # datagram source is authoritative
-                return dev
+                remaining = max(0.0, sub_deadline - time.time())
+                ready, _, _ = select.select(socks, [], [], min(remaining, 3.0))
+                for s in ready:
+                    try:
+                        data, addr = s.recvfrom(2048)
+                    except socket.timeout:
+                        continue
+                    if s is bsock:
+                        dev = _parse_beacon(data)
+                        if dev is None:
+                            continue         # not our beacon; keep listening
+                        dev['src_ip'] = addr[0]
+                        dev['ip'] = addr[0]  # datagram source is authoritative
+                        dev['via'] = 'beacon'
+                        return dev
+                    else:
+                        # data port: a live broadband stream (UNIFIED_MAGIC) reveals
+                        # the board's IP as its source address.
+                        if len(data) >= 4 and struct.unpack('<I', data[:4])[0] == UNIFIED_MAGIC:
+                            if not quiet:
+                                print(f"[DISCOVERY] board already streaming from {addr[0]} "
+                                      f"-- adopting (no beacon needed)")
+                            return {'ip': addr[0], 'src_ip': addr[0], 'via': 'data',
+                                    'tcp_port': 0, 'udp_port': 0, 'fw': 0, 'mac': ''}
         finally:
-            sock.close()
+            for s in socks:
+                s.close()
         left = deadline - time.time()
         if not quiet and left > 0:
             print(f"[DISCOVERY]   ...still listening ({left:.0f}s left, re-binding)")
@@ -156,7 +195,7 @@ CMD_PING = 0x60
 # Aux command sequencer / override layer (mirror firmware/src-core0/network.c)
 CMD_AUX_WRITE_WORD = 0x70   # param1 = slot | bank<<8 | is_len<<16; param2 = addr<<16 | data
 CMD_AUX_BANK_SELECT = 0x71  # param1 = slot; param2 = bank
-CMD_AUX_SEQ_EN = 0x72       # param1 = 0/1
+# 0x72 retired (was CMD_AUX_SEQ_EN): the aux command engine is always on
 CMD_READ_REGISTER = 0x73    # param1 = reg -> 4-byte {cipo1, cipo0} response
 CMD_WRITE_REGISTER = 0x74   # param1 = reg; param2 = value -> 4-byte echo response
 CMD_SET_FAST_SETTLE = 0x75  # param1 = amp: sw|gpio_en<<1|pin<<4; param2 = dsp: same layout
@@ -207,12 +246,15 @@ def rhd_decode(cmd):
         return "CALIBRATE"
     return f"0x{cmd:04X}"
 
-# Default aux slot programs (command-bank-design.md slot roles)
-AUX_SLOT0_DEFAULT = [rhd_write(3, 0x02)]                # RT slot: Reg-3 carrier (rewritten by shadow)
-AUX_SLOT1_DEFAULT = [rhd_convert(32), rhd_convert(33), rhd_convert(34)]  # accel @ 10 kHz
-AUX_SLOT2_DEFAULT = [rhd_convert(48), rhd_convert(49),  # supply, temp
-                     rhd_read(63), rhd_read(62),        # chip ID, #amps
-                     rhd_read(40), rhd_read(41), rhd_read(42), rhd_read(43), rhd_read(44)]  # 'INTAN'
+# Default aux commands. Only slot 0 cycles (the accelerometer sweep); slots 1 and
+# 2 are single command registers.
+AUX_SLOT0_DEFAULT = [rhd_convert(32), rhd_convert(33), rhd_convert(34)]  # slot 0 accel sweep @10 kHz
+AUX_SLOT1_DEFAULT = [rhd_read(40)]     # slot 1 fs register: INTAN ROM 'I' (register 40)
+AUX_SLOT2_DEFAULT = [rhd_convert(49)]  # slot 2 inject register: temperature aux-ADC channel
+# Deeper housekeeping (supply, chip-ID, #amps, full 'INTAN' ROM) is read on demand
+# via read_register (chip ID reg 63, #amps 62, 'INTAN' ROM 40-44) or an injected
+# CONVERT(48) for supply voltage.
+HOUSEKEEPING_REGS = {"chip_id": 63, "num_amps": 62, "intan_rom": [40, 41, 42, 43, 44]}
 
 # ACK status codes
 ACK_SUCCESS = 0x06
@@ -232,389 +274,472 @@ manual_cable_test_mode = False
 # AUTOMATED CABLE DETECTION CLASSES
 # ============================================================================
 
+# Automated cable detection mirrors the OpenEphys plugin's runAutoDetection /
+# testPhaseParallel / scoreChannel (Source/IntanInterface.cpp). Both SPI ports
+# are detected in PARALLEL: channel_enable = 0xFF puts port A's CIPO0/CIPO1 AND
+# port B's CIPO0/CIPO1 into every packet as four tightly-packed lanes, so one
+# 16-value phase sweep scores all four lanes and picks a best phase PER PORT.
+
+# --- Detection tuning (mirror IntanInterface.cpp anonymous-namespace constants)
+DETECTION_THRESHOLD = 60.0        # a lane counts as detected only above this
+NUM_PHASES_TO_TEST = 16
+DETECTION_LOOP_COUNT = 0          # 0 = infinite; finite counts emit zero UDP
+                                  # (firmware holds a one-packet guard band)
+DETECTION_CHANNEL_ENABLE = 0xFF   # both ports, all 8 streams -> A and B parallel
+
+# The unified broadband header is 14 words; scoreChannel slices the data block
+# from here. net.py previously sliced packet[8:] -- that was a bug (it read 6
+# header/sub-block words as data and mis-located every lane), matching the same
+# bug the plugin fixed.
+CABLE_TEST_DATA_OFFSET_WORDS = 14  # == BB_HEADER_WORDS (defined later in module)
+
+# Detection packet with ce=0xFF: 14-word unified header + 140 data = 154 words.
+# (== calculate_packet_size(0xFF); hardcoded here because that helper is defined
+# later in the module.) The validator gates detection packets on this size.
+DETECTION_PACKET_SIZE_WORDS = 154
+DETECTION_PACKET_SIZE_BYTES = DETECTION_PACKET_SIZE_WORDS * 4
+
+# Expected patterns and chip IDs (mirror IntanInterface.cpp)
+INTAN_PATTERN = [0x0049, 0x004E, 0x0054, 0x0041, 0x004E]  # 'I', 'N', 'T', 'A', 'N'
+CHIP_ID_RHD2164 = 4    # 64-channel, with DDR
+CHIP_ID_RHD2132 = 1    # 32-channel, no DDR
+CHIP_ID_RHD2216 = 2    # 16-channel, no DDR (scored as RHD2132)
+MISO_REG_DDR = 0x35    # MISO register regular word when DDR available
+MISO_DDR_DDR = 0x3A    # MISO register DDR word when DDR available
+MISO_NO_DDR = 0x00     # MISO register when no DDR
+
+# Chip type labels (mirror ChipType / chipTypeToString)
+CHIP_TYPE_NONE = "None"
+CHIP_TYPE_RHD2132 = "RHD2132"
+CHIP_TYPE_RHD2164 = "RHD2164"
+
+
+@dataclass
+class _LaneBest:
+    """Per-CIPO-lane best across the sweep (mirror IntanInterface::LaneBest).
+    stride/offset pick this lane out of the tightly-packed data block: with
+    ce=0xFF every SPI cycle emits 4 words (A.CIPO0, A.CIPO1, B.CIPO0, B.CIPO1),
+    so stride=4 and offset 0..3."""
+    label: str
+    stride: int
+    offset: int
+    best_score: float = 0.0
+    best_type: str = CHIP_TYPE_NONE
+    best_has_ddr: bool = False
+    best_phase: int = 0
+    detected: bool = False
+
+
 @dataclass
 class PhaseResult:
+    """Raw per-phase scores for all four lanes (order: A.CIPO0, A.CIPO1,
+    B.CIPO0, B.CIPO1)."""
     phase: int
-    cipo0_score: float
-    cipo1_score: float
-    intan_pattern_cipo0: List[int]
-    intan_pattern_cipo1: List[int]
-    miso_register_cipo0: int
-    miso_register_cipo1: int
-    cipo0_valid: bool
-    cipo1_valid: bool
-    cipo0_has_ddr: bool = False
-    cipo1_has_ddr: bool = False
+    scores: List[float]
+    chip_types: List[str]
+    has_ddr: List[bool]
+
 
 @dataclass
 class DetectionResult:
+    """Dual-port detection result (mirror AutoDetectionResult)."""
     success: bool
     chips_detected: bool
-    best_phase0: int
-    best_phase1: int
+    best_phase0: int              # port A phase (CMD_SET_PHASE)
+    best_phase1: int              # port B phase (CMD_SET_PHASE_B)
     optimal_channel_mask: int
-    best_cipo0_score: float
-    best_cipo1_score: float
-    cipo0_present: bool
-    cipo1_present: bool
+    # Port A
+    cipo0_detected: bool
+    cipo0_chip_type: str
     cipo0_has_ddr: bool
+    cipo0_score: float
+    cipo1_detected: bool
+    cipo1_chip_type: str
     cipo1_has_ddr: bool
-    all_results: List[PhaseResult]
-    
+    cipo1_score: float
+    # Port B
+    portb_cipo0_detected: bool
+    portb_cipo0_chip_type: str
+    portb_cipo0_has_ddr: bool
+    portb_cipo1_detected: bool
+    portb_cipo1_chip_type: str
+    portb_cipo1_has_ddr: bool
+    all_phases: List[PhaseResult]
+
+    def summary(self) -> str:
+        if not self.success:
+            return "Detection failed. Check connections and try manual configuration."
+        if not self.chips_detected:
+            return ("No Intan chips detected. Verify:\n"
+                    "  - SPI cable connections\n"
+                    "  - Chip power supply\n"
+                    "  - Cable integrity")
+        lines = ["Chips detected!",
+                 f"  Port A phase: {self.best_phase0}",
+                 f"  Port B phase: {self.best_phase1}",
+                 f"  Channel Mask: 0x{self.optimal_channel_mask:X}"]
+        if self.cipo0_detected:
+            lines.append(f"  A.CIPO0: {self.cipo0_chip_type}")
+        if self.cipo1_detected:
+            lines.append(f"  A.CIPO1: {self.cipo1_chip_type}")
+        if self.portb_cipo0_detected:
+            lines.append(f"  B.CIPO0: {self.portb_cipo0_chip_type}")
+        if self.portb_cipo1_detected:
+            lines.append(f"  B.CIPO1: {self.portb_cipo1_chip_type}")
+        best_score = self.cipo0_score + self.cipo1_score
+        lines.append(f"  Detection Confidence: {'High' if best_score > 100 else 'Medium'}")
+        return "\n".join(lines)
+
     def get_channel_summary(self) -> str:
         if not self.chips_detected:
             return "No chips detected"
-        
-        channels = []
-        if self.cipo0_present:
-            if self.cipo0_has_ddr:
-                channels.append("CIPO0 (Regular + DDR)")
-            else:
-                channels.append("CIPO0 (Regular only)")
-        
-        if self.cipo1_present:
-            if self.cipo1_has_ddr:
-                channels.append("CIPO1 (Regular + DDR)")
-            else:
-                channels.append("CIPO1 (Regular only)")
-        
-        return f"Active channels: {', '.join(channels)}" if channels else "Chips detected but channels unclear"
-    
-    def get_recommendation(self) -> str:
-        if not self.success:
-            return "Detection failed. Check connections and try manual configuration."
-        
-        if not self.chips_detected:
-            return ("No Intan chips detected. Verify:\n"
-                   "  - SPI cable connections\n"
-                   "  - Chip power supply\n"
-                   "  - Cable integrity")
-        
-        confidence = "High" if self.best_score > 50 else "Medium"
-        return (f"Recommended configuration:\n"
-               f"  Phase0: {self.best_phase0}\n"
-               f"  Phase1: {self.best_phase1}\n"
-               f"  Channel mask: 0x{self.optimal_channel_mask:X}\n"
-               f"  {self.get_channel_summary()}\n"
-               f"  Detection confidence: {confidence}")
-
-"""
-Simplified automated cable detection for Intan interface
-Reduced from ~500 lines to ~250 lines while maintaining functionality
-"""
-
-import queue
-import time
-import struct
-from typing import List, Tuple, Optional
-from dataclasses import dataclass
-
-# Cable test uses all channels (for detection only)
-CABLE_TEST_CHANNEL_ENABLE = 0x0F
-CABLE_TEST_PACKET_SIZE_WORDS = 84
-CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
-
-# Expected patterns and chip IDs
-INTAN_PATTERN = [0x0049, 0x004E, 0x0054, 0x0041, 0x004E]  # 'I', 'N', 'T', 'A', 'N'
-CHIP_ID_DDR = 4        # RHD2164 with DDR
-CHIP_ID_NO_DDR = 1     # RHD2132 without DDR
-MISO_REG_DDR = 0x35    # MISO register regular word when DDR available
-MISO_DDR_DDR = 0x3A    # MISO register DDR word when DDR available
-MISO_NO_DDR = 0x00     # MISO register when no DDR
-
-"""
-Simplified automated cable detection for Intan interface
-Reduced from ~500 lines to ~250 lines while maintaining functionality
-"""
-
-import queue
-import time
-import struct
-from typing import List, Tuple, Optional
-from dataclasses import dataclass
-
-# Cable test uses all channels (for detection only)
-CABLE_TEST_CHANNEL_ENABLE = 0x0F
-CABLE_TEST_PACKET_SIZE_WORDS = 84
-CABLE_TEST_PACKET_SIZE_BYTES = CABLE_TEST_PACKET_SIZE_WORDS * 4
-
-# Expected patterns and chip IDs
-INTAN_PATTERN = [0x0049, 0x004E, 0x0054, 0x0041, 0x004E]  # 'I', 'N', 'T', 'A', 'N'
-CHIP_ID_DDR = 4        # RHD2164 with DDR
-CHIP_ID_NO_DDR = 1     # RHD2132 without DDR
-MISO_REG_DDR = 0x35    # MISO register regular word when DDR available
-MISO_DDR_DDR = 0x3A    # MISO register DDR word when DDR available
-MISO_NO_DDR = 0x00     # MISO register when no DDR
-
-@dataclass
-class PhaseResult:
-    phase: int
-    cipo0_score: float
-    cipo1_score: float
-    cipo0_has_ddr: bool
-    cipo1_has_ddr: bool
-
-@dataclass
-class DetectionResult:
-    success: bool
-    best_phase: int
-    optimal_channel_mask: int
-    cipo0_detected: bool
-    cipo1_detected: bool
-    cipo0_has_ddr: bool
-    cipo1_has_ddr: bool
-    all_phases: List[PhaseResult]
-    
-    def summary(self) -> str:
-        if not self.success:
-            return "No chips detected. Check SPI connections and power supply."
-        
         channels = []
         if self.cipo0_detected:
-            channels.append(f"CIPO0 ({'DDR' if self.cipo0_has_ddr else 'Regular only'})")
+            channels.append(f"A.CIPO0 ({self.cipo0_chip_type})")
         if self.cipo1_detected:
-            channels.append(f"CIPO1 ({'DDR' if self.cipo1_has_ddr else 'Regular only'})")
-        
-        return (f" Chips detected!\n"
-                f"  Phase: {self.best_phase}\n"
-                f"  Channels: {', '.join(channels)}\n"
-                f"  Channel mask: 0x{self.optimal_channel_mask:X}")
+            channels.append(f"A.CIPO1 ({self.cipo1_chip_type})")
+        if self.portb_cipo0_detected:
+            channels.append(f"B.CIPO0 ({self.portb_cipo0_chip_type})")
+        if self.portb_cipo1_detected:
+            channels.append(f"B.CIPO1 ({self.portb_cipo1_chip_type})")
+        if not channels:
+            return "No active channels"
+        return "Active channels: " + ", ".join(channels)
+
+
+def _empty_detection_result() -> DetectionResult:
+    return DetectionResult(
+        success=False, chips_detected=False,
+        best_phase0=0, best_phase1=0, optimal_channel_mask=0,
+        cipo0_detected=False, cipo0_chip_type=CHIP_TYPE_NONE,
+        cipo0_has_ddr=False, cipo0_score=0.0,
+        cipo1_detected=False, cipo1_chip_type=CHIP_TYPE_NONE,
+        cipo1_has_ddr=False, cipo1_score=0.0,
+        portb_cipo0_detected=False, portb_cipo0_chip_type=CHIP_TYPE_NONE,
+        portb_cipo0_has_ddr=False,
+        portb_cipo1_detected=False, portb_cipo1_chip_type=CHIP_TYPE_NONE,
+        portb_cipo1_has_ddr=False,
+        all_phases=[])
 
 
 class CableDetection:
-    def __init__(self, send_tcp_command_func):
+    def __init__(self, send_tcp_command_func, validator=None):
         """
-        Initialize with a command function that takes (cmd_id, param1, param2)
-        and returns (success: bool, data: Optional[bytes])
+        send_tcp_command_func(cmd_id, param1, param2) -> (success: bool, data)
+        validator (optional): the DataValidator, so detection can resize the
+        expected packet to the dual-port (0xFF) format, mirroring the plugin's
+        updateChannelEnable(). Without it, the validator would reject the
+        616-byte detection packets as wrong-size and never feed the detector.
         """
         self.send_cmd = send_tcp_command_func
+        self.validator = validator
         self.packet_queue = queue.Queue()
         self.capturing = False
-    
+
     def capture_packet(self, words: List[int]):
-        """Callback for UDP validator to provide packets during detection"""
+        """Callback for the UDP validator to provide packets during detection."""
         if self.capturing:
             try:
                 self.packet_queue.put_nowait(list(words))
             except queue.Full:
                 pass
-    
+
+    def _drain_queue(self):
+        while not self.packet_queue.empty():
+            try:
+                self.packet_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def detect(self, verbose=False) -> DetectionResult:
-        """Run automated detection and return results"""
-        
-        result = DetectionResult(
-            success=False, best_phase=0, optimal_channel_mask=0,
-            cipo0_detected=False, cipo1_detected=False,
-            cipo0_has_ddr=False, cipo1_has_ddr=False, all_phases=[]
-        )
-        
+        """Run dual-port detection: sweep 16 phases, score all four CIPO lanes
+        per phase, and pick the best phase per port (mirror runAutoDetection)."""
+        result = _empty_detection_result()
+
         try:
             if verbose:
-                print("[Detection] Starting automated cable detection...")
-            
-            # Initialize and configure
+                print("[Detection] Starting automated chip detection "
+                      "(port A + port B, parallel)...")
+
             if not self._initialize_chips(verbose):
                 return result
-            
-            # Test all phases
-            best_score = -1000
-            for phase in range(16):
-                if verbose:
-                    print(f"[Detection] Testing phase {phase}...")
-                
-                phase_result = self._test_phase(phase, verbose)
-                result.all_phases.append(phase_result)
-                
-                # Only consider phases where at least one channel is detected (score > 60)
-                cipo0_valid = phase_result.cipo0_score > 60
-                cipo1_valid = phase_result.cipo1_score > 60
-                
-                if cipo0_valid or cipo1_valid:
-                    # For valid detections, use sum of scores
-                    total_score = phase_result.cipo0_score + phase_result.cipo1_score
-                    if total_score > best_score:
-                        best_score = total_score
-                        result.best_phase = phase
-                        result.cipo0_detected = cipo0_valid
-                        result.cipo1_detected = cipo1_valid
-                        result.cipo0_has_ddr = phase_result.cipo0_has_ddr
-                        result.cipo1_has_ddr = phase_result.cipo1_has_ddr
-            
-            # Calculate success and channel mask
-            result.success = result.cipo0_detected or result.cipo1_detected
-            
-            if result.success:
-                result.optimal_channel_mask = 0
-                if result.cipo0_detected:
-                    result.optimal_channel_mask |= 0x01  # CIPO0 regular
-                    if result.cipo0_has_ddr:
-                        result.optimal_channel_mask |= 0x02  # CIPO0 DDR
-                if result.cipo1_detected:
-                    result.optimal_channel_mask |= 0x04  # CIPO1 regular
-                    if result.cipo1_has_ddr:
-                        result.optimal_channel_mask |= 0x08  # CIPO1 DDR
-            
+
+            # Per-lane bookkeeping (order matches the packed data-word order).
+            lanes = [
+                _LaneBest("A.CIPO0", 4, 0),
+                _LaneBest("A.CIPO1", 4, 1),
+                _LaneBest("B.CIPO0", 4, 2),
+                _LaneBest("B.CIPO1", 4, 3),
+            ]
+
+            for phase in range(NUM_PHASES_TO_TEST):
+                scores, types = self._test_phase(phase, lanes, verbose)
+                if scores is None:
+                    continue  # no packet received this phase
+
+                # Track the best phase per lane independently (different cable
+                # lengths can prefer different phases).
+                for i in range(4):
+                    if scores[i] > DETECTION_THRESHOLD and scores[i] > lanes[i].best_score:
+                        lanes[i].best_score = scores[i]
+                        lanes[i].best_type = types[i]
+                        lanes[i].best_has_ddr = (types[i] == CHIP_TYPE_RHD2164)
+                        lanes[i].best_phase = phase
+                        lanes[i].detected = True
+
+                if verbose and sum(scores) > 0:
+                    print(f"  Phase {phase}: A.CIPO0={scores[0]:.0f} "
+                          f"A.CIPO1={scores[1]:.0f} B.CIPO0={scores[2]:.0f} "
+                          f"B.CIPO1={scores[3]:.0f}")
+
+                result.all_phases.append(PhaseResult(
+                    phase=phase,
+                    scores=list(scores),
+                    chip_types=list(types),
+                    has_ddr=[t == CHIP_TYPE_RHD2164 for t in types]))
+
+            # Port A: lanes[0]/lanes[1]; Port B: lanes[2]/lanes[3].
+            result.cipo0_detected = lanes[0].detected
+            result.cipo0_chip_type = lanes[0].best_type
+            result.cipo0_has_ddr = lanes[0].best_has_ddr
+            result.cipo0_score = lanes[0].best_score
+            result.cipo1_detected = lanes[1].detected
+            result.cipo1_chip_type = lanes[1].best_type
+            result.cipo1_has_ddr = lanes[1].best_has_ddr
+            result.cipo1_score = lanes[1].best_score
+
+            result.portb_cipo0_detected = lanes[2].detected
+            result.portb_cipo0_chip_type = lanes[2].best_type
+            result.portb_cipo0_has_ddr = lanes[2].best_has_ddr
+            result.portb_cipo1_detected = lanes[3].detected
+            result.portb_cipo1_chip_type = lanes[3].best_type
+            result.portb_cipo1_has_ddr = lanes[3].best_has_ddr
+
+            result.best_phase0 = self._pick_phase(lanes[0], lanes[1])
+            result.best_phase1 = self._pick_phase(lanes[2], lanes[3])
+
+            result.chips_detected = any(lane.detected for lane in lanes)
+            result.success = result.chips_detected
+
+            # Combined 8-bit mask: port A in [3:0], port B in [7:4]; the odd bit
+            # in each pair adds the lane's DDR stream.
+            mask = 0
+            if lanes[0].detected:
+                mask |= 0x01
+                if lanes[0].best_has_ddr:
+                    mask |= 0x02
+            if lanes[1].detected:
+                mask |= 0x04
+                if lanes[1].best_has_ddr:
+                    mask |= 0x08
+            if lanes[2].detected:
+                mask |= 0x10
+                if lanes[2].best_has_ddr:
+                    mask |= 0x20
+            if lanes[3].detected:
+                mask |= 0x40
+                if lanes[3].best_has_ddr:
+                    mask |= 0x80
+            result.optimal_channel_mask = mask
+
             if verbose:
-                print(f"[Detection] Complete: {result.summary()}")
-        
+                if result.success:
+                    print(f"[Detection] Complete. Port A phase={result.best_phase0} "
+                          f"port B phase={result.best_phase1} "
+                          f"mask=0x{result.optimal_channel_mask:X}")
+                    print(f"[Detection] {result.get_channel_summary()}")
+                else:
+                    print("[Detection] No chips detected on either port")
+
         except Exception as e:
             if verbose:
                 print(f"[Detection] Error: {e}")
-        
+
         return result
-    
+
+    @staticmethod
+    def _pick_phase(a: _LaneBest, b: _LaneBest) -> int:
+        """Pick one phase for a port: the better-scoring of its two CIPO lanes
+        (mirror the pickPhase lambda in runAutoDetection)."""
+        if a.detected and b.detected:
+            return a.best_phase if a.best_score >= b.best_score else b.best_phase
+        if a.detected:
+            return a.best_phase
+        if b.detected:
+            return b.best_phase
+        return 0
+
     def apply_config(self, result: DetectionResult) -> bool:
-        """Apply detected configuration to device"""
+        """Apply detected port-A and port-B phases + channel mask, then load the
+        normal convert sequence (mirror applyDetectionConfig)."""
         if not result.success:
             return False
-        
-        CMD_SET_PHASE = 0x11
-        CMD_SET_CHANNEL_ENABLE = 0x13
-        
-        return (self.send_cmd(CMD_SET_PHASE, result.best_phase, result.best_phase)[0] and
-                self.send_cmd(CMD_SET_CHANNEL_ENABLE, result.optimal_channel_mask)[0])
-    
+
+        ok = (self.send_cmd(CMD_SET_PHASE, result.best_phase0, result.best_phase0)[0] and
+              self.send_cmd(CMD_SET_PHASE_B, result.best_phase1, result.best_phase1)[0] and
+              self.send_cmd(CMD_SET_CHANNEL_ENABLE, result.optimal_channel_mask)[0] and
+              self.send_cmd(CMD_LOAD_CONVERT)[0])
+
+        if ok and self.validator is not None:
+            # Match the plugin's setChannelEnable -> updateChannelEnable so the
+            # validator sizes subsequent streaming packets to the applied mask.
+            self.validator.set_channel_enable(result.optimal_channel_mask)
+        return ok
+
     def _initialize_chips(self, verbose) -> bool:
-        """Initialize chips for testing"""
-        CMD_STOP = 0x02
-        CMD_START = 0x01
-        CMD_SET_LOOP_COUNT = 0x10
-        CMD_LOAD_INIT = 0x21
-        CMD_LOAD_CABLE_TEST = 0x22
-        CMD_SET_CHANNEL_ENABLE = 0x13
-        
+        """Prepare for detection: real (non-debug) data, infinite loop count,
+        ce=0xFF (both ports), run the init sequence once, then load the cable
+        test sequence (mirror initializeForDetection)."""
         if verbose:
-            print("[Detection] Initializing chips...")
-        
-        # Stop, set loop count, enable all channels
-        if not (self.send_cmd(CMD_STOP)[0] and
-                self.send_cmd(CMD_SET_LOOP_COUNT, 1)[0] and
-                self.send_cmd(CMD_SET_CHANNEL_ENABLE, CABLE_TEST_CHANNEL_ENABLE)[0]):
+            print("[Detection] Initializing chips (dual-port, channel_enable=0xFF)...")
+
+        # Disable debug mode so we read real chip data.
+        if not self.send_cmd(CMD_STOP)[0]:
             return False
-        
-        # Load and run initialization sequence
+        time.sleep(0.01)
+        if not self.send_cmd(CMD_SET_DEBUG_MODE, 0)[0]:
+            return False
+        time.sleep(0.01)
+
+        # loop_count = 0 (infinite): a finite count stops before the firmware's
+        # read-pointer resync and emits zero UDP.
+        if not self.send_cmd(CMD_SET_LOOP_COUNT, DETECTION_LOOP_COUNT)[0]:
+            return False
+        time.sleep(0.01)
+
+        # channel_enable = 0xFF: both ports' CIPO0/CIPO1 land in one packet.
+        if not self.send_cmd(CMD_SET_CHANNEL_ENABLE, DETECTION_CHANNEL_ENABLE)[0]:
+            return False
+        if self.validator is not None:
+            # Size the validator to the dual-port packet or it rejects every
+            # detection packet as wrong-size before feeding the detector.
+            self.validator.set_channel_enable(DETECTION_CHANNEL_ENABLE)
+        time.sleep(0.01)
+
+        # Run the initialization sequence (acquire briefly, then stop).
         if not self.send_cmd(CMD_LOAD_INIT)[0]:
             return False
-        
+        time.sleep(0.01)
         if not self.send_cmd(CMD_START)[0]:
             return False
         time.sleep(0.1)
+        if not self.send_cmd(CMD_STOP)[0]:
+            return False
+        time.sleep(0.01)
+
+        # Load the cable test sequence used by the phase sweep.
+        if not self.send_cmd(CMD_LOAD_CABLE_TEST)[0]:
+            return False
+        time.sleep(0.01)
+        return True
+
+    def _test_phase(self, phase: int, lanes, verbose: bool):
+        """Set both port phases to `phase`, capture one packet, and score all
+        four CIPO lanes (mirror testPhaseParallel). Returns (scores, types) as
+        4-element lists, or (None, None) if no packet arrived."""
+        # Stop, set both ports' phases, then capture one packet.
         self.send_cmd(CMD_STOP)
-        
-        # Load cable test sequence
-        return self.send_cmd(CMD_LOAD_CABLE_TEST)[0]
-    
-    def _test_phase(self, phase: int, verbose: bool) -> PhaseResult:
-        """Test a single phase configuration"""
-        CMD_SET_PHASE = 0x11
-        CMD_START = 0x01
-        CMD_STOP = 0x02
-        
-        result = PhaseResult(
-            phase=phase, cipo0_score=0, cipo1_score=0,
-            cipo0_has_ddr=False, cipo1_has_ddr=False
-        )
-        
+        time.sleep(0.002)
+
+        if not (self.send_cmd(CMD_SET_PHASE, phase, phase)[0] and
+                self.send_cmd(CMD_SET_PHASE_B, phase, phase)[0]):
+            return None, None
+        time.sleep(0.005)
+
+        # Arm capture (clear stale packets first, like startDetectionCapture).
+        self._drain_queue()
+        self.capturing = True
+
+        if not self.send_cmd(CMD_START)[0]:
+            self.capturing = False
+            return None, None
+
         try:
-            # Set phase
-            if not self.send_cmd(CMD_SET_PHASE, phase, phase)[0]:
-                return result
-            time.sleep(0.01)
-            
-            # Capture packet
-            self.capturing = True
-            self.send_cmd(CMD_START)
-            
-            try:
-                packet = self.packet_queue.get(timeout=2.0)
-            except queue.Empty:
-                return result
-            finally:
-                self.send_cmd(CMD_STOP)
-                self.capturing = False
-            
-            # Score packet
-            result.cipo0_score, result.cipo0_has_ddr = self._score_channel(packet, 0, verbose)
-            result.cipo1_score, result.cipo1_has_ddr = self._score_channel(packet, 1, verbose)
-            
-            if verbose and (result.cipo0_score > 0 or result.cipo1_score > 0):
-                print(f"  Phase {phase}: CIPO0={result.cipo0_score:.0f}, CIPO1={result.cipo1_score:.0f}")
-        
-        except Exception as e:
+            packet = self.packet_queue.get(timeout=1.0)
+        except queue.Empty:
+            packet = None
+        finally:
+            self.send_cmd(CMD_STOP)
+            self.capturing = False
+
+        if packet is None:
             if verbose:
-                print(f"  Error testing phase {phase}: {e}")
-        
-        return result
-    
-    def _score_channel(self, packet: List[int], channel: int, verbose: bool) -> Tuple[float, bool]:
+                print(f"  Phase {phase}: No packet received")
+            return None, None
+
+        scores = [0.0, 0.0, 0.0, 0.0]
+        types = [CHIP_TYPE_NONE, CHIP_TYPE_NONE, CHIP_TYPE_NONE, CHIP_TYPE_NONE]
+        for i in range(4):
+            scores[i], types[i] = self._score_channel(
+                packet, lanes[i].stride, lanes[i].offset, lanes[i].label, verbose)
+        return scores, types
+
+    def _score_channel(self, packet: List[int], stride: int, offset: int,
+                       label: str, verbose: bool) -> Tuple[float, str]:
+        """Score one CIPO lane out of a cable-test packet (mirror scoreChannel).
+
+        Data words start at CABLE_TEST_DATA_OFFSET_WORDS (14). With ce=0xFF each
+        SPI cycle packs 4 words (one per lane); stride=4, offset 0..3 select the
+        lane. Each 32-bit word holds the regular stream in bits [15:0] and the
+        DDR stream in [31:16]. Cable test reads (with a 2-cycle pipeline delay):
+          data idx 2-6: INTAN pattern   idx 7: chip ID   idx 8: MISO register
         """
-        Score a channel (0=CIPO0, 1=CIPO1) from packet data
-        
-        Packet structure: [Header(4)] + [Data(70)]
-        Data words alternate: CIPO0, CIPO1, CIPO0, CIPO1, ...
-        Each word: [Regular(15:0), DDR(31:16)]
-        
-        Cable test reads (with 2-cycle pipeline delay):
-          Cycles 0-4: INTAN pattern -> appears at data indices 2-6
-          Cycle 5: Chip ID -> appears at data index 7
-          Cycle 6: MISO register -> appears at data index 8
-        """
-        if len(packet) < CABLE_TEST_PACKET_SIZE_WORDS:
-            return 0.0, False
-        
-        score = 0.0
-        has_ddr = False
-        
-        # Extract this channel's data (every other word, starting at channel offset).
-        # The unified broadband header grew from 10 to 14 words; this empirical
-        # offset tracks that growth (+4) so it points at the same data position it
-        # always did (cable detection runs only with a physical chip attached).
-        data_words = packet[8:]  # skip relative to the unified header
-        channel_words = [data_words[i] for i in range(channel, 70, 2)]  # Get every other word
-        
+        if len(packet) < CABLE_TEST_DATA_OFFSET_WORDS + 9 * stride:
+            return 0.0, CHIP_TYPE_NONE
+
+        data_words = packet[CABLE_TEST_DATA_OFFSET_WORDS:]
+        if len(data_words) < 35:
+            return 0.0, CHIP_TYPE_NONE
+
+        channel_words = [data_words[i] for i in range(offset, len(data_words), stride)]
         if len(channel_words) < 9:
-            return 0.0, False
-        
-        # Extract regular and DDR streams
+            return 0.0, CHIP_TYPE_NONE
+
         regular = [w & 0xFFFF for w in channel_words]
         ddr = [(w >> 16) & 0xFFFF for w in channel_words]
-        
-        # Score INTAN pattern (indices 2-6 due to 2-cycle pipeline delay)
+
+        score = 0.0
+        chip_type = CHIP_TYPE_NONE
+
+        # INTAN pattern (regular indices 2-6 due to the 2-cycle pipeline delay).
         intan_found = []
         for i, expected in enumerate(INTAN_PATTERN):
-            idx = i + 2  # Pipeline delay
+            idx = i + 2
             if idx < len(regular):
                 intan_found.append(regular[idx])
                 if regular[idx] == expected:
-                    score += 10
-        
-        # Check chip ID (index 7)
+                    score += 10.0
+
+        # Chip ID at index 7 (regular and DDR should agree for an RHD2164).
         if len(regular) > 7 and len(ddr) > 7:
             chip_id_reg = regular[7]
             chip_id_ddr = ddr[7]
-            
-            if chip_id_reg == CHIP_ID_DDR and chip_id_ddr == CHIP_ID_DDR:
-                has_ddr = True
-                score += 10
-            elif chip_id_reg == CHIP_ID_NO_DDR:
-                score += 10
-        
-        # Check MISO register (index 8)
+            if chip_id_reg == CHIP_ID_RHD2164 and chip_id_ddr == CHIP_ID_RHD2164:
+                chip_type = CHIP_TYPE_RHD2164
+                score += 10.0
+            elif chip_id_reg == CHIP_ID_RHD2132:
+                chip_type = CHIP_TYPE_RHD2132
+                score += 10.0
+            elif chip_id_reg == CHIP_ID_RHD2216:
+                chip_type = CHIP_TYPE_RHD2132  # treat as RHD2132 (no DDR)
+                score += 10.0
+
+        # MISO register at index 8.
         if len(regular) > 8 and len(ddr) > 8:
             miso_reg = regular[8]
             miso_ddr = ddr[8]
-            
-            if has_ddr and miso_reg == MISO_REG_DDR and miso_ddr == MISO_DDR_DDR:
-                score += 10
-            elif not has_ddr and miso_reg == MISO_NO_DDR:
-                score += 10
-        
-        if verbose and score > 60:
-            pattern_str = ''.join(chr(x) if 32 <= x <= 126 else '?' for x in intan_found)
-            ddr_str = "DDR" if has_ddr else "No DDR"
-            print(f"    CIPO{channel}: '{pattern_str}' ({ddr_str})")
-        
-        return score, has_ddr
+            if chip_type == CHIP_TYPE_RHD2164:
+                if miso_reg == MISO_REG_DDR and miso_ddr == MISO_DDR_DDR:
+                    score += 10.0
+            elif chip_type == CHIP_TYPE_RHD2132:
+                if miso_reg == MISO_NO_DDR:
+                    score += 10.0
+
+        if verbose and score > DETECTION_THRESHOLD:
+            pattern_str = ''.join(chr(v) if 0x20 <= v <= 0x7E else '?' for v in intan_found)
+            print(f"    {label}: '{pattern_str}' ({chip_type})")
+
+        return score, chip_type
 
 def calculate_data_words(channel_enable):
     """Number of 32-bit data words for the 8-bit channel_enable mask.
@@ -1056,8 +1181,11 @@ class DataValidator:
             words = struct.unpack(f'<{self.expected_packet_size_words}I', data)
             self.last_packet_words = words
 
-            # Feed packets to cable detector if active (only for cable test packets)
-            if self.cable_detector and len(data) == CABLE_TEST_PACKET_SIZE_BYTES:
+            # Feed packets to the cable detector during detection. Detection runs
+            # with channel_enable=0xFF (both ports), so its packets are the
+            # dual-port DETECTION_PACKET_SIZE_BYTES (616), not the single-port
+            # manual-cable-test size. The detector only queues while capturing.
+            if self.cable_detector and len(data) == DETECTION_PACKET_SIZE_BYTES:
                 self.cable_detector.capture_packet(words)
 
             # Unified header: w0 = MAGIC (0xCAFEBABE), w1 = TYPE_VER (low byte =
@@ -1452,16 +1580,22 @@ def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
         print(f"[AUX] Slot {slot} bank {bank}: {len(cmds)} commands (loop at {loop_idx})")
     return ok
 
-def aux_bank_select(sock, slot, bank):
-    """Atomically swap a slot to a bank at the next packet boundary.
-    The firmware confirms the swap (bank_active poll) before ACKing."""
-    ok, _ = send_binary_command(sock, CMD_AUX_BANK_SELECT, slot & 3, bank & 1)
-    print(f"[AUX] Slot {slot} -> bank {bank}: {'OK' if ok else 'FAILED'}")
+def aux_set_register(sock, slot, cmd):
+    """Set a fixed command register (slot 1 = fs / override, slot 2 = inject). These
+    slots do NOT cycle -- each is a single register the PL sets from the write port
+    (bank/addr ignored). Slot 1 is rewritten live by the override (fast-settle
+    whole-replace / Reg-3 digout); slot 2 is whole-replaced by injection."""
+    ok, _ = send_binary_command(sock, CMD_AUX_WRITE_WORD, slot & 3, cmd & 0xFFFF)
+    if ok:
+        print(f"[AUX] slot {slot} register <- {rhd_decode(cmd)}")
     return ok
 
-def aux_seq_enable(sock, enable):
-    ok, _ = send_binary_command(sock, CMD_AUX_SEQ_EN, 1 if enable else 0)
-    print(f"[AUX] Sequencer {'enabled' if enable else 'disabled'}: {'OK' if ok else 'FAILED'}")
+def aux_bank_select(sock, slot, bank):
+    """Atomically swap the cycling program (slot 0) to a bank at the next packet
+    boundary. The firmware confirms the swap (bank_active poll) before ACKing.
+    Slots 1 and 2 have no bank (the firmware treats their select as a confirmed no-op)."""
+    ok, _ = send_binary_command(sock, CMD_AUX_BANK_SELECT, slot & 3, bank & 1)
+    print(f"[AUX] Slot {slot} -> bank {bank}: {'OK' if ok else 'FAILED'}")
     return ok
 
 def read_register(sock, reg):
@@ -1491,6 +1625,54 @@ def write_register(sock, reg, value):
           f"{'confirmed' if echo_ok else f'MISMATCH (0x{result:08X})'}")
     return echo_ok
 
+def aux_register_selftest(sock):
+    """Self-test the aux register-control path (the third aux slot) end to end.
+
+    Every RHD register read goes host -> CMD_READ_REGISTER -> the slot-2 inject
+    (pl_aux_inject whole-replaces slot 2 for one packet) -> SPI -> 2-cycle reply
+    -> host, so reading the chip's READ-ONLY ROM back and checking it against the
+    known-good values exercises exactly that path -- and doubles as an "is a
+    headstage connected and talking" check. The ROM is fixed, so this is a
+    deterministic pass/fail, not an analog measurement.
+
+    Requires streaming (the inject path only runs during acquisition) -- 'start'
+    first. Returns True if a chip on EITHER CIPO lane returns the full 'INTAN' ROM.
+    """
+    CHIP_NAMES = {CHIP_ID_RHD2164: "RHD2164", CHIP_ID_RHD2132: "RHD2132",
+                  CHIP_ID_RHD2216: "RHD2216"}
+    print("\n[SELFTEST] aux register control (slot-2 inject) + headstage ID")
+    print("           requires streaming -- run 'start' first")
+
+    lane_ok = [True, True]                          # CIPO0, CIPO1
+    for i in range(5):                              # regs 40..44 = 'I','N','T','A','N'
+        reg, exp = 40 + i, INTAN_PATTERN[i]
+        r = read_register(sock, reg)
+        if r is None:
+            print(f"  reg {reg} ('{chr(exp)}'): read FAILED -- streaming off / no cable?")
+            print("[SELFTEST] FAIL")
+            return False
+        for lane in (0, 1):
+            lane_ok[lane] &= (r[lane] == exp)
+        mark = lambda v: "OK" if v == exp else "--"
+        print(f"  reg {reg} '{chr(exp)}': CIPO0=0x{r[0]:04X} {mark(r[0])}  "
+              f"CIPO1=0x{r[1]:04X} {mark(r[1])}  (exp 0x{exp:04X})")
+
+    # Informational: chip ID (reg 63) + amplifier count (reg 62) on each good lane.
+    idr, amps = read_register(sock, 63), read_register(sock, 62)
+    for lane, name in ((0, "CIPO0"), (1, "CIPO1")):
+        if lane_ok[lane] and idr is not None:
+            cid = idr[lane]
+            n = amps[lane] if amps is not None else "?"
+            print(f"  {name}: chip ID {cid} = {CHIP_NAMES.get(cid, 'unknown')}, {n} amplifiers")
+
+    ok = lane_ok[0] or lane_ok[1]
+    passed = ", ".join(n for l, n in ((0, "CIPO0"), (1, "CIPO1")) if lane_ok[l]) or "none"
+    print(f"[SELFTEST] {'PASS' if ok else 'FAIL'} -- valid INTAN ROM on: {passed}")
+    if not ok:
+        print("           no lane returned 'INTAN': confirm streaming is on, a")
+        print("           headstage is connected, and 'rescan' found the chip.")
+    return ok
+
 def set_fast_settle(sock, amp_sw=False, amp_gpio_en=False, amp_pin=0,
                     dsp_sw=False, dsp_gpio_en=False, dsp_pin=0):
     """Configure amplifier fast settle (Reg-0 D5 via Slot-1 injection) and the
@@ -1511,14 +1693,16 @@ def set_digout(sock, sw=False, gpio_en=False, pin=0, reg3_static=0x00):
     return ok
 
 def aux_demo_setup(sock):
-    """Load the default slot programs and enable the sequencer:
-    slot 0 = Reg-3 carrier (digout mirror), slot 1 = accel sweep @10 kHz,
-    slot 2 = supply/temp/link housekeeping."""
-    if not (aux_upload_bank(sock, 0, 0, AUX_SLOT0_DEFAULT) and
-            aux_upload_bank(sock, 1, 0, AUX_SLOT1_DEFAULT) and
-            aux_upload_bank(sock, 2, 0, AUX_SLOT2_DEFAULT)):
-        return False
-    return aux_seq_enable(sock, True)
+    """Load the default aux commands (the aux command engine is always on):
+    slot 0 = accelerometer sweep program @10 kHz -- the ONLY cycling slot; its reply
+             pairs intra-packet at data word 34;
+    slot 1 = the fs register (INTAN ROM 'I'), rewritten live by the override on a
+             fast-settle edge -- a register, does NOT cycle;
+    slot 2 = the inject register (temperature channel); injection whole-replaces it
+             on demand. Deeper housekeeping is read on demand (read_register)."""
+    return (aux_upload_bank(sock, 0, 0, AUX_SLOT0_DEFAULT) and
+            aux_set_register(sock, 1, AUX_SLOT1_DEFAULT[0]) and
+            aux_set_register(sock, 2, AUX_SLOT2_DEFAULT[0]))
 
 def get_status(sock):
     """Get full status from device"""
@@ -1616,7 +1800,7 @@ def get_status(sock):
         'udp_dest_port': udp_dest_port,
         'udp_packet_format': udp_packet_format,
         'udp_bytes_sent': udp_bytes_sent,
-        'aux_seq_enabled': bool(aux_flags & 0x01),
+        'aux_engine_on': bool(aux_flags & 0x01),   # always True (aux-default)
         'aux_fast_settle': bool(aux_flags & 0x02),
         'aux_digout': bool(aux_flags & 0x04),
         'aux_dsp_reset': bool(aux_flags & 0x08),
@@ -1709,14 +1893,13 @@ def print_status(status):
     print(f"Packet Format: 0x{status['udp_packet_format']:04X}")
     print(f"Bytes Sent: {status['udp_bytes_sent']}")
 
-    print("\n--- Aux Sequencer ---")
-    print(f"Enabled: {status['aux_seq_enabled']}, "
-          f"Fast Settle: {status['aux_fast_settle']}, "
+    print("\n--- Aux Command Engine (always on) ---")
+    print(f"Fast Settle: {status['aux_fast_settle']}, "
           f"Digout: {status['aux_digout']}, "
           f"DSP Reset: {status['aux_dsp_reset']}")
     ba = status['aux_bank_active']
-    print(f"Active Banks: slot0={ba & 1}, slot1={(ba >> 1) & 1}, slot2={(ba >> 2) & 1}")
-    print(f"Slot Indices: {status['aux_indices']}")
+    print(f"Active Bank: slot0={ba & 1}  (slots 1 and 2 are fixed registers)")
+    print(f"Slot Indices: {status['aux_indices']}  (only slot 0 cycles; 1/2 always 0)")
     print(f"Last Inject Result: 0x{status['aux_read_result']:08X}")
     def _src(sw, gp, pin):
         return f"GPIO pin {pin}" if gp else ("software" if sw else "off")
@@ -1892,7 +2075,7 @@ def run_detection(sock, verbose=True):
     def command_wrapper(cmd_id, param1=0, param2=0):
         return send_binary_command(sock, cmd_id, param1, param2)
 
-    detector = CableDetection(command_wrapper)
+    detector = CableDetection(command_wrapper, validator)
     
     # Hook into UDP validator
     validator.set_cable_detector(detector)
@@ -1906,15 +2089,16 @@ def run_detection(sock, verbose=True):
         print(result.summary())
         
         if result.success:
-            print("\nPhase Analysis:")
-            print("Phase  CIPO0  CIPO1  DDR0  DDR1")
-            print("-----  -----  -----  ----  ----")
+            print("\nPhase Analysis (per-lane score):")
+            print("Phase  A.CIPO0  A.CIPO1  B.CIPO0  B.CIPO1")
+            print("-----  -------  -------  -------  -------")
             for pr in result.all_phases:
-                marker = "*" if pr.phase == result.best_phase else " "
-                print(f"{pr.phase:3d}{marker}  {pr.cipo0_score:5.0f}  {pr.cipo1_score:5.0f}  "
-                      f"{'Yes' if pr.cipo0_has_ddr else 'No ':3s}  "
-                      f"{'Yes' if pr.cipo1_has_ddr else 'No ':3s}")
-            
+                mark0 = "*" if pr.phase == result.best_phase0 else " "
+                mark1 = "*" if pr.phase == result.best_phase1 else " "
+                print(f"{pr.phase:3d}{mark0}{mark1} "
+                      f"  {pr.scores[0]:6.0f}   {pr.scores[1]:6.0f}   "
+                      f"{pr.scores[2]:6.0f}   {pr.scores[3]:6.0f}")
+
             if detector.apply_config(result):
                 print("\nConfiguration applied successfully!")
             else:
@@ -2071,8 +2255,8 @@ def tcp_control():
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  auto_cable_detect - Automated cable detection!")
-        print(f"  Aux: aux_demo, aux_en <0|1>, aux_bank <slot> <bank>, aux")
-        print(f"       read_reg <r>, write_reg <r> <v>")
+        print(f"  Aux: aux_demo, aux_bank <slot> <bank>, aux")
+        print(f"       read_reg <r>, write_reg <r> <v>, aux_selftest")
         print(f"       fast_settle <0|1> [dsp] | gpio <pin> | off")
         print(f"       digout <0|1> | gpio <pin> | hiz")
         print(f"  Utility: help, quit")
@@ -2204,11 +2388,6 @@ def tcp_control():
                     validator.print_aux_info()
                 elif cmd == "aux_demo":
                     aux_demo_setup(sock)
-                elif cmd.startswith("aux_en "):
-                    try:
-                        aux_seq_enable(sock, int(cmd.split()[1]))
-                    except (ValueError, IndexError):
-                        print("Usage: aux_en <0|1>")
                 elif cmd.startswith("aux_bank "):
                     try:
                         parts = cmd.split()
@@ -2227,6 +2406,8 @@ def tcp_control():
                         write_register(sock, int(parts[1]), val)
                     except (ValueError, IndexError):
                         print("Usage: write_reg <reg> <value>")
+                elif cmd == "aux_selftest":
+                    aux_register_selftest(sock)
                 elif cmd.startswith("fast_settle "):
                     try:
                         parts = cmd.split()
@@ -2266,11 +2447,12 @@ def tcp_control():
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, sink, quit")
                     print("Aux sequencer (bank-programmable aux commands):")
-                    print("  aux_demo            - load default slot programs + enable")
-                    print("  aux_en <0|1>        - enable/disable the sequencer")
+                    print("  aux_demo            - load the default slot programs")
                     print("  aux_bank <slot> <bank> - atomic bank swap (live)")
                     print("  aux                 - decode last packet's command echo")
                     print("  read_reg <r> / write_reg <r> <v> - runtime RHD register access")
+                    print("  aux_selftest        - read the INTAN ROM back via slot-2 inject (validates the")
+                    print("                        aux register path + headstage; needs streaming)")
                     print("  fast_settle <0|1> [dsp] | gpio <pin> | off")
                     print("  digout <0|1> | gpio <pin> | hiz")
                 else:
@@ -2304,22 +2486,44 @@ def tcp_control():
 if __name__ == "__main__":
     print("=== Zynq BRAM Data Generator Validator ===")
 
-    # Discover the board by listening for its broadcast beacon -- passive, we send
-    # nothing until we've heard it (so we can't disturb the board during boot).
-    # Auto-fills ZYNQ_IP from the beacon's source address; falls back to the
-    # configured address if no beacon arrives (older firmware without the beacon).
-    print(f"[DISCOVERY] Listening for a board beacon on UDP {BEACON_PORT} "
-          f"(up to {BEACON_DISCOVERY_TIMEOUT:.0f}s)...")
-    _dev = discover_board()
-    if _dev:
-        ZYNQ_IP = _dev['ip']
-        TCP_PORT = _dev['tcp_port'] or TCP_PORT
-        UDP_PORT = _dev['udp_port'] or UDP_PORT
-        print(f"[DISCOVERY] Found board at {_dev['ip']}  fw {_dev['fw']}  "
-              f"MAC {_dev['mac']}  (TCP {_dev['tcp_port']}, UDP {_dev['udp_port']})")
+    # CLI: `--ip <addr>` pins the board and skips discovery; `--no-discover` uses the
+    # configured ZYNQ_IP directly. Skipping is the right move when the board is already
+    # up -- the beacon is ~1 Hz and (on some hosts, e.g. macOS) the directed broadcast
+    # reaches tcpdump but not the socket. Discovery also short-circuits automatically on
+    # a live data stream (see discover_board), so a flag is only needed when nothing is
+    # streaming yet and the beacon isn't landing.
+    _argv = sys.argv[1:]
+    _skip_discovery = "--no-discover" in _argv
+    if "--ip" in _argv:
+        try:
+            ZYNQ_IP = _argv[_argv.index("--ip") + 1]
+        except IndexError:
+            print("[DISCOVERY] --ip needs an address, e.g. --ip 192.168.18.10")
+            sys.exit(2)
+        _skip_discovery = True
+
+    if _skip_discovery:
+        print(f"[DISCOVERY] skipped -- using {ZYNQ_IP} (--ip/--no-discover)")
     else:
-        print(f"[DISCOVERY] No beacon heard -- using configured {ZYNQ_IP} "
-              f"(older firmware without the beacon, or wrong subnet?)")
+        # Passive discovery: listen for the ~1 Hz beacon AND for a live broadband data
+        # stream on UDP_PORT. Whichever lands first wins; a streaming board is adopted
+        # instantly. Falls back to the configured address on timeout.
+        print(f"[DISCOVERY] Listening for a board beacon on UDP {BEACON_PORT} "
+              f"(up to {BEACON_DISCOVERY_TIMEOUT:.0f}s; adopts a live data stream "
+              f"immediately; --no-discover to skip)...")
+        _dev = discover_board(data_port=UDP_PORT)
+        if _dev and _dev.get('via') == 'data':
+            ZYNQ_IP = _dev['ip']
+            print(f"[DISCOVERY] Adopted board {ZYNQ_IP} from its live data stream")
+        elif _dev:
+            ZYNQ_IP = _dev['ip']
+            TCP_PORT = _dev['tcp_port'] or TCP_PORT
+            UDP_PORT = _dev['udp_port'] or UDP_PORT
+            print(f"[DISCOVERY] Found board at {_dev['ip']}  fw {_dev['fw']}  "
+                  f"MAC {_dev['mac']}  (TCP {_dev['tcp_port']}, UDP {_dev['udp_port']})")
+        else:
+            print(f"[DISCOVERY] No beacon heard -- using configured {ZYNQ_IP} "
+                  f"(--no-discover to skip the wait next time)")
 
     print(f"Device: {ZYNQ_IP}:{TCP_PORT}")
     print(f"UDP Port: {UDP_PORT}")

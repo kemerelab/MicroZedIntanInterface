@@ -7,8 +7,8 @@ SRC="$HERE/../src"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 99
 
-xvlog -sv "$SRC/data_generator_core.sv" "$SRC/aux_command_sequencer.sv" \
-      "$SRC/override_layer.sv" "$SRC/fifo_bram_interface.sv" \
+xvlog -sv "$SRC/acq_frame_pkg.sv" "$SRC/data_generator_core.sv" "$SRC/test_signal_gen.sv" "$SRC/aux_command_engine.sv" "$SRC/aux_program.sv" \
+      "$SRC/fifo_bram_interface.sv" \
       "$HERE/dualport_dropout_tb.sv" || exit 1
 xvlog "$SRC/data_generator_wrapper.v" "$SRC/CIPO_phase_selector.v" || exit 1
 xelab -debug off -timescale 1ns/1ps work.dualport_dropout_tb -s tb_snap || exit 1

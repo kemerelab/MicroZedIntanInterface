@@ -18,8 +18,8 @@ module data_generator #(
     
     // Control and status interfaces
     // Widths must match axi_lite_registers (N_CTRL=25, N_STATUS=13). Control
-    // regs 0..21 are the legacy map; 22..24 configure the aux command
-    // sequencer / override layer. Status 11 = aux status, 12 = read result.
+    // regs 0..21 = acquisition/framing config; 22..24 = the aux command engine.
+    // Status 11 = aux status, 12 = read result.
     input  wire [32*25-1:0] ctrl_regs_pl,
     output wire [32*13-1:0]  status_regs_pl,
     
@@ -135,11 +135,11 @@ module data_generator #(
         .csn(csn),
         .sclk(sclk),
         .copi(copi),
-        .cipo0(cipo0),
-        .cipo1(cipo1),
+        .cipo_a0(cipo0),
+        .cipo_a1(cipo1),
         // Port B (cable B) CIPO inputs, from the second LVDS buffer.
-        .cipo2(cipo2),
-        .cipo3(cipo3),
+        .cipo_b0(cipo2),
+        .cipo_b1(cipo3),
 
         // Digital input
         .digital_in(digital_in)

@@ -15,17 +15,15 @@ source /opt/Xilinx/2025.1/Vivado/settings64.sh
 bash run_dualport_dropout_tb.sh     # THE broadband integrity check (run this first)
 ```
 
-| Testbench | `run_*.sh` | What it proves |
-|---|---|---|
-| `dualport_dropout_tb.sv` | `run_dualport_dropout_tb.sh` | **Broadband data integrity**: every data word out of the wrapper is byte‑exact vs the RTL sine reference across both cable ports, and SEQ/timestamp advance +1/packet with no gaps. This is the canonical "no dropout / no loss" proof. |
-| `chirp_tb.sv` | `run_chirp_tb.sh` | The analytic **chirp NCO** (debug‑mode synthetic sweep) is bit‑exact vs the Python reference (`gen_chirp_vectors.py`). Captures the 35 data words/packet off the FIFO write interface (7‑word header skipped). |
-| `fifo_bram_dualport_tb.sv` | `run_fifo_bram_dualport_tb.sh` | FIFO→BRAM dual‑port write/read path. |
-| `aux_command_sequencer_tb.sv` | `run_aux_seq_tb.sh` | Aux command sequencer (banked COPI programs + atomic bank swap). |
-| `override_layer_tb.sv` | `run_override_tb.sh` | Fast‑settle / digout / DSP‑reset override layer. |
-| `data_generator_aux_tb.sv` | `run_aux_integration_tb.sh` | Core + aux sequencer integration. |
-| `axi_lite_write_tb.sv`, `tb_axi_read_bram_ctrl.sv` | `run_axi_write_tb.sh`, `run_axi_read_sim.sh` | AXI‑Lite register write + BRAM‑controller read paths. |
+Each testbench guards a distinct contract on code that still changes; that is the
+whole bar for keeping one (see the git history for the debug/one‑off sims that were
+retired rather than migrated).
 
-Regenerate the chirp reference vectors (only if you change the NCO): `python3 gen_chirp_vectors.py`.
+| Testbench | `run_*.sh` | What it guards |
+|---|---|---|
+| `dualport_dropout_tb.sv` | `run_dualport_dropout_tb.sh` | **Broadband data integrity**: every data word out of the wrapper is byte‑exact vs the RTL sine reference across both cable ports, and SEQ/timestamp advance +1/packet with no gaps. The canonical "no dropout / no loss" proof. |
+| `data_generator_aux_wire_tb.sv` | `run_aux_wire_tb.sh` | Aux **command path on the wire**: decodes the serialized COPI out of the real core and proves the always‑on aux commands reach the chip — channel CONVERTs, the programmed aux loop, one‑shot injection, and the full override rewrite (fast‑settle WRITE(0) replace + D5, **DSP‑reset bit‑H on every CONVERT**, and **Reg‑3 digout D0 substitution**). Any of these is silent on the wire if it regresses, which is exactly why it's guarded here. |
+| `axi_lite_write_tb.sv` | `run_axi_write_tb.sh` | AXI‑Lite register **write handshake** — catches a silently wedged control bus. |
 
 ## BRAM‑read benchmark — *why DMA is required* (`benchmark_bram_reads.c`)
 

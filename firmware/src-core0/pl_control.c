@@ -54,14 +54,14 @@ void pl_set_phase_select(int phase0, int phase1) {
 }
 
 // Port B (second cable) CIPO phase / cable-length compensation. Independent of
-// port A because the two cables may be different lengths. Bits [23:16] of
-// CTRL_REG_2: phase2 [19:16] (port-B cipo0), phase3 [23:20] (port-B cipo1).
+// port A because the two cables may be different lengths. In CTRL_REG_2:
+// phase2 [11:8] (cable B, line 0), phase3 [15:12] (cable B, line 1).
 void pl_set_phase_select_b(int phase2, int phase3) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
 
     ctrl_reg_2 &= ~(CTRL_PHASE2_MASK | CTRL_PHASE3_MASK);
-    ctrl_reg_2 |= ((phase2 & 0xF) << 16);
-    ctrl_reg_2 |= ((phase3 & 0xF) << 20);
+    ctrl_reg_2 |= ((phase2 & 0xF) << 8);
+    ctrl_reg_2 |= ((phase3 & 0xF) << 12);
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
     send_message("PL phase select (port B) phase2=%d, phase3=%d\r\n", phase2, phase3);
 }
@@ -107,7 +107,7 @@ void pl_set_channel_enable(int channel_enable) {
     uint32_t ctrl_reg_2 = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET);
 
     ctrl_reg_2 &= ~CTRL_CHANNEL_ENABLE_MASK; // Clear existing channel enable bits
-    ctrl_reg_2 |= ((channel_enable & 0xFF) << CTRL_CHANNEL_ENABLE_SHIFT); // 8-bit, [15:8]
+    ctrl_reg_2 |= ((channel_enable & 0xFF) << CTRL_CHANNEL_ENABLE_SHIFT); // 8-bit, [23:16]
 
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
     send_message("PL channel enable set to 0x%02X (port0=0x%X port1=0x%X)\r\n",
@@ -284,30 +284,20 @@ void pl_dump_bram_data(uint32_t start_addr, uint32_t word_count) {
 // ============================================================================
 // ============================================================================
 
-// Our interface uses 35-element packets for both sending and receiving data.
-// Each packet corresponds to a 35-command COPI sequence.
+// Each 35-command SPI frame is 32 channel-cycle commands (this table) plus the 3
+// aux cycles, which are sourced by the aux command engine (not this table).
 
-// Set all 35 COPI command words from an array of 16-bit values
-void pl_set_copi_commands(const uint16_t copi_array[35]) {
-    // MOSI commands are stored in control registers 4-21 (18 registers total)
-    // Each 32-bit register holds two 16-bit MOSI words:
-    // - Low 16 bits: even-indexed MOSI word (0, 2, 4, ...)
-    // - High 16 bits: odd-indexed MOSI word (1, 3, 5, ...)
-    
-    for (int i = 0; i < 18; i++) {
-        uint32_t reg_value = 0;
-        
-        // Pack two 16-bit MOSI words into one 32-bit register
-        reg_value = (uint32_t)copi_array[2*i];                    // Low 16 bits: even index
-        if ((2*i + 1) < 35) {                               // Check bounds for odd index
-            reg_value |= ((uint32_t)copi_array[2*i + 1]) << 16;  // High 16 bits: odd index
-        }
-        
-        // Write to control register (MOSI commands start at CTRL_REG_MOSI_START_OFFSET)
+// Set the 32 channel-cycle COPI command words from an array of 16-bit values.
+void pl_set_copi_commands(const uint16_t copi_array[32]) {
+    // Stored in control registers 4-19 (16 registers), two 16-bit words each:
+    // low 16 = even-indexed word (0,2,4,...), high 16 = odd-indexed word (1,3,5,...).
+    for (int i = 0; i < 16; i++) {
+        uint32_t reg_value = (uint32_t)copi_array[2*i]                // low: even index
+                           | ((uint32_t)copi_array[2*i + 1] << 16);  // high: odd index
         uint32_t reg_offset = CTRL_REG_MOSI_START_OFFSET + (i * 4);
         Xil_Out32(PL_CTRL_BASE_ADDR + reg_offset, reg_value);
     }
-    
+
     send_message("COPI commands updated\r\n");
 }
 
@@ -316,7 +306,7 @@ void pl_set_copi_commands(const uint16_t copi_array[35]) {
 // ============================================================================
 
 // Safely update COPI commands only when transmission is disabled
-int pl_set_copi_commands_safe(const uint16_t copi_array[35], const char* sequence_name) {
+int pl_set_copi_commands_safe(const uint16_t copi_array[32], const char* sequence_name) {
     // Check if transmission is currently active
     if (pl_is_transmission_active()) {
         send_message("ERROR: Cannot update COPI commands while transmission is active\r\n");
@@ -363,16 +353,16 @@ void pl_set_cable_length_sequence(void) {
 
 
 // Channel conversion command sequence
-const uint16_t convert_cmd_sequence[35] = {
+const uint16_t convert_cmd_sequence[32] = {
     0x0000, 0x0100, 0x0200, 0x0300, 0x0400, 0x0500, 0x0600, 0x0700,  // Channels 0-7
     0x0800, 0x0900, 0x0A00, 0x0B00, 0x0C00, 0x0D00, 0x0E00, 0x0F00,  // Channels 8-15
     0x1000, 0x1100, 0x1200, 0x1300, 0x1400, 0x1500, 0x1600, 0x1700,  // Channels 16-23
-    0x1800, 0x1900, 0x1A00, 0x1B00, 0x1C00, 0x1D00, 0x1E00, 0x1F00,  // Channels 24-31
-    0x2000, 0x2100, 0x2200                                           // Last 3 commands - aux ins (remember 2 sample delay!)
+    0x1800, 0x1900, 0x1A00, 0x1B00, 0x1C00, 0x1D00, 0x1E00, 0x1F00   // Channels 24-31
+    // aux cycles 32-34 (the aux ADC reads) are sourced by the aux command engine
 };
 
 // Initialization command sequence
-const uint16_t initialization_cmd_sequence[35] = {
+const uint16_t initialization_cmd_sequence[32] = {
     0xFF00, 0xFF00, // Two dummy reads (read channel 63)
     0x80DE, // write register 0  - (fast settle off and other specified values)
     0x8142, // write register 1  - (Vdd sense enable + ADC buffer bias = 2)
@@ -398,16 +388,16 @@ const uint16_t initialization_cmd_sequence[35] = {
     0x95FF, // write register 21 - (All amplifiers on RHD2164)
     0x5500, // Calibrate (need 9 clocks)
     0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00,  // 5 dummy reads to accomplish calibration
-    0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00   // 5 more dummy reads to accomplish calibration
+    0xFF00, 0xFF00                           // + 2 = 7 here; the aux cycles 32-34 add 3 more -> 10 total
 };
 
 // Cable length test command sequence
-const uint16_t cable_length_cmd_sequence[35] = {
+const uint16_t cable_length_cmd_sequence[32] = {
     0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00, 0xFF00, 0xFB00,  // Read 40-44 ("INTAN"), chip ID, and MISO register
     0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00, 0xFF00, 0xFB00,  // Read 40-44 ("INTAN"), chip ID, and MISO register
     0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00, 0xFF00, 0xFB00,  // Read 40-44 ("INTAN"), chip ID, and MISO register
     0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00, 0xFF00, 0xFB00,  // Read 40-44 ("INTAN"), chip ID, and MISO register
-    0xE800, 0xE900, 0xEA00, 0xEB00, 0xEC00, 0xFF00, 0xFB00,  // Read 40-44 ("INTAN"), chip ID, and MISO register
+    0xE800, 0xE900, 0xEA00, 0xEB00                           // Read 40-43 (cycles 32-34 are aux-sourced)
 };
 
 // Other interesting ROM registers:
@@ -421,8 +411,8 @@ const uint16_t cable_length_cmd_sequence[35] = {
 // ============================================================================
 // AUX COMMAND SEQUENCER CONTROL
 // ============================================================================
-// The banked aux sequencer sources COPI cycles 32..34 when AUX_CTRL_SEQ_EN is
-// set. Banks are double-buffered: upload to the standby bank (allowed DURING
+// The banked aux command engine ALWAYS sources COPI cycles 32..34 (aux-default).
+// Banks are double-buffered: upload to the standby bank (allowed DURING
 // acquisition), select it, then confirm the swap landed (bank_active poll).
 
 // One word through the bank write port: payload to reg 23, then flip the
@@ -436,6 +426,9 @@ static void aux_strobe_write(uint32_t payload) {
     usleep(2);   // > a few PL clocks for the CDC + strobe
 }
 
+// slot is the write target (= slot index): 0 = RT command register, 1 = the
+// cycling program, 2 = the inject command register. For the two registers (0, 2)
+// bank/addr are ignored by the PL (single word).
 void pl_aux_write_word(int slot, int bank, int addr, uint16_t data) {
     aux_strobe_write(AUX_WRITE_PACK(slot, bank, 0, addr, data));
 }
@@ -461,8 +454,9 @@ int pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop
 }
 
 void pl_aux_select_bank(int slot, int bank) {
+    if (slot != 0) return;                 // only slot 0 (the program) has a bank
     uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
-    uint32_t bit = 1u << (AUX_CTRL_BANK_SEL_SHIFT + slot);
+    uint32_t bit = AUX_CTRL_BANK_BIT(slot); // slot 0 -> reg22 bit 0
     if (bank) ctrl |= bit; else ctrl &= ~bit;
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl);
 }
@@ -470,6 +464,7 @@ void pl_aux_select_bank(int slot, int bank) {
 // Confirm-before-reuse handshake: the swap latches at a packet boundary
 // (immediately when not streaming). Returns 1 once bank_active[slot]==bank.
 int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
+    if (slot != 0) return 1;               // only slot 0 has a bank; others confirmed trivially
     for (int waited = 0; waited <= timeout_ms * 1000; waited += 100) {
         uint32_t s11 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET);
         if (((s11 >> slot) & 1u) == (uint32_t)(bank ? 1 : 0))
@@ -480,31 +475,9 @@ int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
     return 0;
 }
 
-void pl_aux_seq_enable(int enable) {
-    uint32_t ctrl = Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET);
-    if (enable) {
-        Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl | AUX_CTRL_SEQ_EN);
-        send_message("Aux sequencer ENABLED\r\n");
-    } else {
-        // Ordering matters: once SEQ_EN drops, the override layer can no
-        // longer reach the chip, so clear the fast-settle/dsp/digout sources
-        // first and let one packet carry the OFF injection.
-        uint32_t live = AUX_CTRL_FS_SW | AUX_CTRL_FS_GPIO_EN |
-                        AUX_CTRL_DSP_SW | AUX_CTRL_DSP_GPIO_EN |
-                        AUX_CTRL_DIGOUT_SW | AUX_CTRL_DIGOUT_GPIO_EN;
-        if (ctrl & live) {
-            Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl & ~live);
-            usleep(200);   // > 2 packets at 30 ksps
-            ctrl &= ~live;
-        }
-        Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET, ctrl & ~AUX_CTRL_SEQ_EN);
-        send_message("Aux sequencer DISABLED\r\n");
-    }
-}
-
-int pl_aux_seq_is_enabled(void) {
-    return (Xil_In32(PL_CTRL_BASE_ADDR + CTRL_REG_AUX_CTRL_OFFSET) & AUX_CTRL_SEQ_EN) ? 1 : 0;
-}
+// pl_aux_seq_enable / pl_aux_seq_is_enabled retired: the aux engine is always on
+// (aux-default). There is no enable/disable, and hence no OFF-injection ordering
+// to manage -- clearing fast-settle now always reaches the chip.
 
 // cfg carries the AUX_CTRL fast-settle + DSP fields (bits [13:4])
 void pl_aux_set_fast_settle(uint32_t cfg) {
@@ -533,12 +506,12 @@ void pl_aux_set_digout(uint32_t cfg) {
                  (unsigned)((cfg & AUX_CTRL_REG3_STATIC_MASK) >> AUX_CTRL_REG3_STATIC_SHIFT));
 }
 
-// One-shot command injection via slot 3 (sequencer freezes that slot's
-// program for the packet). Requires streaming + sequencer enabled; the
-// response returns two SPI commands later and is captured into STATUS_REG_12.
+// One-shot command injection via the inject slot (the engine whole-replaces the
+// slot-2 register for one packet). Requires streaming; the response returns two
+// SPI commands later and is captured into STATUS_REG_12.
 int pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms) {
-    if (!pl_is_transmission_active() || !pl_aux_seq_is_enabled()) {
-        send_message("ERROR: inject requires streaming + aux sequencer enabled\r\n");
+    if (!pl_is_transmission_active()) {
+        send_message("ERROR: inject requires streaming\r\n");
         return 0;
     }
     uint32_t ack_before = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_11_OFFSET) & AUX_STATUS_INJECT_ACK;
@@ -573,7 +546,7 @@ uint8_t rhd_reg_shadow[22] = {0};
 void pl_rhd_shadow_init(void) {
     // Record every WRITE in the init sequence. WRITE(reg,val) = 0x8000|reg<<8|val,
     // i.e. (cmd & 0xC000) == 0x8000 (CONVERT is 0x0xxx, READ is 0xCxxx).
-    for (int i = 0; i < 35; i++) {
+    for (int i = 0; i < 32; i++) {
         uint16_t cmd = initialization_cmd_sequence[i];
         if ((cmd & 0xC000) == 0x8000) {
             int reg = (cmd >> 8) & 0x3F;

@@ -93,9 +93,8 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 //
 // BROADBAND framing (stream_type=1): the 8-word common header + a 6-word
 // broadband sub-block = 14 header words ahead of the data. The sub-block
-// carries the previous-packet aux echoes + the 8 external-ADC breadcrumbs --
-// every field of the legacy 10-word header is preserved; the DATA words are
-// byte-identical to before (see docs/unified-packet-format.md, NO DATA LOSS).
+// carries the previous-packet aux echoes + the 8 external-ADC breadcrumbs
+// (see docs/unified-packet-format.md, NO DATA LOSS).
 //   AUX0 (w5) = channel_enable[7:0] | num_data_words[23:8]
 //   AUX1 (w6) = digital_in[7:0] | aux_flags[15:8] | echo0[31:16]
 #define BB_SUBBLOCK_WORDS       6
@@ -134,15 +133,17 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define CTRL_CHIRP_RATE_SHIFT    20
 #define CTRL_CHIRP_RATE_MASK     (0xFFFu << 20)
 
-// Aux command sequencer / override layer control registers (PL regs 22..24)
-#define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // enable, bank select, fast settle/digout/dsp config
-#define CTRL_REG_AUX_WRITE_OFFSET   (23 * 4)  // bank write port payload
+// Aux command engine / override control registers (PL regs 22..24)
+#define CTRL_REG_AUX_CTRL_OFFSET    (22 * 4)  // prog bank select + fast settle/digout/dsp config
+#define CTRL_REG_AUX_WRITE_OFFSET   (23 * 4)  // write port payload (RT reg / program)
 #define CTRL_REG_AUX_STROBE_OFFSET  (24 * 4)  // write/inject toggles + inject command
 
 // CTRL_REG_AUX_CTRL bit fields
-#define AUX_CTRL_SEQ_EN             (1u << 0)
-#define AUX_CTRL_BANK_SEL_SHIFT     1          // [3:1] bank select, 1 bit per slot
-#define AUX_CTRL_BANK_SEL_MASK      (0x7u << 1)
+// Program live-bank select: only slot 0 (the sole cycling program -- the accel
+// sweep) has a bank, at reg22 bit 0. Slots 1 and 2 are fixed command registers
+// (no bank).
+#define AUX_CTRL_BANK_BIT(slot)     (1u << (slot))   // slot == 0 -> reg22 bit 0
+#define AUX_CTRL_BANK_SEL_MASK      (0x1u << 0)       // [0] only
 #define AUX_CTRL_FS_SW              (1u << 4)  // software amp fast settle level
 #define AUX_CTRL_FS_GPIO_EN         (1u << 5)
 #define AUX_CTRL_FS_GPIO_SEL_SHIFT  6          // [8:6] digital_in pin select
@@ -158,12 +159,15 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define AUX_CTRL_REG3_STATIC_SHIFT  24         // [31:24] RHD Reg-3 bits D7..D1 (D0 = live digout)
 #define AUX_CTRL_REG3_STATIC_MASK   (0xFFu << 24)
 
-// CTRL_REG_AUX_WRITE packing: [15:0] data, [21:16] addr, [23:22] slot,
-// [24] bank, [25] is_length (length record data = {2'b0,end[5:0],2'b0,loop[5:0]})
-#define AUX_WRITE_PACK(slot, bank, is_len, addr, data) \
+// CTRL_REG_AUX_WRITE packing: [15:0] data, [21:16] addr, [23:22] target,
+// [24] bank, [25] is_length (length record data = {2'b0,end[5:0],2'b0,loop[5:0]}).
+// target IS the slot index: 0 = slot-0 program (accel sweep; banked), 1 = slot-1
+// fs command register, 2 = slot-2 inject command register (registers are single
+// words; their bank/addr/is_length are ignored).
+#define AUX_WRITE_PACK(target, bank, is_len, addr, data) \
     ( ((uint32_t)(data) & 0xFFFFu)            | \
       (((uint32_t)(addr) & 0x3Fu)   << 16)    | \
-      (((uint32_t)(slot) & 0x3u)    << 22)    | \
+      (((uint32_t)(target) & 0x3u)  << 22)    | \
       (((uint32_t)(bank) & 0x1u)    << 24)    | \
       (((uint32_t)(is_len) & 0x1u)  << 25) )
 #define AUX_LENGTH_DATA(loop_idx, end_idx) \
@@ -172,9 +176,9 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // CTRL_REG_AUX_STROBE bits
 #define AUX_STROBE_WRITE_TOGGLE     (1u << 0)
 #define AUX_STROBE_INJECT_TOGGLE    (1u << 1)
-#define AUX_STROBE_INJECT_CMD_SHIFT 16         // [31:16] injected command
+#define AUX_STROBE_INJECT_CMD_SHIFT 16         // [31:16] injected command (slot-2 one-shot)
 
-// Bank size (entries per bank; matches aux_command_sequencer ADDR_W=6)
+// Program size (entries per bank; matches aux_program ADDR_W=6)
 #define AUX_BANK_ENTRIES            64
 
 // Status register offsets (status block starts after the control block)
@@ -194,16 +198,18 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define STATUS_REG_11_OFFSET (STATUS_REG_BASE + 11 * 4)  // Aux sequencer status
 #define STATUS_REG_12_OFFSET (STATUS_REG_BASE + 12 * 4)  // Aux injected-command read result
 
-// STATUS_REG_11 bit fields
-#define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot
-#define AUX_STATUS_SEQ_EN            (1u << 3) // per-packet latched aux_seq_en
+// STATUS_REG_11 bit fields. Only slot 0 (the accel program) cycles: its bank bit
+// and index are the only ones that move. Slots 1 and 2 are fixed registers -- their
+// bank bits and index fields always read 0.
+#define AUX_STATUS_BANK_ACTIVE_MASK  0x7u      // [2:0] active bank per slot (bit0=slot0 program)
+#define AUX_STATUS_ENGINE_ON         (1u << 3) // always 1 (aux engine always on)
 #define AUX_STATUS_FS_ACTIVE         (1u << 4)
 #define AUX_STATUS_DIGOUT            (1u << 5)
 #define AUX_STATUS_DSP_ACTIVE        (1u << 6)
 #define AUX_STATUS_INJECT_ACK        (1u << 7) // toggles when an injection result lands
-#define AUX_STATUS_IDX0_SHIFT        8         // [13:8]  slot-0 index
-#define AUX_STATUS_IDX1_SHIFT        16        // [21:16] slot-1 index
-#define AUX_STATUS_IDX2_SHIFT        24        // [29:24] slot-2 index
+#define AUX_STATUS_IDX0_SHIFT        8         // [13:8]  slot-0 program index
+#define AUX_STATUS_IDX1_SHIFT        16        // [21:16] slot-1 index (always 0: fs register)
+#define AUX_STATUS_IDX2_SHIFT        24        // [29:24] slot-2 index (always 0: inject register)
 #define AUX_STATUS_IDX_MASK          0x3Fu
 
 // RHD2000 SPI command encodings (datasheet-confirmed)
@@ -215,15 +221,16 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define CTRL_ENABLE_TRANSMISSION (1 << 0)
 #define CTRL_RESET_TIMESTAMP     (1 << 1)
 #define CTRL_DEBUG_MODE          (1 << 3)   // Debug mode (send dummy data) [3]
-// CTRL_REG_2 layout (dual-port): [3:0] phase0, [7:4] phase1,
-//   [15:8] channel_enable (8-bit: [3:0]=port0, [7:4]=port1),
-//   [19:16] phase2 (port1 cipo0), [23:20] phase3 (port1 cipo1)
-#define CTRL_PHASE0_MASK         (0xF << 0)  // phase0 [3:0]  (port0 cipo0)
-#define CTRL_PHASE1_MASK         (0xF << 4)  // phase1 [7:4]  (port0 cipo1)
-#define CTRL_CHANNEL_ENABLE_MASK (0xFF << 8) // channel_enable [15:8]
-#define CTRL_CHANNEL_ENABLE_SHIFT 8
-#define CTRL_PHASE2_MASK         (0xF << 16) // phase2 [19:16] (port1 cipo0)
-#define CTRL_PHASE3_MASK         (0xF << 20) // phase3 [23:20] (port1 cipo1)
+// CTRL_REG_2 layout. All four CIPO cable-delay phases are adjacent in the low
+// 16 bits; channel_enable follows:
+//   [3:0] phase_a0, [7:4] phase_a1, [11:8] phase_b0, [15:12] phase_b1,
+//   [23:16] channel_enable (8-bit: [19:16]=cable A, [23:20]=cable B)
+#define CTRL_PHASE0_MASK         (0xF << 0)   // phase_a0 [3:0]   (cable A, line 0)
+#define CTRL_PHASE1_MASK         (0xF << 4)   // phase_a1 [7:4]   (cable A, line 1)
+#define CTRL_PHASE2_MASK         (0xF << 8)   // phase_b0 [11:8]  (cable B, line 0)
+#define CTRL_PHASE3_MASK         (0xF << 12)  // phase_b1 [15:12] (cable B, line 1)
+#define CTRL_CHANNEL_ENABLE_MASK (0xFF << 16) // channel_enable [23:16]
+#define CTRL_CHANNEL_ENABLE_SHIFT 16
 
 // Status register 0 bits (dynamic status + counters)
 #define STATUS_TRANSMISSION_ACTIVE   (1 << 0)
@@ -258,15 +265,20 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 
 // Protocol version
 #define PROTOCOL_VERSION               1
-#define FIRMWARE_VERSION_MAJOR         1
-#define FIRMWARE_VERSION_MINOR         0   // 1.0.0.0: GLANCE release -- broadband-only firmware (rebrand;
-                                           //      was internally v1.8). No on-PL LFP/DSP engine
-                                           //      (stream_type=2 producer): its control/status registers
-                                           //      (PL 25-27 + status 13), the lfp_stream drain path, and the
-                                           //      LFP status-struct fields are gone. status_response_t wire
-                                           //      size 264 B; keep net.py get_status + the _Static_assert in
-                                           //      sync. Unified 8-word header UNCHANGED (broadband =
-                                           //      stream_type=1). PL N_CTRL 25, N_STATUS 13.
+#define FIRMWARE_VERSION_MAJOR         2
+#define FIRMWARE_VERSION_MINOR         0   // 2.0.0.0: aux command-path re-architecture -- MAJOR bump because the
+                                           //      aux wire contract broke: the aux_seq_en path is retired
+                                           //      (CMD_AUX_SEQ_EN 0x72 gone), the new aux_command_engine changes
+                                           //      the reg22 semantics, and the accel sweep is always-on on slot 0
+                                           //      (intra-packet reply @ data word 34). A 1.x host/plugin will not
+                                           //      interoperate -- PL + firmware + plugin move together. slot 1 =
+                                           //      fs register (default 'I' = READ(40)), slot 2 = inject register
+                                           //      (default temp = CONVERT(49)); program bank-select -> reg22[0].
+                                           //      No on-PL LFP/DSP engine: PL N_CTRL 25, N_STATUS 13,
+                                           //      status_response_t wire size 264 B; keep net.py get_status +
+                                           //      the _Static_assert in sync. Unified 8-word header UNCHANGED
+                                           //      (broadband = stream_type=1).
+                                           // 1.0.0.0: GLANCE broadband-only release (LFP/DSP stripped).
                                            //      --- prior internal history ---
                                            // 1.7: lwIP TX headroom -- n_tx_descriptors 64->256, mem_size
                                            //      128K->256K (BSP lwip220 config) to eliminate the rare
@@ -529,9 +541,10 @@ void pl_print_status(void);
 // Debug
 void pl_dump_bram_data(uint32_t start_addr, uint32_t word_count);
 
-// COPI command management
-void pl_set_copi_commands(const uint16_t copi_array[35]);
-int pl_set_copi_commands_safe(const uint16_t copi_array[35], const char* sequence_name);
+// COPI command management. The table is 32 words -- one command per channel cycle
+// (0..31). The 3 aux cycles (32..34) are sourced by the aux command engine.
+void pl_set_copi_commands(const uint16_t copi_array[32]);
+int pl_set_copi_commands_safe(const uint16_t copi_array[32], const char* sequence_name);
 
 // COPI sequence selection
 void pl_set_convert_sequence(void);
@@ -547,8 +560,6 @@ void pl_aux_write_length(int slot, int bank, int loop_idx, int end_idx);
 int  pl_aux_upload_bank(int slot, int bank, const uint16_t *cmds, int n, int loop_idx);
 void pl_aux_select_bank(int slot, int bank);
 int  pl_aux_confirm_bank(int slot, int bank, int timeout_ms);
-void pl_aux_seq_enable(int enable);
-int  pl_aux_seq_is_enabled(void);
 void pl_aux_set_fast_settle(uint32_t cfg);   // AUX_CTRL fs/dsp bit fields [13:4]
 void pl_aux_set_digout(uint32_t cfg);        // AUX_CTRL digout fields [18:14] + reg3_static [31:24]
 int  pl_aux_inject(uint16_t cmd, uint32_t *result, int timeout_ms);
@@ -558,9 +569,9 @@ int  pl_write_rhd_register(int reg, uint8_t value, uint32_t *result);
 // Command to go through all possible cable lengths for cable optimization
 void pl_run_full_cable_test(void);
 
-extern const uint16_t convert_cmd_sequence[35];
-extern const uint16_t initialization_cmd_sequence[35];
-extern const uint16_t cable_length_cmd_sequence[35];
+extern const uint16_t convert_cmd_sequence[32];
+extern const uint16_t initialization_cmd_sequence[32];
+extern const uint16_t cable_length_cmd_sequence[32];
 
 // ============================================================================
 // DEBUG FUNCTIONS
