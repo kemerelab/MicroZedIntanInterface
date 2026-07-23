@@ -1409,17 +1409,17 @@ class UnifiedSink:
         return True
 
     def _recv_loop(self):
-        # SINGLE-THREAD hot path: recvfrom -> demux -> validate, all inline in ONE
-        # thread. The previous two-thread design (recv -> queue.Queue -> demux) paid
-        # a queue lock + condvar signal on every put/get AND ping-ponged the GIL
-        # between the two threads 30k times/s -- for zero parallelism gain (the GIL
-        # serializes them anyway). That overhead was the difference between keeping
-        # up and falling behind: it capped ~25k while a single inline loop sustains
-        # a clean 30k (verified against the historical udp_listener, which did 30k
-        # for years). recvfrom() releases the GIL while it blocks, then validate runs
-        # on the same thread -- no handoff, no lock. Same datagram structure, same
-        # validate_packet; only the plumbing that carries a datagram to it changed.
+        # SINGLE-THREAD hot path, kept as LEAN as the historical udp_listener that
+        # sustained 30k for years: recvfrom -> validate_packet, inline, one thread.
+        # recvfrom() releases the GIL while it blocks; validate runs on the same
+        # thread -- no queue, no second thread, no GIL handoff (that two-thread
+        # queue.Queue design capped ~25k). And NO redundant header pre-parse:
+        # validate_packet already checks magic + stream_type, so re-unpacking the
+        # header here just to demux cost ~4% for nothing (the data port only carries
+        # broadband). Same datagram structure, same validate_packet -- only the
+        # plumbing that carries a datagram to it changed.
         recvfrom = self._sock.recvfrom
+        validate = validator.validate_packet
         while self._running:
             try:
                 data, addr = recvfrom(4096)
@@ -1428,31 +1428,17 @@ class UnifiedSink:
             except OSError:
                 break
             self.last_addr = addr
-            if len(data) < UNIFIED_HEADER_WORDS * 4:
-                self.other_pkts += 1
-                continue
-            magic, type_ver = struct.unpack('<II', data[:8])
-            if magic != UNIFIED_MAGIC:
-                self.other_pkts += 1
-                continue
-            if (type_ver & 0xFF) == STREAM_TYPE_BROADBAND:
-                self._handle_broadband(data)
+            psize = validator.expected_packet_size_bytes
+            total = len(data)
+            if total == psize:              # one packet per datagram (the norm)
+                self.bb_pkts += 1
+                validate(data)
+            elif psize > 0:                 # defensive: coalesced datagrams
+                for off in range(0, total - psize + 1, psize):
+                    self.bb_pkts += 1
+                    validate(data[off:off + psize])
             else:
-                self.other_pkts += 1
-
-    def _handle_broadband(self, data):
-        # A datagram is exactly one broadband packet (the board sends one packet
-        # per datagram). Re-chunk defensively in case several were coalesced.
-        self.bb_pkts += 1
-        psize = validator.expected_packet_size_bytes
-        if psize <= 0:
-            return
-        total = len(data)
-        if total == psize:
-            validator.validate_packet(data)
-            return
-        for off in range(0, total - psize + 1, psize):
-            validator.validate_packet(data[off:off + psize])
+                self.other_pkts += 1        # board packet size not known yet
 
     def stop(self):
         self._running = False
