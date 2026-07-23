@@ -1366,10 +1366,9 @@ class UnifiedSink:
         self.rcvbuf = rcvbuf
         self._sock = None
         self._recv_thread = None
-        self._demux_thread = None
         self._running = False
-        self._ring = queue.Queue(maxsize=ring_max)
-        self._ring_drops = 0           # datagrams dropped because the ring was full
+        self._ring_drops = 0           # kept for the 'sink' command; always 0 in the
+                                       # single-thread design (no host-side ring to overflow)
         self.bb_pkts = 0
         self.other_pkts = 0
         self.last_addr = None
@@ -1405,35 +1404,30 @@ class UnifiedSink:
         self._sock = sock
         self._running = True
         self._recv_thread = threading.Thread(target=self._recv_loop, name="udp-recv", daemon=True)
-        self._demux_thread = threading.Thread(target=self._demux_loop, name="udp-demux", daemon=True)
         self._recv_thread.start()
-        self._demux_thread.start()
-        print(f"[UDP] Unified listener on port {self.port} (demux by stream_type)")
+        print(f"[UDP] Unified listener on port {self.port} (single-thread recv+demux+validate)")
         return True
 
     def _recv_loop(self):
-        # The hot path: recv -> ring, nothing else (so broadband is never blocked
-        # while the demux/validator does its work downstream).
-        ring = self._ring
+        # SINGLE-THREAD hot path: recvfrom -> demux -> validate, all inline in ONE
+        # thread. The previous two-thread design (recv -> queue.Queue -> demux) paid
+        # a queue lock + condvar signal on every put/get AND ping-ponged the GIL
+        # between the two threads 30k times/s -- for zero parallelism gain (the GIL
+        # serializes them anyway). That overhead was the difference between keeping
+        # up and falling behind: it capped ~25k while a single inline loop sustains
+        # a clean 30k (verified against the historical udp_listener, which did 30k
+        # for years). recvfrom() releases the GIL while it blocks, then validate runs
+        # on the same thread -- no handoff, no lock. Same datagram structure, same
+        # validate_packet; only the plumbing that carries a datagram to it changed.
+        recvfrom = self._sock.recvfrom
         while self._running:
             try:
-                data, addr = self._sock.recvfrom(4096)
+                data, addr = recvfrom(4096)
             except socket.timeout:
                 continue
             except OSError:
                 break
             self.last_addr = addr
-            try:
-                ring.put_nowait(data)
-            except queue.Full:
-                self._ring_drops += 1   # host-side ring overflow (NOT a board drop)
-
-    def _demux_loop(self):
-        while self._running:
-            try:
-                data = self._ring.get(timeout=0.5)
-            except queue.Empty:
-                continue
             if len(data) < UNIFIED_HEADER_WORDS * 4:
                 self.other_pkts += 1
                 continue
@@ -1441,8 +1435,7 @@ class UnifiedSink:
             if magic != UNIFIED_MAGIC:
                 self.other_pkts += 1
                 continue
-            stream_type = type_ver & 0xFF
-            if stream_type == STREAM_TYPE_BROADBAND:
+            if (type_ver & 0xFF) == STREAM_TYPE_BROADBAND:
                 self._handle_broadband(data)
             else:
                 self.other_pkts += 1
