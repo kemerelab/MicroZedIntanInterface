@@ -515,10 +515,11 @@ static void publish_status_snapshot(void) {
   psmon->channel_enable = pl_get_current_channel_enable();
   int p0, p1;
   pl_get_current_phase_select(&p0, &p1);
-  // port-B phase2/phase3 read from the CTRL_REG_2 mirror (status reg 8)
+  // port-B phase2/phase3 read from the CTRL_REG_2 mirror (status reg 8): reg 8
+  // mirrors CTRL_REG_2 verbatim, so phase_b0 is at [11:8], phase_b1 at [15:12].
   uint32_t cr2 = Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_8_OFFSET);
   psmon->phase          = (p0 & 0xF) | ((p1 & 0xF) << 4)
-                        | (((cr2 >> 16) & 0xF) << 8) | (((cr2 >> 20) & 0xF) << 12);
+                        | (((cr2 >> 8) & 0xF) << 8) | (((cr2 >> 12) & 0xF) << 12);
   psmon->flags_pl       = (pl_is_transmission_active() ? PSMON_FLAG_TX_ACTIVE : 0)
                         | (pl_is_loop_limit_reached()  ? PSMON_FLAG_LOOP_LIMIT : 0)
                         | (pl_get_current_debug_mode() ? PSMON_FLAG_DEBUG_MODE : 0);
