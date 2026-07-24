@@ -20,11 +20,12 @@ module data_generator #(
     input  wire        rstn,
     
     // Control and status interfaces
-    // Widths must match axi_lite_registers (N_CTRL=25, N_STATUS=13). Control
-    // regs 0..21 = acquisition/framing config; 22..24 = the aux command engine.
-    // Status 11 = aux status, 12 = read result.
-    input  wire [32*25-1:0] ctrl_regs_pl,
-    output wire [32*13-1:0]  status_regs_pl,
+    // Widths must match axi_lite_registers (N_CTRL=28, N_STATUS=14). Control regs
+    // 0..21 = acquisition/framing config; 22..24 = the aux command engine;
+    // 25..27 = the LFP/DSP engine. Status 11 = aux status, 12 = read result,
+    // 13 = LFP status.
+    input  wire [32*28-1:0] ctrl_regs_pl,
+    output wire [32*14-1:0]  status_regs_pl,
     
     // Digital input (eventually should add analog input here!)
     input  wire [7:0]  digital_in,
@@ -44,6 +45,23 @@ module data_generator #(
     output wire            bram_en,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 BRAM_PORTA WE" *)
     output wire [3:0]      bram_we,
+
+    // LFP output BRAM Port A (PL writes the decimated stream; PS reads it via a
+    // second axi_bram_ctrl mapped at 0x84000000).
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM CLK" *)
+    output wire            lfp_bram_clk,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM RST" *)
+    output wire            lfp_bram_rst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM ADDR" *)
+    output wire [BRAM_ADDR_WIDTH-1:0] lfp_bram_addr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM DIN" *)
+    output wire [BRAM_DATA_WIDTH-1:0] lfp_bram_din,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM DOUT" *)
+    input  wire [BRAM_DATA_WIDTH-1:0] lfp_bram_dout,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM EN" *)
+    output wire            lfp_bram_en,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 LFP_BRAM WE" *)
+    output wire [3:0]      lfp_bram_we,
 
     // Serial interface signals
     (* X_INTERFACE_INFO = "kemerelab.org:intan:intan_spi:1.0 intan_spi csn" *)
@@ -112,6 +130,16 @@ module data_generator #(
     wire [8:0]  fifo_count;
     wire [13:0] current_bram_address;
 
+    // DSP tap from the core to the LFP engine
+    wire         dsp_sample_valid;
+    wire [127:0] dsp_sample_data;
+    wire [5:0]   dsp_sample_slot;
+    wire         dsp_packet_tick;
+    wire [63:0]  dsp_master_timestamp;   // live master sample count (LFP frame stamp)
+    wire [7:0]   dsp_channel_enable;     // broadband mask -> LFP lane_mask (single source)
+    wire [15:0]  lfp_wr_addr;
+    wire         lfp_overrun;
+
     // Data generator status (only 10 registers - wrapper adds 11th..13th)
     wire [32*10-1:0] data_gen_status;
     wire [31:0] aux_status;
@@ -145,7 +173,43 @@ module data_generator #(
         .cipo_b1(cipo3),
 
         // Digital input
-        .digital_in(digital_in)
+        .digital_in(digital_in),
+
+        // DSP tap to the LFP engine
+        .dsp_sample_valid(dsp_sample_valid),
+        .dsp_sample_data(dsp_sample_data),
+        .dsp_sample_slot(dsp_sample_slot),
+        .dsp_packet_tick(dsp_packet_tick),
+        .dsp_master_timestamp(dsp_master_timestamp),
+        .dsp_channel_enable(dsp_channel_enable)
+    );
+
+    // Instantiate the on-PL LFP/DSP engine (control regs 25..27; writes its own
+    // output BRAM read by the PS via a 2nd axi_bram_ctrl).
+    lfp_dsp_block #(
+        .LFP_BRAM_AW(BRAM_ADDR_WIDTH)
+    ) lfp_dsp_inst (
+        .clk(clk),
+        .rstn(rstn),
+        .dsp_sample_valid(dsp_sample_valid),
+        .dsp_sample_data(dsp_sample_data),
+        .dsp_sample_slot(dsp_sample_slot),
+        .dsp_packet_tick(dsp_packet_tick),
+        // Master timestamp tap (frame stamp) + broadband mask (LFP lane_mask source).
+        .dsp_master_timestamp(dsp_master_timestamp),
+        .dsp_channel_enable(dsp_channel_enable),
+        .lfp_cfg(ctrl_regs_pl[25*32 +: 32]),
+        .lfp_coef(ctrl_regs_pl[26*32 +: 32]),
+        .lfp_strobe(ctrl_regs_pl[27*32 +: 32]),
+        .bram_clk(lfp_bram_clk),
+        .bram_rst(lfp_bram_rst),
+        .bram_addr(lfp_bram_addr),
+        .bram_din(lfp_bram_din),
+        .bram_dout(lfp_bram_dout),
+        .bram_en(lfp_bram_en),
+        .bram_we(lfp_bram_we),
+        .lfp_wr_addr(lfp_wr_addr),
+        .lfp_overrun(lfp_overrun)
     );
 
     // Instantiate the FIFO-BRAM interface
@@ -194,6 +258,10 @@ module data_generator #(
     // Aux command sequencer status (see data_generator_core for bit layout)
     assign status_regs_pl[11*32 +: 32] = aux_status;
     assign status_regs_pl[12*32 +: 32] = aux_read_result;
+
+    // LFP engine status: [15:0] output-BRAM write byte-address (PS read pointer),
+    // [16] sticky compute-overrun flag.
+    assign status_regs_pl[13*32 +: 32] = {15'd0, lfp_overrun, lfp_wr_addr};
 
     // Port-B master outputs are the same broadcast commands as port A.
     assign csn_b  = csn;

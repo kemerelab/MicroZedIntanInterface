@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
 
 #include "main.h"
+#include "pl_dma.h"     // CDMA read of the LFP output BRAM into non-cacheable staging
 #include "lwip/init.h"
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
@@ -66,6 +67,12 @@ ID   | Command          | Param1              | Param2
 #define CMD_SET_DIGOUT      0x76   // param1 = sw | gpio_en<<1 | pin<<4; param2 = reg3_static byte
 #define CMD_SET_CHIRP       0x77   // param1 = mode | stride<<8; param2 = fspan | rate<<16 (CTRL_REG_3)
 
+// LFP/DSP engine (Tier-1). Set params + lane mask + coefficients while disabled,
+// then enable. Coefficients stream one tap per CMD_LFP_WRITE_COEF.
+#define CMD_LFP_ENABLE       0x80  // param1 = 0/1
+#define CMD_LFP_SET_PARAMS   0x81  // param1 = decim_R, param2 = num_taps
+#define CMD_LFP_SET_CHANNELS 0x82  // param1 = 8-bit lane mask
+#define CMD_LFP_WRITE_COEF   0x83  // param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 #define CMD_PERF_RESET       0x91  // clear recv->transmit sticky maxes + histogram + counts
 
 #define ACK_SUCCESS         0x06
@@ -279,6 +286,9 @@ void collect_status_data(status_response_t* status) {
     status->bb_pbuf_alloc_fail  = bb_pbuf_alloc_fail;
     status->bb_send_err         = bb_send_err;
     status->bb_last_send_err    = bb_last_send_err;
+    status->lfp_pbuf_alloc_fail = lfp_pbuf_alloc_fail;
+    status->lfp_send_err        = lfp_send_err;
+    status->lfp_last_send_err   = lfp_last_send_err;
     status->first_drop_pkt      = first_drop_pkt;
     status->last_drop_pkt       = last_drop_pkt;
     status->memp_num_pbuf       = (uint32_t)MEMP_NUM_PBUF;
@@ -291,6 +301,16 @@ void collect_status_data(status_response_t* status) {
 
     // RHD chip register mirror (commanded state of regs 0..21)
     memcpy(status->rhd_reg, rhd_reg_shadow, sizeof(status->rhd_reg));
+
+    // LFP/DSP engine config (host-set) + live status. The lane mask now MIRRORS
+    // the broadband channel-enable mask (single source of truth), so report the
+    // live broadband mask rather than a separate LFP mask.
+    status->lfp_enable       = lfp_cfg_enable;
+    status->lfp_lane_mask    = pl_get_current_channel_enable() & 0xFF;
+    status->lfp_decim_R      = lfp_cfg_decim_R;
+    status->lfp_num_taps     = lfp_cfg_num_taps;
+    status->lfp_packets_sent = lfp_udp_packets_sent;
+    status->lfp_overrun      = (pl_lfp_read_status() >> 16) & 1;
 
     // Analytic chirp NCO config (host-set, mirrored from CTRL_REG_3 tracking)
     status->chirp_mode   = chirp_cfg_mode;
@@ -531,6 +551,30 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
                         cmd->param1, cmd->param2);
             break;
 
+        case CMD_LFP_ENABLE:
+            pl_lfp_set_config(cmd->param1 ? 1 : 0, lfp_cfg_decim_R, lfp_cfg_num_taps);
+            send_message("Binary Command: LFP_ENABLE %u\r\n", cmd->param1 ? 1 : 0);
+            break;
+
+        case CMD_LFP_SET_PARAMS:
+            pl_lfp_set_config(lfp_cfg_enable, cmd->param1 & 0xFF, cmd->param2 & 0xFF);
+            send_message("Binary Command: LFP_SET_PARAMS decimR=%u num_taps=%u\r\n",
+                         cmd->param1 & 0xFF, cmd->param2 & 0xFF);
+            break;
+
+        // CMD_LFP_SET_CHANNELS is DEPRECATED: the LFP lane mask now mirrors the
+        // broadband channel-enable mask (set_channels) -- single source of truth.
+        // Accept-and-ignore so older hosts don't error; it no longer sets a mask.
+        case CMD_LFP_SET_CHANNELS:
+            send_message("Binary Command: LFP_SET_CHANNELS ignored "
+                         "(lane mask mirrors broadband channel_enable)\r\n");
+            break;
+
+        case CMD_LFP_WRITE_COEF:
+            if (cmd->param1 & 0x1) pl_lfp_coef_begin();
+            pl_lfp_coef_push((int32_t)(cmd->param2 << 14) >> 14);  // sign-extend 18-bit
+            break;
+
         case CMD_PERF_RESET:
             perf_reset();   // fresh recv->transmit measurement window
             send_message("Binary Command: PERF_RESET (maxes/histogram/counts cleared)\r\n");
@@ -696,5 +740,112 @@ void stop_udp_stream(void) {
         udp_remove(udp);
         udp = NULL;
         send_message("UDP stream stopped\r\n");
+    }
+}
+
+// ============================================================================
+// LFP/DSP STREAM (Tier-1): drain the LFP output BRAM -> UDP on the UNIFIED port.
+//
+// Unified-port format: the LFP band streams on the SAME UDP port as broadband
+// (udp_dest_port, default UDP_PORT), demuxed host-side by stream_type=2. The former
+// separate LFP_UDP_PORT (5001) send path is removed.
+//
+// The PL builds the COMPLETE LFP wire packet in its output BRAM (0x84000000):
+// per frame, the unified 8-word common header (MAGIC, TYPE_VER=2, 64-bit master
+// timestamp, SEQ, AUX0=lane_mask/decim_R/num_taps/overrun, AUX1=num_samples,
+// RSVD) followed by the decimated samples (popcount of the broadband
+// channel_enable mask x 32 ch x 16-bit, packed 2/word). So the PS just CDMAs the
+// whole packet from the LFP BRAM into a non-cacheable staging buffer and sends a
+// zero-copy pbuf referencing it -- NO PS-side header math and NO Xil_In32 sample
+// loop (the long single-beat loop blew the per-packet budget; see CLAUDE.md
+// "PL->PS bulk data ALWAYS moves by DMA").
+//
+// The PL exposes its write pointer (next word to be written) in STATUS_REG_13;
+// we drain whole [header|samples] frames as they complete. The frame size is
+// derived from the broadband channel_enable mask (= the PL's LFP lane mask).
+// ============================================================================
+static struct udp_pcb *lfp_pcb = NULL;
+static uint32_t lfp_read_word = 0;
+uint32_t lfp_udp_packets_sent = 0;
+#define LFP_HDR_WORDS UNIFIED_HEADER_WORDS   // 8-word common header
+// LFP zero-copy staging RING. The send is PBUF_REF into the LFP staging buffer, and
+// up to 8 frames are sent per service call; a SINGLE staging buffer aliased each
+// frame's payload with the previous frame's still-queued TX BD -> the GEM transmits
+// stale/duplicate bytes and the earlier frame is effectively lost (a clean +1 LFP
+// SEQ gap on the host). Rotate through N slots so every in-flight LFP send owns its
+// slot. 64 * 1 KB = 64 KB inside the existing 1 MB pl_dma_lfp_staging; N=64 >> the
+// 8/call and ~16 (MEMP_NUM_PBUF) max in-flight, so a slot is reused only long after
+// its TX-done.
+#define LFP_STAGING_SLOT_BYTES 1024u   // >= max LFP frame (8+128 words = 544 B)
+#define N_LFP_STAGING_SLOTS    64u
+static uint32_t lfp_staging_slot = 0;
+
+void lfp_stream_init(void) {
+    lfp_pcb = udp_new();
+    lfp_read_word = 0;
+    lfp_udp_packets_sent = 0;
+    if (lfp_pcb == NULL) send_message("ERROR: Could not create LFP UDP PCB\r\n");
+}
+
+void lfp_stream_service(void) {
+    if (!lfp_cfg_enable || lfp_pcb == NULL) return;
+    // Lane mask = broadband channel_enable (single source of truth; the PL drives
+    // the LFP lane_mask from channel_enable_reg).
+    int nlanes = __builtin_popcount(pl_get_current_channel_enable() & 0xFF);
+    if (nlanes == 0) return;
+    uint32_t sample_words = (uint32_t)nlanes * 16;      // popcount*32 samples / 2 per word
+    uint32_t frame_words  = LFP_HDR_WORDS + sample_words;  // full wire packet (header+samples)
+    const uint32_t mask = LFP_BRAM_SIZE_WORDS - 1;
+
+    uint32_t st = pl_lfp_read_status();
+    uint32_t wr_word = (st & 0xFFFF) >> 2;              // byte addr -> 32-bit word index
+
+    int budget = 8;   // cap frames per call so the broadband loop isn't starved
+    while (budget-- > 0) {
+        if (((wr_word - lfp_read_word) & mask) < frame_words) break;  // no full frame yet
+
+        // Rotate the LFP staging slot so the up-to-8 frames sent per call don't
+        // alias one buffer (see the ring note above).
+        uint32_t *pkt = (uint32_t *)(LFP_DMA_BUF_ADDR
+                          + (uintptr_t)lfp_staging_slot * LFP_STAGING_SLOT_BYTES);
+
+        // CDMA the whole packet (header + samples) from the LFP BRAM ring into the
+        // non-cacheable staging slot, splitting at the ring wrap if needed.
+        int derr;
+        if ((lfp_read_word + frame_words) <= LFP_BRAM_SIZE_WORDS) {
+            derr = pl_dma_read_addr(pkt,
+                       LFP_BRAM_BASE_ADDR + (lfp_read_word << 2), frame_words);
+        } else {
+            uint32_t first = LFP_BRAM_SIZE_WORDS - lfp_read_word;
+            derr  = pl_dma_read_addr(pkt,
+                       LFP_BRAM_BASE_ADDR + (lfp_read_word << 2), first);
+            derr |= pl_dma_read_addr(pkt + first,
+                       LFP_BRAM_BASE_ADDR, frame_words - first);
+        }
+        if (derr) { dma_errors++; break; }   // CDMA error: retry SAME frame next call (no advance)
+
+        // NO-LOSS: advance the read pointer ONLY once the frame is actually sent.
+        // If the shared MEMP_PBUF pool is momentarily empty or udp_sendto rejects
+        // the frame, DO NOT skip it -- break and retry the SAME frame next call. The
+        // 16K-word LFP ring holds ~120+ frames of slack, so a transient shortage is
+        // lossless. (The old code advanced lfp_read_word unconditionally, turning a
+        // transient pool shortage / send reject into a permanently dropped LFP frame
+        // -- the periodic +1 LFP SEQ gaps seen on the host.)
+        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_words * 4, PBUF_REF);
+        if (p == NULL) { lfp_pbuf_alloc_fail++; break; }   // pool empty: retry this frame next call
+        p->payload = (void*)pkt;
+        ip_addr_t dst; dst.addr = udp_dest_ip;
+        // Unified port: LFP shares the broadband UDP destination (UDP_PORT), demuxed
+        // host-side by stream_type=2.
+        err_t e = udp_sendto(lfp_pcb, p, &dst, udp_dest_port);
+        pbuf_free(p);   // PBUF_REF: frees the ref pbuf only, not the staging slot
+        if (e != ERR_OK) {                        // send rejected: retry this frame next call
+            lfp_send_err++; lfp_last_send_err = (int32_t)e;
+            break;
+        }
+
+        lfp_udp_packets_sent++;
+        lfp_staging_slot = (lfp_staging_slot + 1u) % N_LFP_STAGING_SLOTS;
+        lfp_read_word = (lfp_read_word + frame_words) & mask;   // commit: frame is out
     }
 }

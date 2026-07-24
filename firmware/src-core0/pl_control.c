@@ -630,3 +630,51 @@ void pl_run_full_cable_test(void) {
     send_message("  2. Look for 0x0049 ('I') in word indices 8,9\r\n");
     send_message("  3. Use optimal phase settings found\r\n");
 }
+
+// ============================================================================
+// LFP/DSP engine control (CTRL_REG_LFP_*; see lfp_dsp_block.sv)
+// ============================================================================
+// Phase A default decimation: 30 kHz / 10 = 3 kHz LFP (was R=15 -> 2 kHz).
+uint8_t  lfp_cfg_enable = 0, lfp_cfg_decim_R = 10, lfp_cfg_num_taps = 0;
+
+// The LFP lane mask MIRRORS the broadband channel-enable mask in the PL (single
+// source of truth -- driven by data_generator_core's channel_enable_reg). The
+// lfp_cfg[15:8] lane_mask field is left at 0 on the wire: the PL ignores it.
+void pl_lfp_set_config(uint8_t enable, uint8_t decim_R, uint8_t num_taps) {
+    uint32_t cfg = ((uint32_t)enable & 0x1)
+                 | ((uint32_t)decim_R   << 16)
+                 | ((uint32_t)num_taps  << 24);
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_LFP_CFG_OFFSET, cfg);
+    lfp_cfg_enable = enable;
+    lfp_cfg_decim_R = decim_R; lfp_cfg_num_taps = num_taps;
+}
+
+// Coefficient upload through the indirect window (mirrors the aux-bank strobe-
+// write CDC pattern). Load while the engine is disabled. The host streams taps
+// one CMD_LFP_WRITE_COEF at a time, so expose begin/push; pl_lfp_upload_coeffs
+// is the local array convenience.
+static uint32_t lfp_coef_strobe = 0;
+
+void pl_lfp_coef_begin(void) {
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_LFP_STROBE_OFFSET, LFP_STROBE_PTR_CLR);
+    usleep(2);
+    lfp_coef_strobe = 0;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_LFP_STROBE_OFFSET, lfp_coef_strobe);  // release
+    usleep(2);
+}
+
+void pl_lfp_coef_push(int32_t coef) {
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_LFP_COEF_OFFSET, (uint32_t)(coef & 0x3FFFF));
+    lfp_coef_strobe ^= LFP_STROBE_COEF_TOGGLE;
+    Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_LFP_STROBE_OFFSET, lfp_coef_strobe);
+    usleep(2);
+}
+
+void pl_lfp_upload_coeffs(const int32_t *coeffs, int n) {
+    pl_lfp_coef_begin();
+    for (int j = 0; j < n; j++) pl_lfp_coef_push(coeffs[j]);
+}
+
+uint32_t pl_lfp_read_status(void) {
+    return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_13_OFFSET);
+}

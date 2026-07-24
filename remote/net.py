@@ -169,6 +169,8 @@ UNIFIED_MAGIC = 0xCAFEBABE
 UNIFIED_VERSION = 1
 UNIFIED_HEADER_WORDS = 8
 STREAM_TYPE_BROADBAND = 1
+STREAM_TYPE_LFP = 2
+STREAM_TYPE_WAVELET = 3   # reserved for the follow-on branch
 
 # Binary command protocol constants
 CMD_MAGIC = 0xDEADBEEF
@@ -207,11 +209,19 @@ CHIRP_PHW          = 32
 CHIRP_FSPAN_SHIFT  = 16     # f_max = fspan << 16 (phase-accumulator units)
 CHIRP_RATE_SHIFT   = 9      # freq_acc step/packet = rate << 9
 PACKET_RATE_HZ     = 30000  # one phase update per broadband packet
+# LFP/DSP engine (Tier-1) -- configure while disabled, then enable
+CMD_LFP_ENABLE = 0x80       # param1 = 0/1
+CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
+CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband channel_enable (firmware accepts-and-ignores)
+CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
 
-# The persistent UnifiedSink (created in __main__) drains UDP_PORT promiscuously
-# so the host never replies ICMP port-unreachable to the board while it streams.
+# Unified port: the LFP band now arrives on UDP_PORT mixed with broadband,
+# demuxed by stream_type=2. The persistent UnifiedSink (created in __main__)
+# drains 5000 promiscuously and fans the LFP frames out to subscribers, so the
+# host never replies ICMP port-unreachable to the board while LFP streams.
 UNIFIED_SINK = None
+LFP_COEF_FRAC = 17          # Q1.17 coefficient fixed-point
 
 AUX_BANK_ENTRIES = 64       # entries per bank (PL aux_command_sequencer ADDR_W=6)
 
@@ -1351,14 +1361,15 @@ def verify_debug_sine(sock, channel_enable=0xFF, n_packets=300):
 
 
 # ---------------------------------------------------------------------------
-# Unified UDP sink: ONE socket on UDP_PORT carrying the broadband stream,
-# demuxed by stream_type. This is the no-loss design from CLAUDE.md /
+# Unified UDP sink: ONE socket on UDP_PORT carrying ALL streams (broadband +
+# LFP), demuxed by stream_type. This is the no-loss design from CLAUDE.md /
 # docs/unified-packet-format.md:
 #   * a tight recv->ring thread does the MINIMUM work (recvfrom -> queue), so
 #     broadband is NEVER blocked while a slow consumer processes a packet;
 #   * a demux thread pops from the ring, peeks header word 1 (stream_type), and
 #     routes broadband -> DataValidator (which checks per-stream SEQ continuity
-#     and prints the broadband gap count, which MUST be 0).
+#     and prints the broadband gap count, which MUST be 0) and LFP -> the LFP
+#     subscriber queues (receive_lfp / lfp_sweep read those).
 # Big SO_RCVBUF so nothing is dropped while waiting.
 # ---------------------------------------------------------------------------
 class UnifiedSink:
@@ -1370,6 +1381,13 @@ class UnifiedSink:
         self._running = False
         self._ring_drops = 0           # kept for the 'sink' command; always 0 in the
                                        # single-thread design (no host-side ring to overflow)
+        # LFP fan-out (pub/sub): LFP frames (stream_type=2) are demuxed inline on the
+        # single recv thread, then handed to subscribers -- no ring, no second thread.
+        self._lfp_subs = []
+        self._lfp_last_seq = None
+        self._lfp_gaps = 0
+        self.lfp_pkts = 0
+        self.lfp_bytes = 0
         self.bb_pkts = 0
         self.other_pkts = 0
         self.last_addr = None
@@ -1406,7 +1424,8 @@ class UnifiedSink:
         self._running = True
         self._recv_thread = threading.Thread(target=self._recv_loop, name="udp-recv", daemon=True)
         self._recv_thread.start()
-        print(f"[UDP] Unified listener on port {self.port} (single-thread recv+demux+validate)")
+        print(f"[UDP] Unified listener on port {self.port} (single-thread recv+demux+validate; "
+              f"broadband + LFP on one port by stream_type)")
         return True
 
     def _recv_loop(self):
@@ -1431,13 +1450,56 @@ class UnifiedSink:
                 break
             if not n:
                 continue
-            # The board sends exactly one packet per datagram (single-sample latency),
-            # so no re-chunking. validate_packet returns the timestamp for a good
-            # broadband packet, None otherwise.
-            if validate(view[:n]) is not None:
-                self.bb_pkts += 1
+            # Demux by stream_type (header word 1, low byte). Broadband stays
+            # ZERO-COPY -- validate the memoryview in place, one packet per datagram
+            # (single-sample latency, no re-chunking). LFP is far lower rate
+            # (decimated), so it's copied out of the reused buffer and fanned out.
+            mv = view[:n]
+            if n < UNIFIED_HEADER_WORDS * 4:
+                self.other_pkts += 1
+                continue
+            if struct.unpack_from('<I', mv, 0)[0] != UNIFIED_MAGIC:
+                self.other_pkts += 1
+                continue
+            stream_type = struct.unpack_from('<I', mv, 4)[0] & 0xFF
+            if stream_type == STREAM_TYPE_BROADBAND:
+                # validate_packet returns the timestamp for a good broadband
+                # packet, None otherwise.
+                if validate(mv) is not None:
+                    self.bb_pkts += 1
+                else:
+                    self.other_pkts += 1
+            elif stream_type == STREAM_TYPE_LFP:
+                self._handle_lfp(bytes(mv))   # copy: LFP frame escapes the reused buffer
             else:
                 self.other_pkts += 1
+
+    def _handle_lfp(self, data):
+        self.lfp_pkts += 1
+        self.lfp_bytes += len(data)
+        # SEQ continuity for the LFP stream (header word 4)
+        seq = struct.unpack('<I', data[16:20])[0]
+        if self._lfp_last_seq is not None and seq != (self._lfp_last_seq + 1) & 0xFFFFFFFF:
+            self._lfp_gaps += 1
+        self._lfp_last_seq = seq
+        with self._lock:
+            subs = list(self._lfp_subs)
+        for q in subs:
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                pass
+
+    def subscribe_lfp(self, maxsize=20000):
+        q = queue.Queue(maxsize=maxsize)
+        with self._lock:
+            self._lfp_subs.append(q)
+        return q
+
+    def unsubscribe_lfp(self, q):
+        with self._lock:
+            if q in self._lfp_subs:
+                self._lfp_subs.remove(q)
 
     def stop(self):
         self._running = False
@@ -1505,6 +1567,9 @@ def send_binary_command(sock, cmd_id, param1=0, param2=0, timeout=0.5):
         sock.settimeout(None)
 
 # ============================================================================
+# LFP/DSP engine (Tier-1) host control + receive
+# ============================================================================
+# ============================================================================
 # Analytic chirp NCO (memory-free swept sine in the PL; reuses the sine LUT)
 # ============================================================================
 def chirp_fmax_to_fspan(f_max_hz):
@@ -1526,7 +1591,7 @@ def configure_chirp(sock, f_max_hz=1400.0, period_s=2.0, stride=4, enable=True):
     """Enable the analytic chirp debug signal: a swept sine 0->f_max->0 with a
     full triangle period of `period_s`, per-channel phase `stride`. Requires
     debug mode (set it too). Disable with enable=False (or CMD_SET_DEBUG_MODE 0).
-    Default sweep ~1 Hz -> ~1.4 kHz gives a broadband swept-sine test signal."""
+    Default sweep ~1 Hz -> ~1.4 kHz covers the new 3 kHz LFP passband + transition."""
     fspan = chirp_fmax_to_fspan(f_max_hz)
     rate  = chirp_sweep_to_rate(f_max_hz, period_s)
     p1 = (1 if enable else 0) | ((stride & 0x3F) << 8)
@@ -1539,6 +1604,365 @@ def configure_chirp(sock, f_max_hz=1400.0, period_s=2.0, stride=4, enable=True):
     print(f"[CHIRP] {'ENABLED' if enable else 'disabled'}: sweep {f_lo:.0f}->{f_hi:.0f} Hz, "
           f"period~{period_s:.1f}s, stride={stride} (fspan={fspan} rate={rate})")
     return fspan, rate
+
+def _kaiser_window(num_taps, beta):
+    """Kaiser window via the I0 Bessel series (no numpy dependency)."""
+    import math
+    def i0(x):
+        s, t, k = 1.0, 1.0, 0
+        while True:
+            k += 1
+            t *= (x * x) / (4 * k * k)
+            s += t
+            if t < 1e-12 * s:
+                return s
+    a = (num_taps - 1) / 2.0
+    return [i0(beta * math.sqrt(1 - ((n - a) / a) ** 2)) / i0(beta)
+            for n in range(num_taps)]
+
+def design_lfp_lowpass(num_taps, cutoff_hz=1250.0, fs=30000.0, window="kaiser",
+                       beta=6.5):
+    """Windowed-sinc low-pass FIR, unity DC gain, quantized to Q1.17 (18-bit
+    signed). The decimation anti-alias; place cutoff (-6 dB) inside the
+    transition band fs/(2*R_pass) .. fs/(2*R). For R=10 (3 kHz, Nyquist 1.5 kHz)
+    the default ~131-tap Kaiser(beta=6.5) gives <1 dB ripple to 1 kHz, ~21 dB at
+    1.5 kHz, and >46 dB rejection of any band that folds onto the 0-1 kHz
+    passband. 'hamming' reproduces the legacy 2 kHz designer."""
+    import math
+    fc = cutoff_hz / fs                       # normalized cutoff (cycles/sample)
+    M = num_taps - 1
+    if window == "kaiser":
+        win = _kaiser_window(num_taps, beta)
+    else:  # legacy Hamming
+        win = [0.54 - 0.46 * math.cos(2 * math.pi * n / M) for n in range(num_taps)]
+    h = []
+    for n in range(num_taps):
+        x = n - M / 2.0
+        s = 2 * fc if abs(x) < 1e-9 else math.sin(2 * math.pi * fc * x) / (math.pi * x)
+        h.append(s * win[n])
+    g = sum(h) or 1.0
+    scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
+    return [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
+
+def design_cic_comp_fir(num_taps=43, fc=1300.0, beta=6.0,
+                        R_cic=5, n_order=4, gain_shift=10, fs_in=30000.0):
+    """Droop-compensated comp-FIR / halfband (/2) for the CIC^4(/5)+FIR(/2) = /10
+    LFP datapath (USE_CIC=1, the default build). Designed at the CIC output rate
+    fs_in/R_cic (6 kHz) via frequency sampling: the target passband response is
+    1/CIC-droop so the COMBINED /10 chain is flat to ~1 kHz (<=0.02 dB), with
+    ~ -54 dB worst alias-into-passband and unity DC gain. Quantized Q1.17.
+    MUST match programmable_logic/sim/gen_cic_chain_vectors.py exactly."""
+    import math
+    fs1 = fs_in / R_cic                       # comp-FIR input rate (6 kHz)
+    def cic_mag(f):
+        w = math.pi * f / fs_in
+        if abs(w) < 1e-12: return 1.0
+        d = R_cic * math.sin(w)
+        return (math.sin(R_cic * w) / d) ** n_order if abs(d) > 1e-15 else 1.0
+    cic_dc = (R_cic ** n_order) / (1 << gain_shift)
+    win = _kaiser_window(num_taps, beta)
+    M = num_taps - 1
+    a = M / 2.0
+    def desired(f):
+        if f > fc: return 0.0
+        dr = cic_mag(f)
+        return (1.0 / dr) if dr > 1e-6 else 1.0
+    L = 2048
+    fs_grid = [fs1 / 2 * k / L for k in range(L + 1)]
+    Hd = [desired(f) for f in fs_grid]
+    df = fs_grid[1] - fs_grid[0]
+    h = [0.0] * num_taps
+    for n in range(num_taps):
+        acc = 0.0
+        for k in range(L + 1):
+            wgt = 0.5 if (k == 0 or k == L) else 1.0
+            acc += wgt * Hd[k] * math.cos(2 * math.pi * fs_grid[k] * (n - a) / fs1)
+        h[n] = acc * df * 2.0 / (fs1 / 2) * win[n]
+    dc = sum(h) or 1.0
+    h = [c * (1.0 / cic_dc) / dc for c in h]   # combined DC gain -> unity
+    scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
+    return [max(-lim, min(lim - 1, int(round(c * scale)))) for c in h]
+
+def lfp_upload_coeffs(sock, coeffs):
+    """Stream taps through the indirect window (first write clears the pointer).
+    This is a 100+ command burst that the board acks one-by-one, so use a generous
+    per-command timeout and stop early (with a clear message) if an ack stalls --
+    that distinguishes a merely-slow board from a wedged one."""
+    for i, c in enumerate(coeffs):
+        ok, _ = send_binary_command(sock, CMD_LFP_WRITE_COEF, 1 if i == 0 else 0,
+                                    c & 0x3FFFF, timeout=2.0)
+        if not ok:
+            print(f"[LFP] coefficient upload stalled at tap {i}/{len(coeffs)} -- the board "
+                  f"stopped acking. Reconnect and 'ping': if it answers it's a timing issue, "
+                  f"if it's dead the coef path wedged the firmware.")
+            return False
+    return True
+
+def configure_lfp(sock, datapath="cic", num_taps=None, cutoff_hz=1250.0):
+    """Disable, set params, design + upload the LP kernel. Call lfp_enable(sock,
+    True) afterwards to start streaming on the unified UDP port (UDP_PORT,
+    stream_type=2).
+
+    The LFP lane mask is NO LONGER set here -- it MIRRORS the broadband
+    channel-enable mask in the PL (single source of truth). Choose which streams
+    to filter with `set_channels` (the broadband mask); the LFP filters exactly
+    the broadband-enabled lanes.
+
+    datapath="cic" (default, matches the USE_CIC=1 build): uploads the 43-tap
+      droop-compensated comp-FIR halfband; the engine's CIC^4(/5)+halfband(/2)=/10
+      decimation is hardwired -> 3 kHz LFP. num_taps defaults to 43.
+    datapath="fir" (USE_CIC=0 fallback build): uploads a 131-tap single-stage
+      Kaiser 3 kHz anti-alias; decim_R=10. num_taps defaults to 131.
+
+    Either way R=10 -> 3 kHz; the LFP packet's self-describing R field is set
+    accordingly so the host/plugin auto-tracks the rate."""
+    send_binary_command(sock, CMD_LFP_ENABLE, 0)
+    if datapath == "cic":
+        nt = num_taps if num_taps else 43
+        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
+        coeffs = design_cic_comp_fir(nt)
+        lfp_upload_coeffs(sock, coeffs)
+        print(f"[LFP] configured CIC^4(/5)+halfband(/2)=/10: lane mask = broadband "
+              f"channel_enable; comp_taps={nt} -> 3000 sps out (flat to ~1 kHz)")
+    else:
+        nt = num_taps if num_taps else 131
+        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
+        coeffs = design_lfp_lowpass(nt, cutoff_hz)
+        lfp_upload_coeffs(sock, coeffs)
+        print(f"[LFP] configured single-stage FIR /10: lane mask = broadband "
+              f"channel_enable; taps={nt} cutoff={cutoff_hz:.0f}Hz -> 3000 sps out")
+    return coeffs
+
+def fs_out_str(decim_R):
+    return f"{30000.0 / max(decim_R,1):.0f} sps out"
+
+def lfp_enable(sock, on=True):
+    send_binary_command(sock, CMD_LFP_ENABLE, 1 if on else 0)
+    print(f"[LFP] {'ENABLED' if on else 'disabled'}")
+
+
+# ---------------------------------------------------------------------------
+# LFP datagram reader. Unified port: the LFP band arrives on UDP_PORT
+# mixed with broadband, demuxed by the UnifiedSink (stream_type=2). The reader
+# subscribes to that sink's LFP fan-out so a single socket drains 5000 for the
+# whole session (an unconsumed UDP port makes the host kernel reply ICMP
+# "port unreachable" per datagram -> an RX-interrupt storm that preempts the
+# board's polled loop). If the sink isn't running, fall back to a private bind
+# on UDP_PORT that demuxes LFP itself.
+# ---------------------------------------------------------------------------
+class _LfpReader:
+    """Yields LFP datagrams from the persistent UnifiedSink if running, else from
+    a private socket bound to UDP_PORT that filters stream_type=2 itself."""
+    def __init__(self, port=UDP_PORT, timeout=3.0):
+        self.port = port
+        self.timeout = timeout
+        self._q = None
+        self._sock = None
+
+    def open(self):
+        if UNIFIED_SINK is not None and UNIFIED_SINK._running:
+            self._q = UNIFIED_SINK.subscribe_lfp()
+        else:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('', self.port))
+            s.settimeout(self.timeout)
+            self._sock = s
+        return self
+
+    def recv(self):
+        """Next LFP datagram (stream_type=2), or raise socket.timeout."""
+        if self._q is not None:
+            try:
+                return self._q.get(timeout=self.timeout)
+            except queue.Empty:
+                raise socket.timeout()
+        # private-bind fallback: demux LFP ourselves
+        while True:
+            data, _ = self._sock.recvfrom(4096)
+            if len(data) >= 8:
+                magic, type_ver = struct.unpack('<II', data[:8])
+                if magic == UNIFIED_MAGIC and (type_ver & 0xFF) == STREAM_TYPE_LFP:
+                    return data
+
+    def close(self):
+        if self._q is not None:
+            UNIFIED_SINK.unsubscribe_lfp(self._q)
+            self._q = None
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
+
+
+def receive_lfp(n_packets=200, bind_port=UDP_PORT):
+    """Bind the LFP UDP port and parse frames -- a reference receiver for the
+    plugin. Payload samples are offset-binary 16-bit (subtract 0x8000 for signed).
+
+    The unified 8-word common header is built BY THE PL (not the PS): the PL
+    writes the complete wire packet (header + samples) into its output BRAM and
+    the PS just CDMAs it into a pbuf and sends it on UDP_PORT, demuxed by
+    stream_type=2. Header layout (docs/unified-packet-format.md):
+      w0 = MAGIC (0xCAFEBABE), w1 = TYPE_VER (stream_type=2 | version<<8)
+      w2/w3 = 64-bit master timestamp = the master count of the NEWEST broadband
+              sample in this output's decimation window -- i.e. the most recent
+              broadband packet that was clocked into the (FIR) filter bank for
+              this output. For frame m at total decimation R it is broadband
+              packet R*m + (R-1) (R=10 -> 10m+9). Causal, monotonic, R apart.
+              NB: this marks the newest *input* sample, not the instant the LFP
+              value represents; subtract the filter group delay to align with
+              broadband *content*.
+      w4 = SEQ = PL-maintained LFP frame sequence number (++ per emitted frame)
+      w5 = AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24);
+           lane_mask = the broadband channel_enable mask (single source of truth).
+      w6 = AUX1 = num_samples (popcount(lane_mask) * 32)
+      w7 = RSVD = 0."""
+    HDR = UNIFIED_HEADER_WORDS * 4   # 32-byte common header
+    r = _LfpReader(port=bind_port, timeout=3.0).open()
+    got = bad = 0
+    last_seq = None
+    try:
+        while got < n_packets:
+            data = r.recv()
+            if len(data) < HDR:
+                bad += 1; continue
+            magic, type_ver, ts_lo, ts_hi, seq, cfg, num_samples, rsvd = \
+                struct.unpack('<IIIIIIII', data[:HDR])
+            if magic != UNIFIED_MAGIC or (type_ver & 0xFF) != STREAM_TYPE_LFP:
+                bad += 1; continue
+            lane_mask, decim_R, num_taps, overrun = (cfg & 0xFF, (cfg >> 8) & 0xFF,
+                                                     (cfg >> 16) & 0xFF, (cfg >> 24) & 1)
+            pay = data[HDR:]
+            usamp = struct.unpack(f'<{len(pay)//2}H', pay)
+            samp = [u - 0x8000 for u in usamp]      # offset binary -> signed
+            ts = ts_lo | (ts_hi << 32)
+            if last_seq is not None and seq != (last_seq + 1) & 0xFFFFFFFF:
+                print(f"[LFP] seq gap {last_seq}->{seq}")
+            last_seq = seq
+            got += 1
+            if got <= 5 or got % 50 == 0:
+                print(f"[LFP] seq={seq} ts={ts} mask=0x{lane_mask:02X} R={decim_R} "
+                      f"taps={num_taps} ov={overrun} n={len(samp)} first={samp[:4]}")
+    except socket.timeout:
+        print("[LFP] receive timeout (is the engine enabled + streaming?)")
+    finally:
+        r.close()
+    print(f"[LFP] received {got} frames, {bad} non-LFP/short datagrams")
+    return got
+
+def _goertzel_power(x, f, fs):
+    """Power of x at frequency f (Hz), sample rate fs (Goertzel; pure Python)."""
+    import math
+    cw = 2.0 * math.cos(2.0 * math.pi * (f / fs))
+    s1 = s2 = 0.0
+    for v in x:
+        s0 = v + cw * s1 - s2
+        s2 = s1; s1 = s0
+    return s1*s1 + s2*s2 - cw*s1*s2
+
+def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
+                         channel=0, lane_mask=0x0F, fmin=25, fstep=25):
+    """Drive the analytic chirp across [0, f_max] and MEASURE the LFP anti-alias
+    magnitude response |H(f)| from the host. Method: capture one LFP channel for a
+    few chirp triangle periods; in each short window find the dominant frequency
+    (Goertzel peak over a grid) and its amplitude; bin amplitude vs frequency.
+    Self-calibrating -- does NOT assume a flat chirp spectrum. f_max defaults just
+    under the 1500 Hz LFP Nyquist so nothing folds. Prints a dB table + ASCII plot.
+    The chirp/debug/coef configs latch only while stopped, so this stops, arms, and
+    restarts the stream itself."""
+    import math, time
+    fs = 3000.0   # LFP rate (30 kHz / decim_R=10)
+    # --- preflight: confirm the board is alive and on v1.3+ firmware. The chirp /
+    #     3 kHz-LFP commands lfp_sweep needs ONLY exist in v1.3; running against a
+    #     wedged or older-image board is the usual cause of an apparent "hang".
+    #     Fail fast and clearly instead. ---
+    st = get_status(sock)
+    if not st:
+        print("[SWEEP] board did NOT answer get_status -- unresponsive/wedged. "
+              "Power-cycle and flash main's v1.3 BOOT.bin (4,455,828 B). Aborting.")
+        return
+    fw = st.get('firmware_version', 0)
+    fmaj, fmin = (fw >> 24) & 0xFF, (fw >> 16) & 0xFF
+    print(f"[SWEEP] board firmware {fmaj}.{fmin}")
+    if (fmaj, fmin) < (1, 3):
+        print(f"[SWEEP] firmware {fmaj}.{fmin} is too old for the chirp/3kHz-LFP path "
+              f"(lfp_sweep needs >=1.3). You're on the wrong board image -- flash main's "
+              f"v1.3 BOOT.bin. Aborting.")
+        return
+    send_binary_command(sock, CMD_STOP)
+    # The LFP lane mask mirrors the broadband channel_enable, so select the lanes
+    # via set_channels; the LFP engine then filters exactly those lanes.
+    send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, lane_mask & 0xFF)
+    configure_lfp(sock, datapath="cic")                     # upload CIC comp-FIR
+    configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
+    lfp_enable(sock, True)
+    send_binary_command(sock, CMD_START)
+    # ---- capture one channel's time series off the unified UDP port (UDP_PORT) ----
+    settle = int(0.3 * fs)
+    n_want = int(n_periods * period * fs) + settle
+    HDR = UNIFIED_HEADER_WORDS * 4   # 32-byte common header
+    r = _LfpReader(port=UDP_PORT, timeout=3.0).open()
+    series = []
+    t_start = time.time()
+    max_wall = n_periods * period * 4.0 + 8.0   # hard wall-clock cap; never spin forever
+    try:
+        while len(series) < n_want and (time.time() - t_start) < max_wall:
+            data = r.recv()
+            if len(data) < HDR: continue
+            magic, type_ver = struct.unpack('<II', data[:8])
+            if magic != UNIFIED_MAGIC or (type_ver & 0xFF) != STREAM_TYPE_LFP: continue
+            usamp = struct.unpack(f'<{(len(data)-HDR)//2}H', data[HDR:])
+            if channel < len(usamp):
+                series.append(usamp[channel] - 0x8000)      # offset-binary -> signed
+    except socket.timeout:
+        print("[SWEEP] capture timed out -- is the chirp+LFP streaming?")
+    finally:
+        r.close()
+    series = series[settle:]
+    if len(series) < int(period * fs):
+        print(f"[SWEEP] only {len(series)} LFP samples in ~{max_wall:.0f}s -- the board "
+              f"answered control (fw {fmaj}.{fmin}) but isn't streaming LFP. The LFP/CIC "
+              f"datapath likely wedged on this image. Aborting."); return
+    # ---- short-time dominant-freq + amplitude -> response ----
+    grid = list(range(int(fmin), int(min(f_max, fs/2.0)) + 1, int(fstep)))
+    win, hop = 256, 64    # hop small enough that the swept tone hits every grid bin
+    acc = {f: [0.0, 0] for f in grid}
+    i, n = 0, len(series)
+    while i + win <= n:
+        w = series[i:i+win]
+        m = sum(w) / win
+        w = [v - m for v in w]
+        bf, bp = grid[0], -1.0
+        for f in grid:
+            p = _goertzel_power(w, f, fs)
+            if p > bp: bp, bf = p, f
+        acc[bf][0] += math.sqrt(max(bp, 0.0)) * 2.0 / win   # dominant-tone amplitude
+        acc[bf][1] += 1
+        i += hop
+    resp = [(f, (acc[f][0]/acc[f][1] if acc[f][1] else 0.0), acc[f][1]) for f in grid]
+    pb = sorted(a for (f, a, c) in resp if 100 <= f <= 800 and c)   # passband ref
+    ref = pb[len(pb)//2] if pb else (max((a for _, a, _ in resp), default=1.0) or 1.0)
+    print(f"\n[SWEEP] LFP anti-alias |H(f)|  (chirp 0->{f_max:.0f} Hz, "
+          f"{n_periods}x{period:.1f}s, ch{channel}, {len(series)} samp @ {fs:.0f} Hz)")
+    print("  f(Hz)  |H| dB  hits  |" + "-"*42)
+    crossings, pf, pdb = {}, None, None
+    for f, a, c in resp:
+        if c == 0:
+            print(f"  {f:5d}     --     0  |")     # no window peaked here
+            continue
+        db = 20*math.log10(a/ref) if (a > 0 and ref > 0) else -99.0
+        bar = "#" * int(max(0, min(42, (db + 60.0) / 60.0 * 42)))
+        print(f"  {f:5d}  {db:6.1f}  {c:4d}  |{bar}")
+        for thr in (-3.0, -6.0, -20.0):
+            if thr not in crossings and pdb is not None and pdb >= thr > db:
+                crossings[thr] = pf + (thr - pdb) * (f - pf) / (db - pdb)
+        pf, pdb = f, db
+    for thr in (-3.0, -6.0, -20.0):
+        if thr in crossings:
+            print(f"  measured {thr:+.0f} dB at ~{crossings[thr]:.0f} Hz")
+    print("  predicted (shipped CIC+comp): flat to ~1.0 kHz, -3 dB ~1.25 kHz, "
+          "-6 dB ~1.30 kHz, -32 dB @ 1.50 kHz Nyquist")
+    print("  (chirp left running; 'chirp_off' to stop, or raise f_max for more transition)")
+    return resp
 
 def aux_upload_bank(sock, slot, bank, cmds, loop_idx=0):
     """Upload a command program (with its length record) into a standby bank.
@@ -1690,11 +2114,11 @@ def get_status(sock):
         print("[TCP] Failed to get status")
         return None
 
-    if len(data) != 264:
-        print(f"[TCP] Invalid status response length: {len(data)} (expected 264)")
+    if len(data) != 288:
+        print(f"[TCP] Invalid status response length: {len(data)} (expected 220)")
         return None
-
-    # Parse status_response_t structure (264 bytes)
+    
+    # Parse status_response_t structure (86 bytes)
     # Version and identification (8 bytes)
     version, device_type, firmware_version = struct.unpack('<HHI', data[0:8])
     
@@ -1729,26 +2153,32 @@ def get_status(sock):
 
     # RHD chip register mirror: commanded state of regs 0..21 (22 bytes)
     rhd_reg = struct.unpack('<22B', data[126:148])
+    # LFP/DSP engine config + status (12 bytes)
+    (lfp_enable, lfp_lane_mask, lfp_decim_R, lfp_num_taps) = struct.unpack('<4B', data[148:152])
+    (lfp_packets_sent,) = struct.unpack('<I', data[152:156])
+    (lfp_overrun,) = struct.unpack('<B', data[156:157])
+    # data[157:160] = lfp_reserved[3]
     # Analytic chirp NCO config (8 bytes): mode, stride, fspan(u16), rate(u16), 2 rsvd
     (chirp_mode, chirp_stride, chirp_fspan, chirp_rate) = \
-        struct.unpack('<BBHH2x', data[148:156])
+        struct.unpack('<BBHH2x', data[160:168])
 
     # recv->transmit spike instrumentation (52 bytes): the recv->transmit window
     # split into udp_sendto / worst-case breakdown + a 6-bucket histogram. All
     # times are raw ticks (converted to us against timer_hz in print_status).
     (send_ticks_last, send_ticks_max, over_budget_count, worst_pkt_index,
      worst_cdma_ticks, worst_send_ticks, worst_other_ticks) = \
-        struct.unpack('<7I', data[156:184])
-    loop_hist = struct.unpack('<6I', data[184:208])
+        struct.unpack('<7I', data[168:196])
+    loop_hist = struct.unpack('<6I', data[196:220])
 
-    # TX drop diagnostics (v1.6, 56 bytes): split udp_send_errors by failure mode,
-    # pbuf-alloc-fail (MEMP_PBUF pool empty) vs udp_sendto error (+ err code),
-    # first/last drop packet index, MEMP_NUM_PBUF, and an 8-deep ring of recent
-    # drop indices. err_t: ERR_MEM=-1, ERR_BUF=-2, ERR_RTE=-4, ...
+    # TX drop diagnostics (v1.6, 68 bytes): split udp_send_errors into broadband
+    # vs LFP, pbuf-alloc-fail (MEMP_PBUF pool empty) vs udp_sendto error (+ err
+    # code), first/last drop packet index, MEMP_NUM_PBUF, and an 8-deep ring of
+    # recent drop indices. err_t: ERR_MEM=-1, ERR_BUF=-2, ERR_RTE=-4, ...
     (bb_pbuf_alloc_fail, bb_send_err, bb_last_send_err,
+     lfp_pbuf_alloc_fail, lfp_send_err, lfp_last_send_err,
      first_drop_pkt, last_drop_pkt, memp_num_pbuf) = \
-        struct.unpack('<IIiIII', data[208:232])
-    drop_ring = struct.unpack('<8I', data[232:264])
+        struct.unpack('<IIiIIiIII', data[220:256])
+    drop_ring = struct.unpack('<8I', data[256:288])
 
     status = {
         'version': version,
@@ -1804,6 +2234,9 @@ def get_status(sock):
         'bb_pbuf_alloc_fail': bb_pbuf_alloc_fail,
         'bb_send_err': bb_send_err,
         'bb_last_send_err': bb_last_send_err,
+        'lfp_pbuf_alloc_fail': lfp_pbuf_alloc_fail,
+        'lfp_send_err': lfp_send_err,
+        'lfp_last_send_err': lfp_last_send_err,
         'first_drop_pkt': first_drop_pkt,
         'last_drop_pkt': last_drop_pkt,
         'memp_num_pbuf': memp_num_pbuf,
@@ -1821,6 +2254,12 @@ def get_status(sock):
         'digout_pin': (aux_ctrl >> 16) & 0x7,
         # RHD chip register mirror (commanded state of regs 0..21)
         'rhd_reg': list(rhd_reg),
+        'lfp_enable': lfp_enable,
+        'lfp_lane_mask': lfp_lane_mask,
+        'lfp_decim_R': lfp_decim_R,
+        'lfp_num_taps': lfp_num_taps,
+        'lfp_packets_sent': lfp_packets_sent,
+        'lfp_overrun': lfp_overrun,
         'chirp_mode': chirp_mode,
         'chirp_stride': chirp_stride,
         'chirp_fspan': chirp_fspan,
@@ -1911,16 +2350,18 @@ def print_status(status):
     print(f"DMA errors: {status['dma_errors']}   (timer {hz/1e6:.1f} MHz)   [perf_reset to clear maxes/histogram]")
 
     # --- TX drops (v1.6): WHY udp_send_errors happened. pbuf-alloc-fail => the
-    # MEMP_PBUF zero-copy pool was momentarily empty; sendto-err (ERR_MEM=-1) =>
-    # no TX BD/mem. first/last/ring show whether drops cluster at stream start
-    # (cold/warmup) or recur in steady state. Cleared by perf_reset.
+    # shared MEMP_PBUF zero-copy pool (bb + lfp) was momentarily empty; sendto-err
+    # (ERR_MEM=-1) => no TX BD/mem. first/last/ring show whether drops cluster at
+    # stream start (cold/warmup) or recur in steady state. Cleared by perf_reset.
     _errname = {0: "OK", -1: "ERR_MEM", -2: "ERR_BUF", -3: "ERR_TIMEOUT",
                 -4: "ERR_RTE", -6: "ERR_VAL", -7: "ERR_WOULDBLOCK"}
     _en = lambda c: _errname.get(c, str(c))
     print("\n--- TX drops (zero-copy pbuf pool / send) ---")
-    print(f"MEMP_NUM_PBUF (zero-copy pool): {status['memp_num_pbuf']}")
+    print(f"MEMP_NUM_PBUF (shared bb+lfp zero-copy pool): {status['memp_num_pbuf']}")
     print(f"Broadband: pbuf_alloc-fail={status['bb_pbuf_alloc_fail']}  "
           f"sendto-err={status['bb_send_err']} (last {_en(status['bb_last_send_err'])})")
+    print(f"LFP:       pbuf_alloc-fail={status['lfp_pbuf_alloc_fail']}  "
+          f"sendto-err={status['lfp_send_err']} (last {_en(status['lfp_last_send_err'])})")
     print(f"Broadband drop span: first pkt={status['first_drop_pkt']}, last pkt={status['last_drop_pkt']}")
     print(f"  recent drop pkt ring (last 8): {list(status['drop_ring'])}")
 
@@ -1933,6 +2374,15 @@ def print_status(status):
     print(f"  DSP HPF: {'on' if rr[4] & 0x10 else 'off'} (cutoff code {rr[4] & 0x0F})"
           f" | BW DACs: RH1={rr[8]} RH2={rr[10]} RL={rr[12]}"
           f" | amps powered: {amps}/64")
+
+    R = status['lfp_decim_R'] or 1
+    print(f"\n--- LFP/DSP engine (Tier-1, UDP {UDP_PORT} stream_type=2) ---")
+    print(f"  {'ENABLED' if status['lfp_enable'] else 'disabled'}  "
+          f"lane_mask=0x{status['lfp_lane_mask']:02X} (= broadband channel_enable)  "
+          f"decim_R={status['lfp_decim_R']} "
+          f"(-> {30000.0/R:.0f} sps)  num_taps={status['lfp_num_taps']}")
+    print(f"  packets sent: {status['lfp_packets_sent']}   "
+          f"overrun: {'YES' if status['lfp_overrun'] else 'no'}")
 
     # Analytic chirp NCO config
     f_hi = (status['chirp_fspan'] << CHIRP_FSPAN_SHIFT) / (1 << CHIRP_PHW) * PACKET_RATE_HZ
@@ -2229,9 +2679,11 @@ def tcp_control():
         print(f"  COPI: convert, init, cable_test, full_cable_test, manual_cable_test")
         print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, perf_reset, ping")
-        print(f"  Debug: dump_bram [start] [count], stats, hex, sink")
+        print(f"  Debug: dump_bram [start] [count], stats, hex")
+        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], sink  (port UDP_PORT, stream_type=2)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
+        print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
         print(f"  auto_cable_detect - Automated cable detection!")
         print(f"  Aux: aux_demo, aux_bank <slot> <bank>, aux")
         print(f"       read_reg <r>, write_reg <r> <v>, aux_selftest")
@@ -2343,6 +2795,15 @@ def tcp_control():
                     validator.print_statistics()
                 elif cmd == "hex":
                     validator.print_last_packet_hex()
+                elif cmd == "lfp_config" or cmd.startswith("lfp_config "):
+                    # lfp_config [datapath=cic|fir] [taps]  (configure while off)
+                    # default = CIC^4(/5)+halfband(/2)=/10 -> 3 kHz, 43 comp taps.
+                    # The LFP lane mask mirrors the broadband channel_enable mask
+                    # (single source of truth) -- pick lanes with set_channels.
+                    parts = cmd.split()
+                    dp   = parts[1] if len(parts) > 1 else "cic"
+                    taps = int(parts[2]) if len(parts) > 2 else None
+                    configure_lfp(sock, datapath=dp, num_taps=taps)
                 elif cmd == "chirp" or cmd.startswith("chirp "):
                     # chirp [f_max_hz] [period_s] [stride]  (analytic swept-sine debug)
                     parts = cmd.split()
@@ -2353,12 +2814,34 @@ def tcp_control():
                 elif cmd == "chirp_off":
                     configure_chirp(sock, enable=False)
                     send_binary_command(sock, CMD_SET_DEBUG_MODE, 0)
-                elif cmd == "sink":
+                elif cmd == "lfp_sweep" or cmd.startswith("lfp_sweep "):
+                    # lfp_sweep [f_max=1490] [period=3.0] [n_periods=2]
+                    # chirp across the band + measure the LFP anti-alias |H(f)|
+                    parts = cmd.split()
+                    fmx = float(parts[1]) if len(parts) > 1 else 1490.0
+                    per = float(parts[2]) if len(parts) > 2 else 3.0
+                    npd = int(parts[3])   if len(parts) > 3 else 2
+                    measure_lfp_response(sock, f_max=fmx, period=per, n_periods=npd)
+                elif cmd == "lfp_on":
+                    st = get_status(sock)        # quietly read back the (broadband) lane mask
+                    if st and st.get('lfp_lane_mask', 0) == 0:
+                        print("[LFP] lane_mask is 0 (no broadband streams enabled) -- run "
+                              "set_channels first, or no data will stream.")
+                    lfp_enable(sock, True)
+                elif cmd == "lfp_off":
+                    lfp_enable(sock, False)
+                elif cmd == "lfp_recv" or cmd.startswith("lfp_recv "):
+                    # read decoded LFP frames from the persistent sink (blocks until n or timeout)
+                    parts = cmd.split()
+                    n = int(parts[1]) if len(parts) > 1 else 200
+                    receive_lfp(n)
+                elif cmd == "lfp_sink" or cmd == "sink":
                     if UNIFIED_SINK is not None and UNIFIED_SINK._running:
                         print(f"[UDP-SINK] draining UDP {UNIFIED_SINK.port}: "
-                              f"broadband={UNIFIED_SINK.bb_pkts} "
+                              f"broadband={UNIFIED_SINK.bb_pkts} LFP={UNIFIED_SINK.lfp_pkts} "
                               f"other={UNIFIED_SINK.other_pkts} pkts, "
-                              f"bb_seq_gaps={validator.seq_gaps}, "
+                              f"LFP={UNIFIED_SINK.lfp_bytes/1024.0:.0f} KB, "
+                              f"bb_seq_gaps={validator.seq_gaps} lfp_seq_gaps={UNIFIED_SINK._lfp_gaps}, "
                               f"host-ring-drops={UNIFIED_SINK._ring_drops}, last from {UNIFIED_SINK.last_addr}")
                     else:
                         print("[UDP-SINK] not running")
@@ -2423,7 +2906,13 @@ def tcp_control():
                     print("  auto_cable_detect - NEW: Automated detection!")
                     print("  set_udp <ip> <port>, get_status, perf_reset, ping")
                     print("  dump_bram [start] [count]")
-                    print("  stats, hex, sink, quit")
+                    print("  stats, hex, quit")
+                    print("LFP / Tier-1 (unified UDP 0x6800, stream_type=2):")
+                    print("  lfp_config [cic|fir] [taps] - set datapath/taps + upload LP kernel")
+                    print("  lfp_on / lfp_off    - enable / disable the engine")
+                    print("  lfp_recv [n]        - capture + print decoded LFP frames")
+                    print("  (LFP lane mask = the broadband channel_enable mask -- pick lanes")
+                    print("   with set_channels; run lfp_config + set_channels BEFORE lfp_on)")
                     print("Aux sequencer (bank-programmable aux commands):")
                     print("  aux_demo            - load the default slot programs")
                     print("  aux_bank <slot> <bank> - atomic bank swap (live)")
@@ -2507,13 +2996,13 @@ if __name__ == "__main__":
     print(f"UDP Port: {UDP_PORT}")
     print("Press Ctrl+C to stop.\n")
 
-    # ONE socket on UDP_PORT for the broadband stream. The UnifiedSink drains it
-    # promiscuously (recv->ring), demuxes by stream_type (broadband -> validator),
-    # and verifies per-stream SEQ continuity. Draining the port for the whole
-    # session also keeps the host from replying ICMP port-unreachable to the board
-    # (an unconsumed UDP port => ~1 ICMP/packet => an RX-interrupt storm that
-    # preempts the board's polled loop). Started here (not in tcp_control) so it
-    # drains regardless of the TCP control state.
+    # ONE socket on UDP_PORT for ALL streams. The UnifiedSink drains it
+    # promiscuously (recv->ring), demuxes by stream_type (broadband -> validator,
+    # LFP -> subscribers), and verifies per-stream SEQ continuity. Draining 5000
+    # for the whole session also keeps the host from replying ICMP port-
+    # unreachable to the board (an unconsumed UDP port => ~1 ICMP/packet => an
+    # RX-interrupt storm that preempts the board's polled loop). Started here (not
+    # in tcp_control) so it drains regardless of the TCP control state.
     UNIFIED_SINK = UnifiedSink(port=UDP_PORT)
     UNIFIED_SINK.start()
 
@@ -2523,10 +3012,11 @@ if __name__ == "__main__":
     if UNIFIED_SINK is not None:
         UNIFIED_SINK.stop()
         print(f"\n[UDP] demux summary: broadband={UNIFIED_SINK.bb_pkts} pkts, "
-              f"other={UNIFIED_SINK.other_pkts}, "
+              f"LFP={UNIFIED_SINK.lfp_pkts} pkts, other={UNIFIED_SINK.other_pkts}, "
               f"host-ring-drops={UNIFIED_SINK._ring_drops}")
         print(f"[UDP] broadband SEQ gaps = {validator.seq_gaps} "
               f"({validator.seq_lost_packets} packets implied missing)  "
               f"{'OK (no loss)' if validator.seq_gaps == 0 else 'LOSS DETECTED'}")
+        print(f"[UDP] LFP SEQ gaps = {UNIFIED_SINK._lfp_gaps}")
     validator.print_statistics()
     time.sleep(0.5)
