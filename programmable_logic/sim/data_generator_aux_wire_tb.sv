@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // data_generator_aux_wire_tb.sv
 //
 // Integration test: proves the always-on aux engine's commands (and the override

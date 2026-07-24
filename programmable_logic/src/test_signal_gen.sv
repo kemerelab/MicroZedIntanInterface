@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // test_signal_gen.sv
 //
 // Synthetic acquisition data for bring-up and loopback tests, split out of

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 # routing_analysis.tcl - open routed DCP and emit authoritative routing/timing/congestion reports
 open_checkpoint ./vivado_project/klab_project.runs/impl_1/design_1_wrapper_routed.dcp
 

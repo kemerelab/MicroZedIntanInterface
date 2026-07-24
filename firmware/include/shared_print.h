@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 #ifndef SHARED_PRINT_H
 #define SHARED_PRINT_H
 
@@ -50,7 +53,6 @@ typedef struct {
     volatile int disable_streaming_flag;
     volatile int reset_timestamp_flag;
     volatile int pl_print_flag;
-    volatile int bram_benchmark_flag;
     volatile int dump_bram_flag;
     volatile int cable_test_flag;
     volatile uint32_t start_bram_addr;

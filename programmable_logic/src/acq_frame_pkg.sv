@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // acq_frame_pkg.sv
 //
 // Single source of truth for the RHD2000 acquisition-frame geometry and the

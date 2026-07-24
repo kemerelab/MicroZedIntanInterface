@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 # Intan SPI LVDS Interface Constraints
 # This file provides pin assignments and I/O standards for the LVDS SPI interface
 # Modify the PACKAGE_PIN assignments to match your specific FPGA and PCB layout

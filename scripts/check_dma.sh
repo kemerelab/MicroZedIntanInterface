@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 # check_dma.sh -- guardrail for the PL->PS data path.
 #
 # RULE: bulk PL->PS data must move by DMA (AXI CDMA), landed straight into the

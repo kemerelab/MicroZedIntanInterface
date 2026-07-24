@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // File: simple_dual_port_bram.sv
 // Simple dual-port BRAM: Port A write-only (data generator), Port B read-only (AXI)
 // Pin-compatible with your existing BRAM interface

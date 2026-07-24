@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // File: led_status_controller.v
 // LED status controller that reads status registers and drives LEDs
 // LED0: System out of reset (heartbeat)

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // data_generator_core: drives the RHD SPI bus and exfiltrates the samples.
 // Organized around three cooperating state machines:
 //   1. Master cycle: the free-running state/cycle counters and the master

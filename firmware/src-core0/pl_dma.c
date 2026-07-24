@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // AXI CDMA capture-BRAM read path. See pl_dma.h for the rationale.
 //
 // Topology (design_1_bd.tcl): axi_cdma_0/M_AXI -> smartconnect_1 -> {

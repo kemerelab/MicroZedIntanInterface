@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // File: fifo_bram_interface.sv
 // FIFO stores 128-bit words + 8-bit channel metadata, BRAM writes 32-bit words.
 // The 128-bit word holds up to EIGHT 16-bit segments (two SPI ports x 4 streams

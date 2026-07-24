@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // File: data_generator_bram_blk.v
 // Clean Verilog wrapper that combines data generator and FIFO-BRAM interface
 

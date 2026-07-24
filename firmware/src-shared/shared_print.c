@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 #include "shared_print.h"
 #include "sleep.h"      // For usleep
 #include "xil_printf.h" // A common printf-like function for Xilinx embedded systems
@@ -48,7 +51,6 @@ void init_command_flags(void) {
     command_flags->disable_streaming_flag = 0;
     command_flags->reset_timestamp_flag = 0;
     command_flags->pl_print_flag = 0;
-    command_flags->bram_benchmark_flag = 0;
     command_flags->dump_bram_flag = 0;
     command_flags->start_bram_addr = 0;
     command_flags->word_count = 16;
@@ -126,10 +128,6 @@ void process_serial_command(const char* cmd) {
         xil_printf("Auto-status monitor %s\r\n", monitor_enabled ? "ON" : "OFF");
         command_flags->lock = 0;
 
-    } else if (strncmp(cmd, "benchmark", 9) == 0) {
-        xil_printf("Serial command: Running BRAM benchmark\r\n");
-        command_flags->bram_benchmark_flag = 1;
-
     } else if (strncmp(cmd, "dump", 4) == 0) {
         // Parse dump command: "dump [start] [count]"
         
@@ -146,7 +144,6 @@ void process_serial_command(const char* cmd) {
         xil_printf("  reset    - Reset timestamp and counters\r\n");
         xil_printf("  status   - Show system status (from shared snapshot)\r\n");
         xil_printf("  mon      - Toggle ~1 Hz auto-status\r\n");
-        xil_printf("  benchmark - Run BRAM read performance test\r\n");
         xil_printf("  dump [start] [count] - Dump BRAM contents\r\n");
         xil_printf("  help     - Show this help\r\n");
         command_flags->lock = 0;

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 # Compile + run the axi_lite_registers write-handshake testbench under xsim.
 # Usage:  source /opt/Xilinx/2025.1/Vivado/settings64.sh && bash run_axi_write_tb.sh
 set -o pipefail

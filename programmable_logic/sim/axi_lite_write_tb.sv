@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // axi_lite_write_tb.sv
 //
 // Self-checking xsim testbench for the axi_lite_registers AXI-Lite write

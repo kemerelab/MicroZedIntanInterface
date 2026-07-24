@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // aux_command_engine.sv
 //
 // The single command source for the 3 auxiliary COPI positions of the RHD frame

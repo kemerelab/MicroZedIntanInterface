@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 
 // Verilog wrapper for Vivado compatibility
 module simple_dual_port_bram_wrapper #(

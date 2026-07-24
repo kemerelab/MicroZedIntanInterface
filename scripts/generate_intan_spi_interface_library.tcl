@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 # Fixed approach: Create interface definitions and save them properly
 # This creates the correct directory structure that Vivado expects
 

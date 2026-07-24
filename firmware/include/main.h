@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 #ifndef MAIN_H
 #define MAIN_H
 #include <stdint.h>
@@ -577,7 +580,6 @@ extern const uint16_t cable_length_cmd_sequence[32];
 // DEBUG FUNCTIONS
 // ============================================================================
 
-void benchmark_bram_reads(void);   // serial 'benchmark' cmd: single-beat vs DMA BRAM reads
 
 // ============================================================================
 // NETWORK FUNCTIONS

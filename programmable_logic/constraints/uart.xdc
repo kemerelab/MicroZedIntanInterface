@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 # UART-TX - Connects to FT230 RX pin (connected to JX2)
 set_property PACKAGE_PIN M14 [get_ports UART1_TX_0]
 set_property IOSTANDARD LVCMOS25 [get_ports UART1_TX_0]

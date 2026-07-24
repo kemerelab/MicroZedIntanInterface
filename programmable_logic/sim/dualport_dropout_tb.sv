@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // dualport_dropout_tb.sv
 //
 // Reproduces the Phase-3 "neural channel dropout" report AND verifies the

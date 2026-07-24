@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 module axi_lite_registers #(
     parameter integer N_CTRL = 25,     // 22 acquisition + 3 aux control regs
     parameter integer N_STATUS = 13    // 11 acquisition + aux status + read result
