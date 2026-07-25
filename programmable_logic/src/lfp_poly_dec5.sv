@@ -206,6 +206,10 @@ module lfp_poly_dec5 #(
     logic [1:0]         wait_cnt;
     logic [PAR_W:0]     emit_idx;
 
+    // ag_* = "address generation": the s0 stage's markers, registered here so
+    // they arrive at s1/s2 in step with the RAM data they describe. The address
+    // is issued one cycle before its data appears, so a marker that travelled
+    // with the address rather than alongside it would describe the wrong tap.
     logic               ag_valid, ag_first, ag_last;
     logic [GRP_W-1:0]   ag_group;
 
@@ -350,6 +354,13 @@ module lfp_poly_dec5 #(
     // order is group-then-lane, NOT wire order -- out_channel carries the true
     // identity and the packet builder places each sample by it.
     // =================================================================
+    // Scale the accumulator back to wire format: it holds OUT_SHIFT fractional
+    // bits (the coefficients' own, plus the extra resolution stage 1 passed
+    // down). RND adds half an output LSB before the arithmetic shift so the
+    // result rounds to nearest rather than truncating toward negative infinity,
+    // which would leave a half-LSB DC offset on every channel. The clamp that
+    // follows saturates instead of wrapping, so an overrange sample reads as a
+    // rail rather than flipping sign.
     localparam signed [ACC_W-1:0] RND = ACC_W'(1) <<< (OUT_SHIFT-1);
     logic signed [ACC_W-1:0] emit_rounded;
     logic [LANE_W-1:0]       emit_lane;

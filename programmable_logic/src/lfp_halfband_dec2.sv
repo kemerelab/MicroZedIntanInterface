@@ -279,6 +279,13 @@ module lfp_halfband_dec2 #(
         end
     end
 
+    // The accumulator carries COEF_FRAC fractional bits from the Q1.COEF_FRAC
+    // coefficients, so it has to be scaled back before it can leave as an
+    // OUT_W-bit sample. RND adds half an output LSB before the arithmetic shift,
+    // which rounds to nearest instead of truncating: plain truncation biases
+    // every sample toward negative infinity, and a DC offset of half an LSB on
+    // every channel is exactly the kind of error that survives averaging and
+    // shows up later as a baseline shift.
     localparam signed [ACC_W-1:0] RND = (OUT_SHIFT > 0) ? (ACC_W'(1) <<< (OUT_SHIFT-1)) : '0;
     logic signed [ACC_W-1:0] acc, acc_sum, rounded;
     logic                    frame_first;

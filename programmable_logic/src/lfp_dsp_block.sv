@@ -264,9 +264,14 @@ module lfp_dsp_block #(
     wire [LFP_WORD_AW-1:0] sample_words =
          LFP_WORD_AW'((num_samples_word + 32'd1) >> 1);     // 2 samples per word
 
-    // AUX0 = lane_mask | decim_R<<8 | num_taps<<16 | overrun<<24. The overrun
-    // BIT POSITION is contract, not a detail: net.py and the plugin both read
-    // (cfg >> 24) & 1, so putting it anywhere else silently hides every overrun.
+    // AUX0 tells the receiver how this frame was produced, packed as
+    //   [7:0] lane_mask | [15:8] decim_R | [23:16] num_taps | [24] overrun
+    // Every consumer decodes these fields at exactly these positions (net.py's
+    // receive_lfp and the plugin's LFP frame parser both take (cfg >> 24) & 1
+    // for the overrun flag), so the layout is part of the wire format and moves
+    // only alongside them. A field written to the wrong bits is not a decode
+    // error -- it reads as a plausible value, and an overrun that lands outside
+    // bit 24 simply reports "no overrun" forever.
     wire [31:0] cfg_word = {7'd0, ov_frame, {1'b0, poly_taps},
                             8'(DECIM_TOTAL), lane_mask};
 
@@ -308,14 +313,44 @@ module lfp_dsp_block #(
             bram_we_r <= 4'h0;
 
             if (frame_start) begin
-                // Snapshot the header fields and start laying the header down at
-                // the current free position.
+                // Reserve this frame's space and snapshot the header fields. The
+                // header itself is written later -- see below.
                 ts_frame   <= ts_ingest;
                 ov_frame   <= lfp_overrun;
                 frame_base <= wr_word;
-                hdr_idx    <= 4'd0;
-                hdr_busy   <= 1'b1;
                 samp_count <= '0;
+                hdr_busy   <= 1'b0;
+            end
+
+            // There is ONE write port, and samples arrive on the engine's
+            // schedule, so the two writers must never want it in the same cycle.
+            // Samples therefore always take it, and the header is laid down in
+            // the gap AFTER the last sample of the frame -- at which point no
+            // further sample can appear until the next decimation tick, a whole
+            // output period away. Writing the header first would race instead of
+            // exclude: it takes 8 clocks, the first sample arrives num_taps+3
+            // clocks after the tick, and num_taps is host-settable down to 1, so
+            // a short filter would let a sample overwrite a header word.
+            //
+            // Order does not matter to the reader: the PS is only told the frame
+            // exists when lfp_wr_addr advances, which happens once the header is
+            // down. A frame with no enabled lanes emits nothing and is never
+            // published, which is correct -- there is no data to send.
+            if (out_valid) begin
+                // Place the sample by its rank; the byte enables select the half
+                // of the shared 32-bit word, so arrival order does not matter.
+                bram_word_r <= frame_base + LFP_WORD_AW'(UNIFIED_HDR_WORDS)
+                                          + LFP_WORD_AW'(out_rank >> 1);
+                bram_din_r  <= {out_offset, out_offset};   // both halves; we mask
+                bram_we_r   <= out_rank[0] ? 4'b1100 : 4'b0011;
+
+                if (samp_count + 1'b1 >= num_samples_word[CH_W:0]) begin
+                    samp_count <= '0;
+                    hdr_idx    <= 4'd0;
+                    hdr_busy   <= 1'b1;      // last sample down: write the header
+                end else begin
+                    samp_count <= samp_count + 1'b1;
+                end
             end else if (hdr_busy) begin
                 // One header word per clock, from the shared contract.
                 bram_word_r <= frame_base + LFP_WORD_AW'(hdr_idx);
@@ -326,28 +361,14 @@ module lfp_dsp_block #(
                 if (hdr_idx == 4'd7) begin
                     hdr_busy  <= 1'b0;
                     frame_seq <= frame_seq + 1'b1;   // one SEQ per emitted frame
-                end else begin
-                    hdr_idx <= hdr_idx + 1'b1;
-                end
-            end
-
-            if (out_valid) begin
-                // Place the sample by its rank; the byte enables pick the half of
-                // the shared 32-bit word, so arrival order does not matter.
-                bram_word_r <= frame_base + LFP_WORD_AW'(UNIFIED_HDR_WORDS)
-                                          + LFP_WORD_AW'(out_rank >> 1);
-                bram_din_r  <= {out_offset, out_offset};   // both halves; we mask
-                bram_we_r   <= out_rank[0] ? 4'b1100 : 4'b0011;
-
-                // Publish the frame once its last sample has landed.
-                if (samp_count + 1'b1 >= num_samples_word[CH_W:0]) begin
+                    // Publish: the frame is complete, header included, so the PS
+                    // can never DMA a partially written packet.
                     wr_word     <= frame_base + LFP_WORD_AW'(UNIFIED_HDR_WORDS)
                                               + sample_words;
                     lfp_wr_addr <= {frame_base + LFP_WORD_AW'(UNIFIED_HDR_WORDS)
                                                + sample_words, 2'b00};
-                    samp_count  <= '0;
                 end else begin
-                    samp_count <= samp_count + 1'b1;
+                    hdr_idx <= hdr_idx + 1'b1;
                 end
             end
         end
