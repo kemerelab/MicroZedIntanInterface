@@ -166,10 +166,18 @@ static ip_addr_t beacon_bcast;      // subnet-directed broadcast address
 static uint32_t  beacon_self_ip;    // our IPv4 (network order) for the payload
 
 void beacon_init(void) {
-    uint32_t ip   = netif_ip4_addr(&server_netif)->addr;
-    uint32_t mask = netif_ip4_netmask(&server_netif)->addr;
+    uint32_t ip = netif_ip4_addr(&server_netif)->addr;
     beacon_self_ip = ip;
-    beacon_bcast.addr = (ip & mask) | (~mask);   // (subnet bits) | (host all-ones)
+    // Use the LIMITED broadcast (255.255.255.255), not a subnet-directed one.
+    // A subnet-directed broadcast is only recognised as a broadcast by hosts
+    // that agree with us about the netmask: a client on the same wire with a
+    // /16 sees our /24 broadcast 192.168.18.255 as an ordinary host address,
+    // and its IP stack silently discards the datagram -- while a packet capture
+    // still shows it arriving, because the ETHERNET frame is broadcast and gets
+    // tapped before the IP layer drops it. That failure looks exactly like a
+    // board that never beaconed. The limited broadcast is accepted by every
+    // host on the link regardless of how it is configured.
+    beacon_bcast.addr = IPADDR_BROADCAST;
     beacon_pcb = udp_new();
     if (beacon_pcb == NULL) {
         send_message("ERROR: Could not create beacon UDP PCB\r\n");
@@ -193,8 +201,18 @@ void beacon_send(void) {
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, sizeof(b), PBUF_REF);
     if (p == NULL) return;
     p->payload = &b;
-    udp_sendto(beacon_pcb, p, &beacon_bcast, BEACON_PORT);
+    err_t e = udp_sendto(beacon_pcb, p, &beacon_bcast, BEACON_PORT);
     pbuf_free(p);
+    // Report a send failure once rather than discarding it. The beacon is
+    // fire-and-forget, so a rejected send is otherwise invisible and looks
+    // identical to a host that cannot hear us -- which costs a long time to
+    // tell apart from the outside.
+    static int beacon_err_reported = 0;
+    if (e != ERR_OK && !beacon_err_reported) {
+        beacon_err_reported = 1;
+        send_message("WARNING: discovery beacon send failed (err %d); "
+                     "discovery is unavailable but streaming is unaffected\r\n", (int)e);
+    }
 }
 
 // ============================================================================
