@@ -160,31 +160,8 @@ void update_current_packet_size(void) {
 // BRAM ACCESS FUNCTIONS
 // ============================================================================
 
-int n_words_available;
 
 // Check how many complete packets are available to read
-static int packets_available(void) {
-  uint32_t pl_write_addr = pl_get_bram_write_address();
-
-  if (pl_write_addr >= ps_read_address) {
-    n_words_available = pl_write_addr - ps_read_address;
-  } else {
-    // Handle wrap-around
-    n_words_available = (BRAM_SIZE_WORDS - ps_read_address) + pl_write_addr;
-  }
-
-  // No guard band: the exposed write pointer (packet_boundary_address in
-  // fifo_bram_interface.sv) advances ONLY at packet boundaries, so every packet
-  // in [ps_read_address, pl_write_addr) is already fully committed -- the
-  // in-progress packet is excluded by construction, so there is no
-  // read-during-write to guard against. The CDC on that pointer is handled by the
-  // read-twice deglitch in pl_get_bram_write_address(), and the per-packet magic
-  // check is the safety net. (A former one-packet guard band here was a
-  // misattributed band-aid for the M_AXI_GP burst corruption that the DMA fixed;
-  // it also held back the last packet of any finite loop_count, so loop_count=1
-  // streamed nothing.)
-  return n_words_available / current_packet_size;  // complete packets available
-}
 
 
 // ============================================================================
@@ -510,12 +487,12 @@ int main() {
   pl_dma_init();  // AXI CDMA + non-cacheable DDR staging buffer for the read path
 #endif
 
-  // Bring up the LFP cascade with its baked-in filters so the band streams out of
-  // the box (stream_type=2 on the unified port) with NO host configuration: the
-  // coefficients come from the bitstream. Decimation is structural (/2 then /5 =
-  // /10 -> 3 kHz); the host can shorten the stage-2 filter, replace either
-  // filter's coefficients, or disable the engine at runtime.
-  pl_lfp_set_config(/*enable=*/1, /*num_taps=*/LFP_MAX_POLY_TAPS);
+  // Load the LFP cascade's configuration but leave the engine OFF. Its filters
+  // come from the bitstream, so enabling it is a single command and needs no
+  // host setup -- but it costs core-0 time in the same loop as the broadband
+  // pump, and broadband is the stream with a hard 33 us budget. Anything that
+  // competes with it is opt-in. Decimation is structural (/2 then /5 -> 3 kHz).
+  pl_lfp_set_config(/*enable=*/0, /*num_taps=*/LFP_MAX_POLY_TAPS);
   // ========================================================================
 
   // ========================================================================
@@ -624,19 +601,7 @@ int main() {
   while (1) {
     network_maintenance_loop();
     
-    if (stream_enabled) {
-      // Process all available packets with direct BRAM access and UDP transmission
-      while (packets_available() > 0) { 
-        process_packet_from_bram();
-        
-        // Periodic status (every 30k packets)
-        if (packets_received_count % 30000 == 0) {
-          send_message("Processed %u packets, %u errors, %u nwa, UDP: %u sent/%u errors\r\n",
-               packets_received_count, error_count, n_words_available,
-               udp_packets_sent, udp_send_errors);
-        }
-      }
-    }
+    broadband_stream_service();
   }
   
   cleanup_platform();

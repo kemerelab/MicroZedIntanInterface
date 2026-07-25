@@ -72,6 +72,8 @@ static err_t lfp_send_frame(struct udp_pcb *pcb, const uint32_t *buf,
 // The capture-BRAM read method is selected in main.h (both this reader and
 // main()'s CDMA init depend on it).
 
+static int n_words_available;
+
 // ---------------------------------------------------------------------------
 // Broadband stream (stream_type = 1, 30 kHz)
 //
@@ -90,6 +92,30 @@ static err_t lfp_send_frame(struct udp_pcb *pcb, const uint32_t *buf,
 // Used as the packet buffer only on the BRAM_READ_SINGLE path; unused under DMA.
 static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64), unused));
 
+static int packets_available(void) {
+  uint32_t pl_write_addr = pl_get_bram_write_address();
+
+  if (pl_write_addr >= ps_read_address) {
+    n_words_available = pl_write_addr - ps_read_address;
+  } else {
+    // Handle wrap-around
+    n_words_available = (BRAM_SIZE_WORDS - ps_read_address) + pl_write_addr;
+  }
+
+  // No guard band: the exposed write pointer (packet_boundary_address in
+  // fifo_bram_interface.sv) advances ONLY at packet boundaries, so every packet
+  // in [ps_read_address, pl_write_addr) is already fully committed -- the
+  // in-progress packet is excluded by construction, so there is no
+  // read-during-write to guard against. The CDC on that pointer is handled by the
+  // read-twice deglitch in pl_get_bram_write_address(), and the per-packet magic
+  // check is the safety net. (A former one-packet guard band here was a
+  // misattributed band-aid for the M_AXI_GP burst corruption that the DMA fixed;
+  // it also held back the last packet of any finite loop_count, so loop_count=1
+  // streamed nothing.)
+  return n_words_available / current_packet_size;  // complete packets available
+}
+
+
 // Record a broadband TX drop (pbuf-alloc fail or udp_sendto error). packets_
 // received_count is the count BEFORE this packet's increment, so the dropped
 // packet is ~that index. first/last bracket the span; the ring shows clustering.
@@ -102,7 +128,7 @@ static void record_bb_drop(void) {
 }
 
 // Read and validate one packet directly from BRAM with UDP transmission
-int process_packet_from_bram(void) {
+static int process_packet_from_bram(void) {
   XTime t_loop0; XTime_GetTime(&t_loop0);   // perf: receive->transmit timer
   // Unified packet format: header word 0 = MAGIC (0xCAFEBABE), word 1 = TYPE_VER
   // with stream_type=1 (broadband), version=1 in the low 16 bits. The capture
@@ -263,7 +289,11 @@ uint32_t               lfp_udp_packets_sent = 0;
 // so a slot is only reused long after its TX-done.
 #define LFP_STAGING_SLOT_BYTES 1024u
 #define N_LFP_STAGING_SLOTS    64u
-#define LFP_FRAMES_PER_CALL    8      // yield to the broadband loop
+// ONE frame per call. Eight was a burst of eight CDMA + udp_sendto pairs in a
+// single visit -- comfortably longer than one 33 us broadband sample period, so
+// it stalled the pump that must never stall. At 3 kHz the loop comes back around
+// far faster than frames appear, so one per visit still drains it easily.
+#define LFP_FRAMES_PER_CALL    1
 
 void lfp_stream_init(void)
 {
@@ -316,5 +346,30 @@ void lfp_stream_service(void)
         lfp_udp_packets_sent++;
         lfp_staging_slot = (lfp_staging_slot + 1u) % N_LFP_STAGING_SLOTS;
         lfp_read_word    = (lfp_read_word + frame_words) & mask;   // commit
+    }
+}
+
+// Drain every packet the PL has finished, then return to the caller's loop.
+//
+// The drain loop lives HERE, in the same translation unit as the two functions
+// it calls, and that placement is load-bearing rather than cosmetic. Both are
+// static, so the compiler can inline them into this loop and keep the read
+// pointer and packet size in registers across iterations. When this loop sat in
+// main.c and called across to here, every packet paid a real call plus a reload
+// of each global the compiler could no longer reason about -- several
+// microseconds out of a 33 us budget, enough that the PS fell behind the PL,
+// back-pressured it through fifo_full, and dragged the acquisition rate itself
+// below 30 kHz. Keeping the loop with its callees costs main() one call per
+// outer iteration instead of one per packet.
+void broadband_stream_service(void)
+{
+    if (!stream_enabled) return;
+    while (packets_available() > 0) {
+        process_packet_from_bram();
+        if (packets_received_count % 30000 == 0) {
+            send_message("Processed %u packets, %u errors, %u nwa, UDP: %u sent/%u errors\r\n",
+                         packets_received_count, error_count, n_words_available,
+                         udp_packets_sent, udp_send_errors);
+        }
     }
 }

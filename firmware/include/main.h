@@ -674,7 +674,7 @@ uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 // The two PL -> host stream services (src-core0/stream.c). Each turns a packet
 // the PL has already assembled in a BRAM ring into a UDP datagram; they differ
 // only in retry policy.
-int  process_packet_from_bram(void);   // broadband: one 30 kHz packet, retries in place
+void broadband_stream_service(void);   // broadband: drain every ready packet
 void lfp_stream_init(void);
 void lfp_stream_service(void);   // call from the core-0 maintenance loop
 
