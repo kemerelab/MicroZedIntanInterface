@@ -16,21 +16,20 @@
 //     the header (PS reads the whole packet via a 2nd axi_bram_ctrl over CDMA).
 //
 // LFP output BRAM layout, per frame: [8 common-header words | sample words].
-// Header (the UNIFIED common header, stream_type=2; matches remote/net.py
-// receive_lfp + the firmware wire format + the broadband header):
-//   w0 = MAGIC = 0xCAFEBABE
-//   w1 = TYPE_VER = stream_type(2) | version(1)<<8 | flags<<16  (flags=0)
-//   w2/w3 = 64-bit master timestamp = the master count of the NEWEST broadband
-//           sample in this output's decimation window (these are FIR filters, so
-//           one real, already-acquired broadband sample is the newest input in
-//           the output's support). For frame m at total decimation R this is
-//           broadband packet R*m+(R-1) (R=10 -> 10m+9); the same master count the
-//           broadband header stamps, latched on the decimation tick. NB: newest
-//           *input*, not the represented instant (host subtracts the group delay).
-//   w4 = SEQ = PL-maintained LFP frame sequence number (++ per emitted frame)
-//   w5 = AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24)
-//   w6 = AUX1 = num_samples (popcount(lane_mask) * N_SLOTS)
-//   w7 = RSVD = 0
+// The header is the shared 8-word contract from unified_pkt_pkg with
+// stream_type = STREAM_TYPE_LFP; only the two stream-specific words and the
+// timestamp convention are described here:
+//
+//   w2/w3 TIMESTAMP -- the master sample count of the NEWEST broadband sample in
+//         this output's decimation window. These are FIR filters, so the newest
+//         input in an output's support is a real, already-acquired sample: for
+//         frame m at total decimation R that is broadband packet R*m+(R-1)
+//         (R=10 -> 10m+9), the same master count the broadband header stamps,
+//         latched on the decimation tick. It marks the newest *input*, not the
+//         instant the filtered value represents -- a host that needs the latter
+//         subtracts the filter's group delay.
+//   w5 AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24)
+//   w6 AUX1 = num_samples = popcount(lane_mask) * N_SLOTS
 //
 // The LFP lane mask MIRRORS the broadband channel-enable mask (dsp_channel_enable
 // from data_generator_core) -- single source of truth; the LFP filters exactly
@@ -45,6 +44,8 @@
 //
 // See docs/lfp-dsp-engine-design.md.
 // =====================================================================
+
+import unified_pkt_pkg::*;   // the 8-word common header shared by every PL stream
 
 module lfp_dsp_block #(
     parameter int N_LANES        = 8,
@@ -110,11 +111,8 @@ module lfp_dsp_block #(
     // The whole 8-word header is identical across streams; only stream_type and
     // the AUX words differ. See docs/unified-packet-format.md.
     localparam int HDR_WORDS = 8;
-    localparam logic [31:0] UNIFIED_MAGIC = 32'hCAFEBABE;     // header word 0
-    localparam logic [7:0]  STREAM_TYPE_LFP = 8'd2;
-    localparam logic [7:0]  UNIFIED_VERSION = 8'd1;
-    // TYPE_VER (word 1) = stream_type[7:0] | version[15:8] | flags[31:16]; flags=0.
-    localparam logic [31:0] LFP_TYPE_VER = {16'd0, UNIFIED_VERSION, STREAM_TYPE_LFP};
+    // Header constants and layout come from unified_pkt_pkg -- see the header
+    // write below. Only AUX0/AUX1 (the cfg word and the sample count) are ours.
 
     // -----------------------------------------------------------------
     // Control unpack (with min-1 guards on the rate/length).
@@ -344,16 +342,11 @@ module lfp_dsp_block #(
                 // 8-word common header (stream_type=2). See docs/unified-packet-format.md.
                 bram_word_r <= wr_word;
                 bram_we_r   <= 1'b1;
-                case (hdr_idx)
-                    4'd0: bram_din_r <= UNIFIED_MAGIC;       // w0 MAGIC
-                    4'd1: bram_din_r <= LFP_TYPE_VER;        // w1 TYPE_VER
-                    4'd2: bram_din_r <= ts_frame[31:0];      // w2 TS_LO
-                    4'd3: bram_din_r <= ts_frame[63:32];     // w3 TS_HI
-                    4'd4: bram_din_r <= frame_seq;           // w4 SEQ
-                    4'd5: bram_din_r <= cfg_word;            // w5 AUX0
-                    4'd6: bram_din_r <= num_samples_word;    // w6 AUX1 (num_samples)
-                    default: bram_din_r <= 32'd0;            // w7 RSVD (4'd7)
-                endcase
+                // One word per clock from the shared header definition; AUX0 is
+                // the live config, AUX1 the count of samples that follow.
+                bram_din_r  <= unified_hdr_word(hdr_idx[2:0], STREAM_TYPE_LFP,
+                                                ts_frame, frame_seq,
+                                                cfg_word, num_samples_word);
                 wr_word <= wr_word + 1'b1;                   // wraps naturally
                 if (hdr_idx == 4'd7) begin
                     hdr_busy  <= 1'b0;

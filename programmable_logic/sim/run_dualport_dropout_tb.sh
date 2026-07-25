@@ -9,7 +9,7 @@ SRC="$HERE/../src"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 99
 
-xvlog -sv "$SRC/acq_frame_pkg.sv" "$SRC/data_generator_core.sv" "$SRC/test_signal_gen.sv" "$SRC/aux_command_engine.sv" "$SRC/aux_program.sv" \
+xvlog -sv "$SRC/unified_pkt_pkg.sv" "$SRC/acq_frame_pkg.sv" "$SRC/data_generator_core.sv" "$SRC/test_signal_gen.sv" "$SRC/aux_command_engine.sv" "$SRC/aux_program.sv" \
       "$SRC/fifo_bram_interface.sv" \
       "$SRC/cic_decimator.sv" "$SRC/cic_to_halfband.sv" "$SRC/lfp_fir_decimator.sv" \
       "$SRC/lfp_halfband.sv" "$SRC/lfp_dsp_block.sv" \
