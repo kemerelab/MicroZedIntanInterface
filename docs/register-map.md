@@ -1,7 +1,7 @@
 # AXI-Lite register map (PS ↔ PL)
 
-The control interface is a flat AXI-Lite register bank at **`0x40000000`**: **25 control
-registers** (PS → PL, regs 0–24) immediately followed by **13 status registers** (PL → PS,
+The control interface is a flat AXI-Lite register bank at **`0x40000000`**: **28 control
+registers** (PS → PL, regs 0–27) immediately followed by **14 status registers** (PL → PS,
 regs 0–12, so status reg *n* is at `0x40000000 + (25 + n)·4`).
 
 `firmware/include/main.h` declares the layout; the PL **consumes** the control regs and
@@ -19,10 +19,13 @@ If you change the map, change `main.h`, the RTL, and this file together.
 | 2 | `0x08` | phase select + channel enable |
 | 3 | `0x0C` | analytic-chirp NCO config (debug signal gen) |
 | 4–19 | `0x10`–`0x4C` | MOSI/COPI command table (32 channel RHD commands) |
-| 20–21 | `0x50`–`0x54` | **unused** (freed when the aux commands moved to the engine) |
+| 20–21 | `0x50`–`0x54` | **unused** — free space that grows the map without shifting anything |
 | 22 | `0x58` | aux control |
 | 23 | `0x5C` | aux write payload |
 | 24 | `0x60` | aux strobe |
+| 25 | `0x64` | LFP config |
+| 26 | `0x68` | LFP coefficient data |
+| 27 | `0x6C` | LFP strobe |
 
 **REG 0 — run control** · PL `data_generator_core.sv:55/100/101`
 
@@ -95,7 +98,31 @@ here.
 | `[15:2]` | reserved |
 | `[31:16]` | injected command (slot-2 one-shot, full 16-bit RHD command) |
 
-## Status registers — PL → PS (`0x40000064`, 13 regs)
+**REG 25 — LFP config** · PL `lfp_dsp_block.sv`
+
+| bits | field |
+|------|-------|
+| `[0]` | `lfp_en` — enable the decimation cascade |
+| `[15:8]` | lane_mask — **reported, not commanded**: the PL drives it from `channel_enable`, so the LFP filters exactly the broadband-enabled lanes |
+| `[23:16]` | decim_R — **reported, not commanded**: the cascade is wired /2 then /5, so this always reads 10 |
+| `[31:24]` | stage-2 tap count, 1…120 (0 or >120 clamps to 120) |
+
+**REG 26 — LFP coefficient data**: `[17:0]` one signed Q1.17 tap.
+
+**REG 27 — LFP strobe**
+
+| bits | field |
+|------|-------|
+| `[0]` | write toggle — each edge writes REG 26 at the auto-incrementing pointer |
+| `[1]` | pointer clear — reset the write pointer (do this before each upload) |
+| `[2]` | **stage select** — 0 = stage 1 (11-tap halfband), 1 = stage 2 (decimator) |
+| `[31:3]` | reserved |
+
+Hold the stage bit across the whole upload, including the clear, so the pointer
+reset and every write land in the same filter. See `docs/lfp.md` for the cascade
+and `programmable_logic/sim/design_lfp_filters.py` to regenerate coefficients.
+
+## Status registers — PL → PS (`0x40000070`, 14 regs)
 
 Core (`data_generator_core.sv`) drives regs 0–9; the wrapper (`data_generator_wrapper.v`)
 appends 10–12.
@@ -114,6 +141,7 @@ appends 10–12.
 | 10 | `+0x28` | `{9'd0, fifo_count, bram_write_address}` — `[13:0]` bram addr, `[22:14]` fifo count | wrapper `:192` |
 | 11 | `+0x2C` | aux status (see below) | wrapper `:195` |
 | 12 | `+0x30` | aux injected-command read result `{cipo_a1[31:16], cipo_a0[15:0]}` (**port A only**) | wrapper `:196` |
+| 13 | `+0x34` | LFP: `[15:0]` completed-frame write byte-address, `[16]` compute overrun (sticky) | wrapper |
 
 **REG 1 — reflected params** (`[0]` enable, `[1]` reset, `[3]` debug, `[15:12]` phase_a0,
 `[19:16]` phase_a1, `[23:20]` channel_enable A, `[27:24]` channel_enable B). This register

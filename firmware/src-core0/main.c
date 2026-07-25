@@ -698,7 +698,7 @@ int main() {
   // Default = CIC^4(/5) + halfband(/2) = /10 -> 3 kHz, using the 43-tap comp-FIR
   // baked into lfp_halfband's coef RAM. The host can still reconfigure the params
   // and coefficients (e.g. fewer taps for lower group delay) or disable at runtime.
-  pl_lfp_set_config(/*enable=*/1, /*decim_R=*/10, /*num_taps=*/43);
+  pl_lfp_set_config(/*enable=*/1, /*num_taps=*/LFP_MAX_POLY_TAPS);
   // ========================================================================
 
   // ========================================================================

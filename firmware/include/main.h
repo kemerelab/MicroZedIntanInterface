@@ -144,11 +144,26 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define CTRL_REG_AUX_STROBE_OFFSET  (24 * 4)  // write/inject toggles + inject command
 
 // LFP/DSP engine control registers (PL regs 25..27; see lfp_dsp_block.sv)
+// Decimation is structural (/2 then /5 = /10), so only the enable and the
+// stage-2 tap count are configurable. [15:8] lane_mask and [23:16] decim_R are
+// retained on the wire for the host's benefit: the lane mask mirrors the
+// broadband channel_enable and decim_R always reads 10.
 #define CTRL_REG_LFP_CFG_OFFSET     (25 * 4)  // [0]en [15:8]lane_mask [23:16]decim_R [31:24]num_taps
 #define CTRL_REG_LFP_COEF_OFFSET    (26 * 4)  // [17:0] signed Q1.17 coefficient data
-#define CTRL_REG_LFP_STROBE_OFFSET  (27 * 4)  // [0] coef write toggle, [1] coef pointer clear
+#define CTRL_REG_LFP_STROBE_OFFSET  (27 * 4)  // [0] coef toggle, [1] ptr clear, [2] stage select
 #define LFP_STROBE_COEF_TOGGLE      (1u << 0)
 #define LFP_STROBE_PTR_CLR          (1u << 1)
+// Which filter the coefficient writes land in. Clear the pointer, then push.
+#define LFP_STROBE_STAGE_SEL        (1u << 2)  // 0 = stage 1 halfband, 1 = stage 2 decimator
+// Cascade geometry -- mirrors lfp_dsp_block.sv. The host reads these back in
+// get_status; changing them means changing the RTL parameters too.
+#define LFP_DECIM_STAGE1            2       // halfband:  30 kHz -> 15 kHz
+#define LFP_DECIM_STAGE2            5       // decimator: 15 kHz ->  3 kHz
+#define LFP_DECIM_TOTAL             (LFP_DECIM_STAGE1 * LFP_DECIM_STAGE2)  // 10
+#define LFP_HB_TAPS                 11      // stage-1 length (fixed)
+#define LFP_MAX_POLY_TAPS           120     // stage-2 maximum length
+#define LFP_STAGE_HALFBAND          0
+#define LFP_STAGE_DECIMATOR         1
 // LFP output BRAM (decimated stream, PS read via 2nd axi_bram_ctrl)
 #define LFP_BRAM_BASE_ADDR          0x84000000
 #define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
@@ -642,10 +657,10 @@ void stop_udp_stream(void);
 // broadband channel-enable mask in the PL (single source of truth). The PL
 // builds the complete LFP wire packet (header + samples) in its output BRAM, so
 // the PS just CDMAs it into a pbuf and sends it.
-void pl_lfp_set_config(uint8_t enable, uint8_t decim_R, uint8_t num_taps);
-void pl_lfp_coef_begin(void);                             // clear the coef write pointer
+void pl_lfp_set_config(uint8_t enable, uint8_t num_taps);  // decimation is structural (/10)
+void pl_lfp_coef_begin(int stage);                        // select a filter, clear its write pointer
 void pl_lfp_coef_push(int32_t coef);                      // write one 18-bit Q1.17 tap
-void pl_lfp_upload_coeffs(const int32_t *coeffs, int n);  // begin + push array
+void pl_lfp_upload_coeffs(int stage, const int32_t *coeffs, int n);  // begin + push array
 uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 
 // Streaming (network.c): drain the LFP output BRAM -> UDP on the unified port

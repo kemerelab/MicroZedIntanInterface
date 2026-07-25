@@ -211,9 +211,11 @@ CHIRP_RATE_SHIFT   = 9      # freq_acc step/packet = rate << 9
 PACKET_RATE_HZ     = 30000  # one phase update per broadband packet
 # LFP/DSP engine (Tier-1) -- configure while disabled, then enable
 CMD_LFP_ENABLE = 0x80       # param1 = 0/1
-CMD_LFP_SET_PARAMS = 0x81   # param1 = decim_R, param2 = num_taps
+CMD_LFP_SET_PARAMS = 0x81   # param1 ignored (decimation is structural /10), param2 = num_taps
 CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband channel_enable (firmware accepts-and-ignores)
-CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first; param2 = 18-bit signed coef
+CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first | [1] stage; param2 = 18-bit signed coef
+LFP_STAGE_HALFBAND = 0      # stage 1: 11-tap halfband, 30 -> 15 kHz
+LFP_STAGE_DECIMATOR = 1     # stage 2: <=120-tap decimator, 15 -> 3 kHz
 CMD_PERF_RESET = 0x91       # clear recv->transmit sticky maxes + histogram + counts
 
 # Unified port: the LFP band now arrives on UDP_PORT mixed with broadband,
@@ -1683,55 +1685,85 @@ def design_cic_comp_fir(num_taps=43, fc=1300.0, beta=6.0,
     scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
     return [max(-lim, min(lim - 1, int(round(c * scale)))) for c in h]
 
-def lfp_upload_coeffs(sock, coeffs):
-    """Stream taps through the indirect window (first write clears the pointer).
-    This is a 100+ command burst that the board acks one-by-one, so use a generous
-    per-command timeout and stop early (with a clear message) if an ack stalls --
-    that distinguishes a merely-slow board from a wedged one."""
+def lfp_upload_coeffs(sock, coeffs, stage=LFP_STAGE_DECIMATOR):
+    """Stream taps into one filter of the cascade through the indirect window.
+
+    The first write clears that stage's pointer, and every write carries the
+    stage select, so uploading one filter never disturbs the other. This is a
+    100+ command burst the board acks one-by-one, so use a generous per-command
+    timeout and stop early with a clear message if an ack stalls -- that
+    distinguishes a merely-slow board from a wedged one."""
+    flags = (LFP_STAGE_DECIMATOR if stage == LFP_STAGE_DECIMATOR else 0) << 1
     for i, c in enumerate(coeffs):
-        ok, _ = send_binary_command(sock, CMD_LFP_WRITE_COEF, 1 if i == 0 else 0,
+        ok, _ = send_binary_command(sock, CMD_LFP_WRITE_COEF,
+                                    flags | (1 if i == 0 else 0),
                                     c & 0x3FFFF, timeout=2.0)
         if not ok:
-            print(f"[LFP] coefficient upload stalled at tap {i}/{len(coeffs)} -- the board "
-                  f"stopped acking. Reconnect and 'ping': if it answers it's a timing issue, "
-                  f"if it's dead the coef path wedged the firmware.")
+            name = "decimator" if stage == LFP_STAGE_DECIMATOR else "halfband"
+            print(f"[LFP] {name} coefficient upload stalled at tap {i}/{len(coeffs)} -- "
+                  f"the board stopped acking. Reconnect and 'ping': if it answers it's a "
+                  f"timing issue, if it's dead the coef path wedged the firmware.")
             return False
     return True
 
-def configure_lfp(sock, datapath="cic", num_taps=None, cutoff_hz=1250.0):
-    """Disable, set params, design + upload the LP kernel. Call lfp_enable(sock,
-    True) afterwards to start streaming on the unified UDP port (UDP_PORT,
-    stream_type=2).
+def configure_lfp(sock, phase="linear", num_taps=None, coef_dir=None):
+    """Upload a stage-2 filter and leave the cascade ready to stream.
 
-    The LFP lane mask is NO LONGER set here -- it MIRRORS the broadband
-    channel-enable mask in the PL (single source of truth). Choose which streams
-    to filter with `set_channels` (the broadband mask); the LFP filters exactly
-    the broadband-enabled lanes.
+    The board boots with both filters already loaded (see lfp_coef_pkg.sv), so
+    this is only needed to CHANGE the stage-2 response -- most usefully to swap
+    linear phase for minimum phase.
 
-    datapath="cic" (default, matches the USE_CIC=1 build): uploads the 43-tap
-      droop-compensated comp-FIR halfband; the engine's CIC^4(/5)+halfband(/2)=/10
-      decimation is hardwired -> 3 kHz LFP. num_taps defaults to 43.
-    datapath="fir" (USE_CIC=0 fallback build): uploads a 131-tap single-stage
-      Kaiser 3 kHz anti-alias; decim_R=10. num_taps defaults to 131.
+      phase="linear"  120-tap linear phase: exactly constant group delay, so
+                      waveform shape is preserved. ~4.1 ms latency. The default,
+                      and what the board powers up with.
+      phase="minimum" 120-tap minimum phase: same magnitude response, ~0.9 ms
+                      latency, but group delay varies ~0.66 ms across the
+                      passband, which disperses waveform shape. Use it when
+                      closed-loop latency matters more than shape fidelity.
 
-    Either way R=10 -> 3 kHz; the LFP packet's self-describing R field is set
-    accordingly so the host/plugin auto-tracks the rate."""
+    Coefficients come from the files programmable_logic/sim/design_lfp_filters.py
+    generates, so the host and the RTL cannot drift apart; re-run that script to
+    change the filters (it also reports ripple, alias rejection and latency).
+
+    The lane mask is NOT set here: it mirrors the broadband channel-enable mask
+    in the PL, so choose the streams to filter with `set_channels`.
+
+    Decimation is structural (/2 then /5), so the output is always 3 kHz.
+    Call lfp_enable(sock, True) afterwards to start streaming (stream_type=2)."""
+    import os
+    fn = {"linear": "lfp_poly120_lin_coefs.hex",
+          "minimum": "lfp_poly120_min_coefs.hex"}.get(phase)
+    if fn is None:
+        raise ValueError(f"phase must be 'linear' or 'minimum', got {phase!r}")
+    if coef_dir is None:
+        coef_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "programmable_logic", "sim")
+    path = os.path.join(coef_dir, fn)
+    coeffs = load_q117_hex(path)
+    if num_taps:
+        coeffs = coeffs[:num_taps]
+
     send_binary_command(sock, CMD_LFP_ENABLE, 0)
-    if datapath == "cic":
-        nt = num_taps if num_taps else 43
-        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
-        coeffs = design_cic_comp_fir(nt)
-        lfp_upload_coeffs(sock, coeffs)
-        print(f"[LFP] configured CIC^4(/5)+halfband(/2)=/10: lane mask = broadband "
-              f"channel_enable; comp_taps={nt} -> 3000 sps out (flat to ~1 kHz)")
-    else:
-        nt = num_taps if num_taps else 131
-        send_binary_command(sock, CMD_LFP_SET_PARAMS, 10, nt & 0xFF)
-        coeffs = design_lfp_lowpass(nt, cutoff_hz)
-        lfp_upload_coeffs(sock, coeffs)
-        print(f"[LFP] configured single-stage FIR /10: lane mask = broadband "
-              f"channel_enable; taps={nt} cutoff={cutoff_hz:.0f}Hz -> 3000 sps out")
+    send_binary_command(sock, CMD_LFP_SET_PARAMS, 0, len(coeffs) & 0xFF)
+    if not lfp_upload_coeffs(sock, coeffs, LFP_STAGE_DECIMATOR):
+        return None
+    print(f"[LFP] stage 2 = {phase} phase, {len(coeffs)} taps "
+          f"(stage 1 halfband unchanged) -> 3000 sps out")
     return coeffs
+
+
+def load_q117_hex(path):
+    """Read a coefficient file emitted by design_lfp_filters.py (Q1.17, one
+    two's-complement hex value per line) into signed Python ints."""
+    out = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            v = int(line, 16)
+            out.append(v - (1 << 18) if v >> 17 else v)
+    return out
 
 def fs_out_str(decim_R):
     return f"{30000.0 / max(decim_R,1):.0f} sps out"
