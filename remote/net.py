@@ -71,6 +71,33 @@ def _open_beacon_socket(quiet=False):
     return sock
 
 
+# macOS gates LOCAL NETWORK traffic (broadcast/multicast discovery, and inbound
+# UDP from the subnet) per application, separately from the firewall. There is
+# no API to request or grant it: the prompt is raised implicitly by the OS the
+# first time a process touches the local network, and once it has been answered
+# -- or silently denied -- only the user can change it in System Settings.
+#
+# What we CAN do is stop it being a mystery. Binding the beacon port is itself
+# the access attempt that triggers the prompt, so if it has never been asked it
+# gets asked. If it was denied, the beacon simply never arrives, and the symptom
+# (a 45 s wait, then nothing) looks like a dead board. So say so, and hand over
+# the one command that opens the exact settings pane.
+_LOCAL_NETWORK_PANE = ("x-apple.systempreferences:"
+                       "com.apple.preference.security?Privacy_LocalNetwork")
+
+def local_network_permission_hint(what="the discovery beacon"):
+    """Explain a macOS local-network block, if that is plausibly what happened."""
+    if sys.platform != "darwin":
+        return
+    print(f"[DISCOVERY] On macOS, {what} is subject to the Local Network privacy")
+    print(f"            setting, which is SEPARATE from the firewall -- a unicast")
+    print(f"            data stream can work while broadcast discovery is blocked.")
+    print(f"            Check that this interpreter is enabled:")
+    print(f"              {sys.executable}")
+    print(f"            Open the pane directly with:")
+    print(f"              open \"{_LOCAL_NETWORK_PANE}\"")
+
+
 def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False, rebind_interval=5.0,
                    data_port=None):
     """Listen for the device discovery beacon on UDP BEACON_PORT and return the first
@@ -2975,6 +3002,10 @@ if __name__ == "__main__":
         else:
             print(f"[DISCOVERY] No beacon heard -- using configured {ZYNQ_IP} "
                   f"(--no-discover to skip the wait next time)")
+            # Discovery is optional, so this is not an error -- but if the board
+            # IS up and beaconing, the usual reason we cannot hear it is the OS,
+            # not the board.
+            local_network_permission_hint()
 
     print(f"Device: {ZYNQ_IP}:{TCP_PORT}")
     print(f"UDP Port: {UDP_PORT}")
