@@ -2648,7 +2648,7 @@ def tcp_control():
         print(f"  Config: set_phase <p0> <p1> [p2 p3], set_debug <0|1>, set_channels <0x00-0xFF>")
         print(f"  Network: set_udp <ip> <port>, get_status, perf_reset, ping")
         print(f"  Debug: dump_bram [start] [count], stats, hex")
-        print(f"  LFP (Tier-1): lfp_config [cic|fir] [taps], lfp_on, lfp_off, lfp_recv [n], sink  (port UDP_PORT, stream_type=2)")
+        print(f"  LFP: lfp_config [linear|minimum] [taps], lfp_on, lfp_off, lfp_recv [n], sink  (UDP_PORT, stream_type=2)")
         print(f"         verify_sine [ce=FF] [n=300] - check debug sinewaves vs RTL ref")
         print(f"  Chirp: chirp [f_max=1400] [period=2.0] [stride=4], chirp_off  (analytic swept sine)")
         print(f"  LFP sweep: lfp_sweep [f_max=1490] [period=2.0] [n_periods=2]  (measure anti-alias |H(f)|)")
@@ -2773,12 +2773,20 @@ def tcp_control():
                     taps = int(parts[2]) if len(parts) > 2 else None
                     configure_lfp(sock, phase=ph, num_taps=taps)
                 elif cmd == "chirp" or cmd.startswith("chirp "):
-                    # chirp [f_max_hz] [period_s] [stride]  (analytic swept-sine debug)
+                    # chirp [on|off] | chirp [f_max_hz] [period_s] [stride]
+                    # "on"/"off" are accepted because they are the obvious thing
+                    # to type; bare "chirp" enables with the defaults.
                     parts = cmd.split()
-                    fmx = float(parts[1]) if len(parts) > 1 else 1400.0
-                    per = float(parts[2]) if len(parts) > 2 else 2.0
-                    std = int(parts[3])   if len(parts) > 3 else 4
-                    configure_chirp(sock, fmx, per, std, enable=True)
+                    if len(parts) > 1 and parts[1] in ("off", "0", "false"):
+                        configure_chirp(sock, enable=False)
+                        send_binary_command(sock, CMD_SET_DEBUG_MODE, 0)
+                    else:
+                        if len(parts) > 1 and parts[1] in ("on", "1", "true"):
+                            parts = parts[:1] + parts[2:]   # drop the keyword
+                        fmx = float(parts[1]) if len(parts) > 1 else 1400.0
+                        per = float(parts[2]) if len(parts) > 2 else 2.0
+                        std = int(parts[3])   if len(parts) > 3 else 4
+                        configure_chirp(sock, fmx, per, std, enable=True)
                 elif cmd == "chirp_off":
                     configure_chirp(sock, enable=False)
                     send_binary_command(sock, CMD_SET_DEBUG_MODE, 0)
@@ -2892,6 +2900,14 @@ def tcp_control():
                     print("  digout <0|1> | gpio <pin> | hiz")
                 else:
                     print(f"Unknown command: '{cmd}'. Type 'help' for list.")
+
+            except (ValueError, IndexError, TypeError) as e:
+                # A mistyped argument must never end the session -- the whole
+                # point of the prompt is to keep a live board in a known state
+                # while you fiddle. Individual commands may still parse their
+                # own arguments; this is the backstop for the ones that don't.
+                print(f"Bad arguments for '{cmd}': {e}")
+                print(f"Type 'help' for usage.")
 
             except (socket.timeout, ConnectionError, BrokenPipeError, OSError) as e:
                 print(f"\n[TCP] Connection lost: {e}")
