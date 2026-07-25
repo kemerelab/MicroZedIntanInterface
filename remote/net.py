@@ -2929,6 +2929,8 @@ def tcp_control():
                     print("  lfp_config [linear|minimum] [taps] - upload the stage-2 filter")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
                     print("  lfp_recv [n]        - capture + print decoded LFP frames")
+                    print("  sink                - live per-stream counters: packet counts,")
+                    print("                        per-stream SEQ gaps, host ring drops")
                     print("  (LFP lane mask = the broadband channel_enable mask -- pick lanes")
                     print("   with set_channels; run lfp_config + set_channels BEFORE lfp_on)")
                     print("Aux sequencer (bank-programmable aux commands):")
