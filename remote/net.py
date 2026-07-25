@@ -159,7 +159,14 @@ def discover_board(timeout=BEACON_DISCOVERY_TIMEOUT, quiet=False, rebind_interva
                     if s is bsock:
                         dev = _parse_beacon(data)
                         if dev is None:
-                            continue         # not our beacon; keep listening
+                            # Something IS arriving on the beacon port but does
+                            # not look like our beacon. Say so: silently ignoring
+                            # it makes a wrong-magic or truncated beacon
+                            # indistinguishable from a board that never sent one.
+                            if not quiet:
+                                print(f"[DISCOVERY] ignored {len(data)}B from {addr[0]}"
+                                      f" on UDP {BEACON_PORT} (not a valid beacon)")
+                            continue
                         dev['src_ip'] = addr[0]
                         dev['ip'] = addr[0]  # datagram source is authoritative
                         dev['via'] = 'beacon'
@@ -3002,6 +3009,11 @@ if __name__ == "__main__":
         else:
             print(f"[DISCOVERY] No beacon heard -- using configured {ZYNQ_IP} "
                   f"(--no-discover to skip the wait next time)")
+            print(f"[DISCOVERY] If the board IS beaconing (check its serial console, or")
+            print(f"            sudo tcpdump -n -i any 'udp port {BEACON_PORT}'), then the")
+            print(f"            datagram is reaching this machine but not this socket.")
+            print(f"            Most often something else already holds the port:")
+            print(f"              sudo lsof -nP -iUDP:{BEACON_PORT}")
             # Discovery is optional, so this is not an error -- but if the board
             # IS up and beaconing, the usual reason we cannot hear it is the OS,
             # not the board.
