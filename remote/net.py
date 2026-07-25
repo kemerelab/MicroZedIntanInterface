@@ -2976,6 +2976,20 @@ def tcp_control():
     except KeyboardInterrupt:
         print("\n[TCP] Closing connection")
     finally:
+        # Stop the board BEFORE dropping the control connection. Closing the
+        # socket does not stop the stream: the firmware's TCP-close path clears
+        # its client pcb but leaves stream_enabled set, so the board keeps
+        # sending 30k packets/s to a port nothing is bound to any more. The host
+        # then processes -- and discards -- 30k unwanted packets/s in the kernel,
+        # which starves the rest of the network stack (loopback included) until
+        # something rebinds the port or the board is stopped.
+        #
+        # Best-effort by design: on a broken socket there is nothing left to do
+        # but close, and the board's own idle timeout is the backstop.
+        try:
+            send_binary_command(sock, CMD_STOP, timeout=0.5)
+        except Exception:
+            pass
         sock.close()
 
 if __name__ == "__main__":
