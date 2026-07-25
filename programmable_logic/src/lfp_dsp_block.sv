@@ -1,48 +1,48 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2025-2026 Caleb Kemere, Reet Sinha, Allen Mikhailov, Rice University
+
 // =====================================================================
 // lfp_dsp_block.sv
 //
-// Integration wrapper around lfp_fir_decimator. Sits between the acquisition
-// core's DSP tap and the PS-readable LFP output BRAM. Responsibilities:
-//   * gate the tap to the 32 amplifier slots and remove the +2 SPI readback
-//     offset (cycle_counter 2..33 -> engine slot 0..31),
-//   * convert Intan offset-binary -> two's-complement signed on the way IN
-//     and signed -> offset-binary on the way OUT (symmetric ^0x8000),
-//   * decode the host coefficient-upload window (aux-style strobe CDC),
-//   * BUILD THE COMPLETE LFP WIRE PACKET in the output BRAM: the unified 8-word
-//     common header (docs/unified-packet-format.md) AHEAD of each frame's
-//     decimated sample words, so the PS just DMAs the whole packet into a pbuf
-//     and sends it (no PS-side header math or Xil_In32 loop).
-//   * pack the decimated outputs 2x16-bit per 32-bit word and write them after
-//     the header (PS reads the whole packet via a 2nd axi_bram_ctrl over CDMA).
+// The LFP band, end to end: it takes the acquisition core's sample tap and
+// leaves a complete UDP packet in the LFP output BRAM for the PS to DMA out.
 //
-// LFP output BRAM layout, per frame: [8 common-header words | sample words].
-// The header is the shared 8-word contract from unified_pkt_pkg with
-// stream_type = STREAM_TYPE_LFP; only the two stream-specific words and the
-// timestamp convention are described here:
+//   tap (30 kHz)  ->  lfp_halfband_dec2 (/2)  ->  lfp_poly_dec5 (/5)  ->  packet
 //
-//   w2/w3 TIMESTAMP -- the master sample count of the NEWEST broadband sample in
-//         this output's decimation window. These are FIR filters, so the newest
-//         input in an output's support is a real, already-acquired sample: for
-//         frame m at total decimation R that is broadband packet R*m+(R-1)
-//         (R=10 -> 10m+9), the same master count the broadband header stamps,
-//         latched on the decimation tick. It marks the newest *input*, not the
-//         instant the filtered value represents -- a host that needs the latter
-//         subtracts the filter's group delay.
+// Two stages rather than one because a filter's transition width is a fraction
+// of ITS sample rate: the sharp 1.2/1.8 kHz filter costs ~120 taps at 15 kHz
+// instead of ~245 at 30 kHz, and half the delay-line BRAM. Total decimation is
+// fixed at /10, so 30 kHz broadband yields a 3 kHz LFP stream.
+//
+// Responsibilities
+//   * gate the tap to amplifier slots and convert offset-binary -> signed
+//   * run the cascade, and route coefficient uploads to either stage
+//   * BUILD THE COMPLETE WIRE PACKET in the output BRAM -- the shared 8-word
+//     header (unified_pkt_pkg, stream_type = LFP) followed by the samples -- so
+//     the PS just DMAs [header|samples] into a pbuf and sends it, with no
+//     PS-side header maths and no Xil_In32 loop.
+//
+// Sample placement
+// ----------------
+// Stage 2 computes several lanes at once, so its outputs do NOT arrive in wire
+// order. Rather than buffer and reorder a frame, each sample is written to the
+// BRAM address implied by its channel: two 16-bit samples share a 32-bit word
+// and the byte-write enables select the half. Arrival order stops mattering,
+// and the old sequential pack state machine disappears.
+//
+// Timestamp convention
+// --------------------
+// w2/w3 carry the master sample count of the NEWEST broadband sample in this
+// output's decimation window. These are FIR filters, so the newest input in an
+// output's support is a real, already-acquired sample: for frame m at total
+// decimation R that is broadband packet R*m+(R-1) (R=10 -> 10m+9), the same
+// count the broadband header stamps. It marks the newest *input*, not the
+// instant the filtered value represents -- a host that needs the latter
+// subtracts the filter's group delay (reported by the design script).
+//
+// Stream-specific header words
 //   w5 AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24)
 //   w6 AUX1 = num_samples = popcount(lane_mask) * N_SLOTS
-//
-// The LFP lane mask MIRRORS the broadband channel-enable mask (dsp_channel_enable
-// from data_generator_core) -- single source of truth; the LFP filters exactly
-// the broadband-enabled lanes. lfp_cfg[15:8] is retained but NOT used to drive
-// the engine lane_mask.
-//
-// Control-register slice (already CDC'd to clk by axi_lite_registers):
-//   lfp_cfg    [0] lfp_en, [15:8] lane_mask (DEPRECATED -- not driven), [23:16] decim_R, [31:24] num_taps
-//   lfp_coef   [17:0] coefficient data (signed Q1.17)
-//   lfp_strobe [0] coef write toggle (1 write per edge, ptr auto-increments),
-//              [1] coef pointer clear (hold ptr at 0 while high)
-//
-// See docs/lfp-dsp-engine-design.md.
 // =====================================================================
 
 import unified_pkt_pkg::*;   // the 8-word common header shared by every PL stream
@@ -50,25 +50,20 @@ import unified_pkt_pkg::*;   // the 8-word common header shared by every PL stre
 module lfp_dsp_block #(
     parameter int N_LANES        = 8,
     parameter int N_SLOTS        = 32,      // amplifier channels per lane
-    parameter int DATA_W         = 16,
+    parameter int DATA_W         = 16,      // broadband sample width
+    parameter int MID_W          = 18,      // stage-1 -> stage-2 intermediate
     parameter int COEF_W         = 18,
     parameter int COEF_FRAC      = 17,
-    parameter int RING_DEPTH     = 256,     // FIR delay-line depth (USE_CIC=0 path)
-    parameter int OUT_W          = 16,
+    parameter int OUT_W          = 16,      // wire sample width
     parameter int FIRST_AMP_SLOT = 2,       // cycle_counter of amplifier channel 0
     parameter int LFP_BRAM_AW    = 14,      // LFP output BRAM byte-address width (16 KB)
-    // ---- datapath select ----
-    // USE_CIC=1 (default): CIC^4(/5) -> comp-FIR halfband(/2) = /10 LFP @ 3 kHz.
-    //   ~5x less delay-line BRAM than the single-stage FIR; the coef window loads
-    //   the HB_TAPS comp-FIR taps; the engine's decimation is hardwired /10.
-    // USE_CIC=0: the dual-MAC single-stage FIR (fallback; coef window loads the
-    //   full FIR, decim_R/num_taps from lfp_cfg).
-    parameter int USE_CIC        = 1,
-    parameter int CIC_R          = 5,
-    parameter int CIC_ORDER      = 4,
-    parameter int CIC_ACC_W      = 32,
-    parameter int CIC_GAIN_SHIFT = 10,
-    parameter int HB_RING        = 64       // halfband delay-line depth (USE_CIC=1)
+    parameter int HB_TAPS        = 11,      // stage-1 length
+    parameter int HB_RING        = 16,      // stage-1 delay line, pow2 >= HB_TAPS
+    parameter int MAX_POLY_TAPS  = 120,     // stage-2 maximum length
+    parameter int POLY_RING      = 128,     // stage-2 delay line, pow2 >= MAX_POLY_TAPS
+    parameter int N_PAR          = 4,       // stage-2 parallel MACs (one per lane)
+    parameter int DECIM_1        = 2,
+    parameter int DECIM_2        = 5
 ) (
     input  logic         clk,
     input  logic         rstn,
@@ -76,7 +71,7 @@ module lfp_dsp_block #(
     // ---- DSP tap from data_generator_core ----
     input  logic         dsp_sample_valid,
     input  logic [N_LANES*DATA_W-1:0] dsp_sample_data,
-    input  logic [5:0]   dsp_sample_slot,    // cycle_counter, 0..34
+    input  logic [5:0]   dsp_sample_slot,       // cycle_counter, 0..34
     input  logic         dsp_packet_tick,
     input  logic [63:0]  dsp_master_timestamp,  // live master sample count
     input  logic [7:0]   dsp_channel_enable,    // broadband mask -> LFP lane_mask
@@ -96,287 +91,269 @@ module lfp_dsp_block #(
     output logic [3:0]             bram_we,
 
     // ---- status ----
-    output logic [LFP_BRAM_AW-1:0] lfp_wr_addr,  // current write byte address (PS read ptr)
-    output logic                   lfp_overrun   // engine compute overrun (sticky)
+    output logic [LFP_BRAM_AW-1:0] lfp_wr_addr,  // completed-frame write pointer (PS read limit)
+    output logic                   lfp_overrun   // either stage overran (sticky)
 );
 
-    localparam int RING_AW = $clog2(RING_DEPTH);
-    localparam int TAPN_W  = $clog2(RING_DEPTH + 1);
-    localparam int CH_W    = $clog2(N_LANES * N_SLOTS);
-    localparam int SLOT_W  = (N_SLOTS <= 1) ? 1 : $clog2(N_SLOTS);
-    localparam int LFP_WORD_AW = LFP_BRAM_AW - 2;          // 32-bit word address width
+    localparam int CH_W        = $clog2(N_LANES * N_SLOTS);
+    localparam int SLOT_W      = (N_SLOTS <= 1) ? 1 : $clog2(N_SLOTS);
+    localparam int LANE_W      = (N_LANES <= 1) ? 1 : $clog2(N_LANES);
+    localparam int POLY_TAP_W  = $clog2(MAX_POLY_TAPS + 1);
+    localparam int HB_TAP_W    = $clog2(HB_TAPS + 1);
+    localparam int LFP_WORD_AW = LFP_BRAM_AW - 2;      // 32-bit word address width
+    localparam int DECIM_TOTAL = DECIM_1 * DECIM_2;    // /10
     localparam logic [DATA_W-1:0] OFFSET = {1'b1, {(DATA_W-1){1'b0}}};  // 0x8000
 
-    // Unified common-header constants (matches net.py + the broadband header).
-    // The whole 8-word header is identical across streams; only stream_type and
-    // the AUX words differ. See docs/unified-packet-format.md.
-    localparam int HDR_WORDS = 8;
-    // Header constants and layout come from unified_pkt_pkg -- see the header
-    // write below. Only AUX0/AUX1 (the cfg word and the sample count) are ours.
-
     // -----------------------------------------------------------------
-    // Control unpack (with min-1 guards on the rate/length).
-    // The lane mask MIRRORS the broadband channel-enable mask (single source of
-    // truth). lfp_cfg[15:8] is retained on the wire but no longer drives the
-    // engine -- the LFP filters exactly the broadband-enabled lanes.
+    // Control unpack. The lane mask MIRRORS the broadband channel-enable mask
+    // (single source of truth), so the LFP filters exactly the broadband-enabled
+    // lanes; lfp_cfg[15:8] is kept on the wire but no longer drives the engine.
+    // The decimation is structural (/2 then /5), so only the tap count is
+    // configurable here.
     // -----------------------------------------------------------------
     wire        lfp_en    = lfp_cfg[0];
-    wire [7:0]  lane_mask = dsp_channel_enable;            // = broadband mask
-    wire [7:0]  decim_r8  = lfp_cfg[23:16];
+    wire [7:0]  lane_mask = dsp_channel_enable;
     wire [7:0]  numtaps8  = lfp_cfg[31:24];
-    wire [7:0]  decim_R   = (decim_r8 == 0) ? 8'd1 : decim_r8;
-    wire [TAPN_W-1:0] num_taps = (numtaps8 == 0) ? TAPN_W'(1) : TAPN_W'(numtaps8);
+    wire [POLY_TAP_W-1:0] poly_taps =
+         (numtaps8 == 0 || numtaps8 > MAX_POLY_TAPS) ? POLY_TAP_W'(MAX_POLY_TAPS)
+                                                     : POLY_TAP_W'(numtaps8);
 
     // -----------------------------------------------------------------
     // Tap conditioning: amplifier-slot gate + offset-binary -> signed.
     // -----------------------------------------------------------------
     wire amp_slot = (dsp_sample_slot >= FIRST_AMP_SLOT) &&
                     (dsp_sample_slot <  FIRST_AMP_SLOT + N_SLOTS);
-    wire                     eng_valid = dsp_sample_valid & amp_slot;
-    wire [SLOT_W-1:0]        eng_slot  = SLOT_W'(dsp_sample_slot - FIRST_AMP_SLOT);
+    wire              eng_valid = dsp_sample_valid & amp_slot;
+    wire [SLOT_W-1:0] eng_slot  = SLOT_W'(dsp_sample_slot - FIRST_AMP_SLOT);
 
     logic [N_LANES*DATA_W-1:0] eng_data;
     genvar gl;
     generate
         for (gl = 0; gl < N_LANES; gl++) begin : g_xin
-            // flip the MSB of each lane: offset-binary midpoint -> signed 0
+            // flip the MSB of each lane: offset-binary midpoint -> signed zero
             assign eng_data[gl*DATA_W +: DATA_W] =
                    dsp_sample_data[gl*DATA_W +: DATA_W] ^ OFFSET;
         end
     endgenerate
 
     // -----------------------------------------------------------------
-    // Coefficient upload window (aux-style strobe toggle -> 1 write/edge).
+    // Coefficient upload. One strobe-toggle window as before, plus a stage
+    // select so the host can load either filter:
+    //   lfp_strobe[0] toggle -> write one coefficient at the auto-incrementing ptr
+    //   lfp_strobe[1] clear  -> reset the pointer (do this before each upload)
+    //   lfp_strobe[2] stage  -> 0 = stage 1 (halfband), 1 = stage 2 (decimator)
     // -----------------------------------------------------------------
-    logic              coef_tog_d;
-    logic [RING_AW-1:0] coef_wr_ptr;
-    logic              coef_wr_en;
-    logic [RING_AW-1:0] coef_wr_addr;
-    logic [COEF_W-1:0] coef_wr_data;
-    wire               coef_tog = lfp_strobe[0];
-    wire               coef_clr = lfp_strobe[1];
+    logic                     coef_tog_d;
+    logic [POLY_TAP_W-1:0]    coef_wr_ptr;
+    logic                     coef_wr_en;
+    logic                     coef_wr_stage;
+    logic [POLY_TAP_W-1:0]    coef_wr_addr;
+    logic [COEF_W-1:0]        coef_wr_data;
+    wire                      coef_tog   = lfp_strobe[0];
+    wire                      coef_clr   = lfp_strobe[1];
+    wire                      coef_stage = lfp_strobe[2];
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
-            coef_tog_d  <= 1'b0;
-            coef_wr_ptr <= '0;
-            coef_wr_en  <= 1'b0;
+            coef_tog_d <= 1'b0; coef_wr_ptr <= '0; coef_wr_en <= 1'b0;
+            coef_wr_stage <= 1'b0;
         end else begin
             coef_tog_d <= coef_tog;
             coef_wr_en <= 1'b0;
             if (coef_clr) begin
                 coef_wr_ptr <= '0;
             end else if (coef_tog ^ coef_tog_d) begin
-                coef_wr_en   <= 1'b1;
-                coef_wr_addr <= coef_wr_ptr;
-                coef_wr_data <= lfp_coef[COEF_W-1:0];
-                coef_wr_ptr  <= coef_wr_ptr + 1'b1;
+                coef_wr_en    <= 1'b1;
+                coef_wr_stage <= coef_stage;
+                coef_wr_addr  <= coef_wr_ptr;
+                coef_wr_data  <= lfp_coef[COEF_W-1:0];
+                coef_wr_ptr   <= coef_wr_ptr + 1'b1;
             end
         end
     end
 
-    // -----------------------------------------------------------------
-    // The decimating engine: CIC(/5)->halfband(/2) (default) or single FIR.
-    // -----------------------------------------------------------------
-    localparam int HB_TAPN_W = $clog2(HB_RING + 1);
-    localparam int HB_RING_AW = $clog2(HB_RING);
-    logic               out_valid, out_frame_start, frame_tick, busy;
-    logic [CH_W-1:0]    out_channel;
-    logic [OUT_W-1:0]   out_data;
+    wire hb_coef_we   = coef_wr_en & ~coef_wr_stage;
+    wire poly_coef_we = coef_wr_en &  coef_wr_stage;
 
-    generate
-    if (USE_CIC) begin : g_cic_chain
-        // ---- CIC^4 /5 ----
-        logic               cic_valid, cic_fs, cic_busy, cic_ov;
-        logic [CH_W-1:0]    cic_ch;
-        logic [OUT_W-1:0]   cic_d;
-        cic_decimator #(
-            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .R(CIC_R),
-            .N_ORDER(CIC_ORDER), .ACC_W(CIC_ACC_W), .OUT_W(OUT_W),
-            .GAIN_SHIFT(CIC_GAIN_SHIFT)
-        ) u_cic (
-            .clk(clk), .rstn(rstn),
-            .sample_valid(eng_valid), .sample_data(eng_data),
-            .sample_slot(eng_slot), .packet_tick(dsp_packet_tick),
-            .en(lfp_en), .lane_mask(lane_mask),
-            .out_valid(cic_valid), .out_channel(cic_ch), .out_data(cic_d),
-            .out_frame_start(cic_fs), .busy(cic_busy), .compute_overrun(cic_ov)
-        );
-        // ---- glue: CIC frame -> per-slot 8-lane stream ----
-        logic                      hb_v, hb_t;
-        logic [N_LANES*DATA_W-1:0] hb_d;
-        logic [SLOT_W-1:0]         hb_s;
-        cic_to_halfband #(
-            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W)
-        ) u_glue (
-            .clk(clk), .rstn(rstn), .lane_mask(lane_mask),
-            .cic_valid(cic_valid), .cic_channel(cic_ch), .cic_data(cic_d),
-            .cic_frame_start(cic_fs),
-            .hb_valid(hb_v), .hb_data(hb_d), .hb_slot(hb_s), .hb_tick(hb_t)
-        );
-        // ---- comp-FIR halfband /2 (loads the coef window) ----
-        logic hb_ov;
-        lfp_halfband #(
-            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .COEF_W(COEF_W),
-            .COEF_FRAC(COEF_FRAC), .RING_DEPTH(HB_RING), .OUT_W(OUT_W)
-        ) u_hb (
-            .clk(clk), .rstn(rstn),
-            .sample_valid(hb_v), .sample_data(hb_d), .sample_slot(hb_s),
-            .packet_tick(hb_t), .en(lfp_en), .lane_mask(lane_mask),
-            .num_taps(num_taps[HB_TAPN_W-1:0]),
-            .coef_wr_en(coef_wr_en), .coef_wr_addr(coef_wr_addr[HB_RING_AW-1:0]),
-            .coef_wr_data(coef_wr_data),
-            .out_valid(out_valid), .out_channel(out_channel), .out_data(out_data),
-            .out_frame_start(out_frame_start), .frame_tick(frame_tick),
-            .busy(busy), .compute_overrun(hb_ov)
-        );
-        assign lfp_overrun = cic_ov | hb_ov;
-    end else begin : g_fir
-        lfp_fir_decimator #(
-            .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W), .COEF_W(COEF_W),
-            .COEF_FRAC(COEF_FRAC), .RING_DEPTH(RING_DEPTH), .OUT_W(OUT_W)
-        ) u_fir (
-            .clk(clk), .rstn(rstn),
-            .sample_valid(eng_valid), .sample_data(eng_data),
-            .sample_slot(eng_slot), .packet_tick(dsp_packet_tick),
-            .lfp_en(lfp_en), .lane_mask(lane_mask), .decim_R(decim_R), .num_taps(num_taps),
-            .coef_wr_en(coef_wr_en), .coef_wr_addr(coef_wr_addr), .coef_wr_data(coef_wr_data),
-            .out_valid(out_valid), .out_channel(out_channel), .out_data(out_data),
-            .out_frame_start(out_frame_start), .frame_tick(frame_tick),
-            .busy(busy), .compute_overrun(lfp_overrun)
-        );
+    // =================================================================
+    // Stage 1: halfband, 30 kHz -> 15 kHz.
+    // =================================================================
+    logic                    hb_valid, hb_frame_start, hb_busy, hb_overrun;
+    logic [CH_W-1:0]         hb_channel;
+    logic signed [MID_W-1:0] hb_data;
+    logic                    hb_frame_tick;
+
+    lfp_halfband_dec2 #(
+        .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .DATA_W(DATA_W),
+        .COEF_W(COEF_W), .COEF_FRAC(COEF_FRAC), .OUT_W(MID_W),
+        .N_TAPS(HB_TAPS), .RING_DEPTH(HB_RING)
+    ) u_stage1 (
+        .clk(clk), .rstn(rstn),
+        .sample_valid(eng_valid), .sample_data(eng_data),
+        .sample_slot(eng_slot), .packet_tick(dsp_packet_tick),
+        .lfp_en(lfp_en), .lane_mask(lane_mask),
+        .coef_wr_en(hb_coef_we), .coef_wr_addr(coef_wr_addr[HB_TAP_W-1:0]),
+        .coef_wr_data(coef_wr_data),
+        .out_valid(hb_valid), .out_channel(hb_channel), .out_data(hb_data),
+        .out_frame_start(hb_frame_start), .busy(hb_busy),
+        .compute_overrun(hb_overrun)
+    );
+
+    // Stage 1's pass is finished when busy falls; that is stage 2's frame tick.
+    logic hb_busy_d;
+    always_ff @(posedge clk) begin
+        if (!rstn) hb_busy_d <= 1'b0;
+        else       hb_busy_d <= hb_busy;
     end
-    endgenerate
+    assign hb_frame_tick = hb_busy_d & ~hb_busy;
+
+    // =================================================================
+    // Stage 2: decimate-by-5, 15 kHz -> 3 kHz.
+    // =================================================================
+    logic                    out_valid, frame_start, poly_busy, poly_overrun;
+    logic [CH_W-1:0]         out_channel;
+    logic signed [OUT_W-1:0] out_data;
+
+    lfp_poly_dec5 #(
+        .N_LANES(N_LANES), .N_SLOTS(N_SLOTS), .IN_W(MID_W),
+        .COEF_W(COEF_W), .COEF_FRAC(COEF_FRAC), .OUT_W(OUT_W),
+        .MAX_TAPS(MAX_POLY_TAPS), .RING_DEPTH(POLY_RING),
+        .N_PAR(N_PAR), .DECIM(DECIM_2)
+    ) u_stage2 (
+        .clk(clk), .rstn(rstn),
+        .sample_valid(hb_valid), .sample_channel(hb_channel),
+        .sample_data(hb_data), .frame_tick(hb_frame_tick),
+        .lfp_en(lfp_en), .lane_mask(lane_mask), .num_taps(poly_taps),
+        .coef_wr_en(poly_coef_we), .coef_wr_addr(coef_wr_addr),
+        .coef_wr_data(coef_wr_data),
+        .out_valid(out_valid), .out_channel(out_channel), .out_data(out_data),
+        .frame_start(frame_start), .busy(poly_busy),
+        .compute_overrun(poly_overrun)
+    );
+
+    assign lfp_overrun = hb_overrun | poly_overrun;
 
     // -----------------------------------------------------------------
-    // Master-timestamp + sequence tracking for the per-frame header.
-    //
-    // ts_ingest holds the master count of the MOST-RECENT broadband packet whose
-    // samples have been fully ingested. dsp_master_timestamp is the LIVE master
-    // counter; it has already incremented to (just-completed packet index + 1) on
-    // the same edge dsp_packet_tick is asserted, so the packet whose samples the
-    // engine just consumed has master count (dsp_master_timestamp - 1) -- exactly
-    // the value the broadband header stamps for that packet. We latch that.
-    //
-    // On frame_tick (the engine's decimation tick) we snapshot ts_ingest into the
-    // header: it is the master count of the NEWEST broadband sample in this
-    // output's decimation window (frame m at total decimation R -> packet
-    // R*m+(R-1); the /5 CIC + /2 halfband make that 10m+9). The cascade latency
-    // from that packet closing the window to frame_tick (CIC comb + glue replay,
-    // a few hundred clk) is far less than one ~2800-clk packet, so no new
-    // packet_tick arrives in between and ts_ingest is exactly that count; it also
-    // stays stable through the frame's first out_valid (~num_taps clk later).
+    // Master timestamp for the frame header. dsp_master_timestamp is the LIVE
+    // counter and has already advanced past the packet whose samples were just
+    // consumed, so the packet the engine just ingested is (timestamp - 1) --
+    // exactly what the broadband header stamps for it.
     // -----------------------------------------------------------------
-    logic [63:0] ts_ingest;     // master count of the last fully-ingested packet
-    logic [63:0] ts_frame;      // snapshot for the in-flight frame's header
-    logic [31:0] frame_seq;     // PL-maintained LFP frame counter (++ per frame)
-    logic        ov_frame;      // overrun snapshot for the header
+    logic [63:0] ts_ingest, ts_frame;
+    logic [31:0] frame_seq;
+    logic        ov_frame;
 
     always_ff @(posedge clk) begin
-        if (!rstn) begin
-            ts_ingest <= 64'd0;
-        end else if (dsp_packet_tick) begin
-            ts_ingest <= dsp_master_timestamp - 64'd1;
-        end
+        if (!rstn)                   ts_ingest <= 64'd0;
+        else if (dsp_packet_tick)    ts_ingest <= dsp_master_timestamp - 64'd1;
     end
 
     // -----------------------------------------------------------------
-    // Output: BUILD THE FULL LFP WIRE PACKET in BRAM. Per frame:
-    //   on frame_tick -> a 6-word header-write micro-sequence writes
-    //     [magic_low, magic_high, ts_lo, ts_hi, cfg, seq] starting at wr_word,
-    //   then the decimated samples (signed -> offset-binary, 2x16-bit/word) pack
-    //     immediately after the header.
-    // The PS reads the whole packet [header|samples] via CDMA up to lfp_wr_addr.
-    // The header always completes (6 clk) before the frame's first out_valid
-    // (>= ~num_taps clk after frame_tick), so header and sample writes never race.
+    // Packet geometry. Samples are laid out per ENABLED lane, so a channel's
+    // position depends on how many enabled lanes precede it -- not on its raw
+    // channel number.
     // -----------------------------------------------------------------
-    wire [DATA_W-1:0] out_offset = out_data ^ OFFSET;
-
-    logic                  pack_phase;     // 0 = expecting low half, 1 = high half
-    logic [DATA_W-1:0]     pack_low;
-    logic [LFP_WORD_AW-1:0] wr_word;
-    logic                  bram_we_r;
-    logic [31:0]           bram_din_r;
-    logic [LFP_WORD_AW-1:0] bram_word_r;
-
-    // header-write micro-sequence
-    logic [3:0]            hdr_idx;        // 0..7 while writing the 8-word header
-    logic                  hdr_busy;
-    // AUX0 = lane_mask | (decim_R<<8) | (num_taps<<16) | (overrun<<24). decim_r8/
-    // numtaps8 are the raw 8-bit host-configured fields (the wire-format values).
-    wire  [31:0]           cfg_word = {ov_frame, 7'd0, numtaps8, decim_r8, lane_mask};
-    // AUX1 = num_samples = popcount(lane_mask) * N_SLOTS (the count of int16
-    // decimated samples that follow the header). N_SLOTS=32 -> <<5.
-    logic [3:0]            lane_popcount;
+    logic [3:0] lane_popcount;
     always_comb begin
         lane_popcount = 4'd0;
         for (int b = 0; b < N_LANES; b++)
             lane_popcount = lane_popcount + {3'd0, lane_mask[b]};
     end
-    wire  [31:0]           num_samples_word = {24'd0, lane_popcount} * N_SLOTS;
+    wire [31:0] num_samples_word = {24'd0, lane_popcount} * N_SLOTS;
+    wire [LFP_WORD_AW-1:0] sample_words =
+         LFP_WORD_AW'((num_samples_word + 32'd1) >> 1);     // 2 samples per word
+
+    wire [31:0] cfg_word = {ov_frame, 7'd0, {1'b0, poly_taps},
+                            8'(DECIM_TOTAL), lane_mask};
+
+    // Where this sample belongs in the payload.
+    wire [LANE_W-1:0] out_lane = out_channel[CH_W-1 -: LANE_W];
+    wire [SLOT_W-1:0] out_slot = out_channel[SLOT_W-1:0];
+    logic [3:0] lanes_before;
+    always_comb begin
+        lanes_before = 4'd0;
+        for (int b = 0; b < N_LANES; b++)
+            if (LANE_W'(b) < out_lane && lane_mask[b])
+                lanes_before = lanes_before + 4'd1;
+    end
+    wire [CH_W:0] out_rank = {4'd0, lanes_before} * N_SLOTS + out_slot;
+
+    // -----------------------------------------------------------------
+    // Packet builder. On frame_start the header is laid down one word per clock
+    // at the frame base; samples then land at their own addresses as they are
+    // produced. The frame is published to the PS only once every sample has
+    // been written, so the PS never DMAs a partial frame.
+    // -----------------------------------------------------------------
+    logic [LFP_WORD_AW-1:0] frame_base;    // first word of the in-flight frame
+    logic [LFP_WORD_AW-1:0] wr_word;       // next free word (after the last frame)
+    logic [3:0]             hdr_idx;
+    logic                   hdr_busy;
+    logic [CH_W:0]          samp_count;    // samples written this frame
+    logic [31:0]            bram_din_r;
+    logic [LFP_WORD_AW-1:0] bram_word_r;
+    logic [3:0]             bram_we_r;
+
+    wire [OUT_W-1:0] out_offset = out_data ^ OFFSET;   // signed -> offset binary
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
-            pack_phase <= 1'b0;
-            pack_low   <= '0;
-            wr_word    <= '0;
-            bram_we_r  <= 1'b0;
-            hdr_idx    <= 4'd0;
-            hdr_busy   <= 1'b0;
-            ts_frame   <= 64'd0;
-            ov_frame   <= 1'b0;
-            frame_seq  <= 32'd0;
+            frame_base <= '0; wr_word <= '0; hdr_idx <= 4'd0; hdr_busy <= 1'b0;
+            samp_count <= '0; bram_we_r <= 4'h0; lfp_wr_addr <= '0;
+            ts_frame <= 64'd0; ov_frame <= 1'b0; frame_seq <= 32'd0;
         end else begin
-            bram_we_r <= 1'b0;
+            bram_we_r <= 4'h0;
 
-            if (frame_tick) begin
-                // Snapshot the per-frame header fields, kick the header writer,
-                // and start a fresh frame on the low pack half.
+            if (frame_start) begin
+                // Snapshot the header fields and start laying the header down at
+                // the current free position.
                 ts_frame   <= ts_ingest;
                 ov_frame   <= lfp_overrun;
+                frame_base <= wr_word;
                 hdr_idx    <= 4'd0;
                 hdr_busy   <= 1'b1;
-                pack_phase <= 1'b0;
+                samp_count <= '0;
             end else if (hdr_busy) begin
-                // Emit one header word per clock at the frame base -- the unified
-                // 8-word common header (stream_type=2). See docs/unified-packet-format.md.
-                bram_word_r <= wr_word;
-                bram_we_r   <= 1'b1;
-                // One word per clock from the shared header definition; AUX0 is
-                // the live config, AUX1 the count of samples that follow.
+                // One header word per clock, from the shared contract.
+                bram_word_r <= frame_base + LFP_WORD_AW'(hdr_idx);
                 bram_din_r  <= unified_hdr_word(hdr_idx[2:0], STREAM_TYPE_LFP,
                                                 ts_frame, frame_seq,
                                                 cfg_word, num_samples_word);
-                wr_word <= wr_word + 1'b1;                   // wraps naturally
+                bram_we_r   <= 4'hF;
                 if (hdr_idx == 4'd7) begin
                     hdr_busy  <= 1'b0;
-                    frame_seq <= frame_seq + 1'b1;           // one seq per emitted frame
+                    frame_seq <= frame_seq + 1'b1;   // one SEQ per emitted frame
                 end else begin
                     hdr_idx <= hdr_idx + 1'b1;
                 end
-            end else if (out_valid) begin
-                // Pack the decimated samples after the header.
-                if (out_frame_start) pack_phase <= 1'b0;     // belt-and-suspenders
-                if (pack_phase == 1'b0) begin
-                    pack_low   <= out_offset;
-                    pack_phase <= 1'b1;
+            end
+
+            if (out_valid) begin
+                // Place the sample by its rank; the byte enables pick the half of
+                // the shared 32-bit word, so arrival order does not matter.
+                bram_word_r <= frame_base + LFP_WORD_AW'(UNIFIED_HDR_WORDS)
+                                          + LFP_WORD_AW'(out_rank >> 1);
+                bram_din_r  <= {out_offset, out_offset};   // both halves; we mask
+                bram_we_r   <= out_rank[0] ? 4'b1100 : 4'b0011;
+
+                // Publish the frame once its last sample has landed.
+                if (samp_count + 1'b1 >= num_samples_word[CH_W:0]) begin
+                    wr_word     <= frame_base + LFP_WORD_AW'(UNIFIED_HDR_WORDS)
+                                              + sample_words;
+                    lfp_wr_addr <= {frame_base + LFP_WORD_AW'(UNIFIED_HDR_WORDS)
+                                               + sample_words, 2'b00};
+                    samp_count  <= '0;
                 end else begin
-                    bram_din_r  <= {out_offset, pack_low};   // {high, low}
-                    bram_word_r <= wr_word;
-                    bram_we_r   <= 1'b1;
-                    wr_word     <= wr_word + 1'b1;            // wraps naturally
-                    pack_phase  <= 1'b0;
+                    samp_count <= samp_count + 1'b1;
                 end
             end
         end
     end
 
-    assign bram_clk    = clk;
-    assign bram_rst    = ~rstn;
-    assign bram_en     = 1'b1;
-    assign bram_we     = bram_we_r ? 4'hF : 4'h0;
-    assign bram_addr   = {bram_word_r, 2'b00};               // word -> byte address
-    assign bram_din    = bram_din_r;
-    assign lfp_wr_addr = {wr_word, 2'b00};
+    assign bram_clk  = clk;
+    assign bram_rst  = ~rstn;
+    assign bram_en   = 1'b1;
+    assign bram_we   = bram_we_r;
+    assign bram_addr = {bram_word_r, 2'b00};    // word -> byte address
+    assign bram_din  = bram_din_r;
 
 endmodule
