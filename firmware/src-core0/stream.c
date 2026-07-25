@@ -54,9 +54,9 @@ int pl_stream_dma_frame(uint32_t *dst, uintptr_t bram_base,
     return rc;
 }
 
-// Send one already-staged packet zero-copy. Returns ERR_OK, or the lwIP error;
-// *alloc_fail is incremented instead if the pbuf pool was empty.
-err_t pl_stream_send_frame(struct udp_pcb *pcb, const uint32_t *buf,
+// Send one already-staged packet zero-copy, LFP policy: a pool shortage and a
+// rejected send are both simply "not now, retry the same frame next call".
+static err_t lfp_send_frame(struct udp_pcb *pcb, const uint32_t *buf,
                            uint32_t n_bytes, uint32_t *alloc_fail)
 {
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, n_bytes, PBUF_REF);
@@ -66,6 +66,185 @@ err_t pl_stream_send_frame(struct udp_pcb *pcb, const uint32_t *buf,
     err_t e = udp_sendto(pcb, p, &dst, udp_dest_port);
     pbuf_free(p);       // PBUF_REF: releases the reference, not the staging slot
     return e;
+}
+
+
+// The capture-BRAM read method is selected in main.h (both this reader and
+// main()'s CDMA init depend on it).
+
+// ---------------------------------------------------------------------------
+// Broadband stream (stream_type = 1, 30 kHz)
+//
+// The latency-critical one: one packet per 30 kHz sample, on a ~33 us budget.
+// It retries a rejected send IN PLACE rather than dropping, because the stream
+// is archival and a dropped packet cannot be recovered, and it carries the
+// timing instrumentation that measures that budget.
+//
+// It does NOT share the send path with the LFP stream. The two count failures
+// differently on purpose: broadband separates "the pbuf pool was momentarily
+// empty" from "the TX ring rejected it", because they call for different
+// responses, and a shared helper that returned one error would throw that away.
+// ---------------------------------------------------------------------------
+// Pre-allocated packet buffer for UDP (sized for maximum packet)
+// Use __attribute__((aligned(64))) to align to cache line boundary for optimal performance
+// Used as the packet buffer only on the BRAM_READ_SINGLE path; unused under DMA.
+static uint32_t udp_packet_buffer[MAX_WORDS_PER_PACKET] __attribute__((aligned(64), unused));
+
+// Record a broadband TX drop (pbuf-alloc fail or udp_sendto error). packets_
+// received_count is the count BEFORE this packet's increment, so the dropped
+// packet is ~that index. first/last bracket the span; the ring shows clustering.
+static void record_bb_drop(void) {
+  uint32_t idx = packets_received_count;
+  if (first_drop_pkt == 0) first_drop_pkt = idx;
+  last_drop_pkt = idx;
+  drop_ring[drop_ring_idx & 7u] = idx;
+  drop_ring_idx++;
+}
+
+// Read and validate one packet directly from BRAM with UDP transmission
+int process_packet_from_bram(void) {
+  XTime t_loop0; XTime_GetTime(&t_loop0);   // perf: receive->transmit timer
+  // Unified packet format: header word 0 = MAGIC (0xCAFEBABE), word 1 = TYPE_VER
+  // with stream_type=1 (broadband), version=1 in the low 16 bits. The capture
+  // BRAM only ever holds broadband packets (the LFP stream lives in its own
+  // BRAM), so we validate both the magic AND the broadband stream_type/version.
+  uint32_t magic_offset    = ps_read_address; // should always be < BRAM_SIZE_WORDS
+  uint32_t typever_offset  = (ps_read_address + 1) % BRAM_SIZE_WORDS;
+
+  uint32_t magic_word   = Xil_In32(BRAM_BASE_ADDR + (magic_offset * 4));   // DMA-EXEMPT: 2-word header peek (clean 1-beat reads; bulk payload moves by CDMA below)
+  uint32_t typever_word = Xil_In32(BRAM_BASE_ADDR + (typever_offset * 4)); // DMA-EXEMPT: 2-word header peek (clean 1-beat reads; bulk payload moves by CDMA below)
+
+  uint32_t expected_typever =
+      (uint32_t)STREAM_TYPE_BROADBAND | ((uint32_t)UNIFIED_VERSION << 8);
+
+  // Validate the unified header (magic + broadband type/version, low 16 bits)
+  if (magic_word != UNIFIED_MAGIC ||
+      (typever_word & 0xFFFFu) != (expected_typever & 0xFFFFu)) {
+    // Invalid header - could be BRAM overflow, corruption, or misalignment.
+    // Jump directly to write pointer to sync with fresh data.
+    uint32_t pl_write_addr = pl_get_bram_write_address();
+    ps_read_address = pl_write_addr;
+    error_count++; // ERROR TO TRACK
+    send_message("Header validation failed (magic=0x%08X type_ver=0x%08X), jumping to write position %u\r\n",
+                 magic_word, typever_word, pl_write_addr);
+    return 0; // Packet validation failed, now synced to fresh data
+  }
+
+  // TODO: If we are in an error state, we could track how long we stay there
+  //    by measuring the timestamp gap when we recover.
+
+  // UDP transmission (always enabled) - zero-copy with pre-allocated buffer.
+  //
+  // Read the packet out of the capture BRAM into pkt_buf (see "read method"
+  // above). DMA: the CDMA copies BRAM -> a non-cacheable DDR buffer, split at
+  // the BRAM wrap into two contiguous transfers. SINGLE: clean but slow
+  // word-by-word Xil_In32 (the conceptual reference / 210 MHz fallback).
+  uint32_t *pkt_buf;
+#if BRAM_READ_METHOD == BRAM_READ_DMA
+  // Staging RING: the send is zero-copy (PBUF_REF), so rotate the staging slot to
+  // avoid clobbering a slot whose TX BD is still pending (see the broadband no-loss
+  // notes). 128 * 2 KB = 256 KB inside the 1 MB pl_dma_staging.
+  #define STAGING_SLOT_BYTES 2048u
+  #define N_STAGING_SLOTS    128u
+  pkt_buf = (uint32_t *)(DMA_BUF_ADDR + (uintptr_t)staging_slot * STAGING_SLOT_BYTES);
+  staging_slot = (staging_slot + 1u) % N_STAGING_SLOTS;
+  int derr;
+  XTime t_dma0; XTime_GetTime(&t_dma0);     // perf: CDMA transfer timer
+  derr = pl_stream_dma_frame(pkt_buf, BRAM_BASE_ADDR, BRAM_SIZE_WORDS,
+                             ps_read_address, current_packet_size);
+  XTime t_dma1; XTime_GetTime(&t_dma1);
+  dma_ticks_last = (uint32_t)(t_dma1 - t_dma0);
+  if (dma_ticks_last > dma_ticks_max) dma_ticks_max = dma_ticks_last;
+  if (derr) dma_errors++;
+#else  // BRAM_READ_SINGLE -- clean 1-beat reads, but too slow for 0xFF at 131 MHz
+  pkt_buf = udp_packet_buffer;
+  for (uint32_t i = 0; i < current_packet_size; i++) {
+    uint32_t src = (ps_read_address + i) % BRAM_SIZE_WORDS;
+    pkt_buf[i] = Xil_In32(BRAM_BASE_ADDR + src * 4);  // DMA-EXEMPT: BRAM_READ_SINGLE reference reader (compile-time fallback, not the default DMA path)
+  }
+#endif
+
+  // NO-LOSS bounded retry (broadband is archival): retry the send instead of
+  // dropping. udp_sendto returns ERR_MEM on a transient TX-BD-ring-full (the GEM
+  // reaps lazily, no TX-done ISR); the ring drains autonomously and each udp_sendto
+  // reaps completed BDs, so a fresh attempt recovers the packet. Bounded so a
+  // sustained stall degrades to a drop; the staging ring + ~100-packet PL BRAM
+  // absorb the backlog. (PAUSErx=0/TXSR=TXGO confirmed these drops are benign
+  // transient ring-full, not flow control or a TX error.)
+  #define TX_MAX_ATTEMPTS 64
+  uint32_t packet_bytes = current_packet_size * BYTES_PER_WORD;
+  ip_addr_t dest_ip;
+  dest_ip.addr = udp_dest_ip;
+
+  XTime t_send0; XTime_GetTime(&t_send0);
+  err_t result = ERR_MEM;
+  uint32_t attempt = 0;
+  for (; attempt < TX_MAX_ATTEMPTS; attempt++) {
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, packet_bytes, PBUF_REF);
+    if (p != NULL) {
+      p->payload = (void*)pkt_buf;
+      result = udp_sendto(udp, p, &dest_ip, udp_dest_port);
+      pbuf_free(p);
+      if (result == ERR_OK) break;
+      bb_send_retries++;
+    } else {
+      bb_pbuf_retries++;
+    }
+    for (volatile int s = 0; s < 120; s++) { }   // let the GEM make TX progress
+  }
+  XTime t_send1; XTime_GetTime(&t_send1);
+  send_ticks_last = (uint32_t)(t_send1 - t_send0);
+  if (send_ticks_last > send_ticks_max) send_ticks_max = send_ticks_last;
+
+  if (result == ERR_OK) {
+    udp_packets_sent++;
+    if (attempt > 0) bb_send_recovered++;   // needed >=1 retry but got through (no loss)
+  } else {
+    send_message("UDP Send Error: %d (after %u retries)\r\n", result, (unsigned)attempt);
+    udp_send_errors++;
+    bb_send_err++;
+    bb_last_send_err = (int32_t)result;
+    record_bb_drop();
+  }
+
+  // Update read pointer with variable packet size
+  ps_read_address = (ps_read_address + current_packet_size) % BRAM_SIZE_WORDS;
+  packets_received_count++;
+
+  // perf: full receive->transmit time for this packet (the 33us-budget metric)
+  XTime t_loop1; XTime_GetTime(&t_loop1);
+  loop_ticks_last = (uint32_t)(t_loop1 - t_loop0);
+
+  // perf: worst-case capture -- snapshot the breakdown the instant a new max is
+  // set, so we see WHAT dominated the worst packet (cdma vs send vs other).
+  if (loop_ticks_last > loop_ticks_max) {
+    loop_ticks_max = loop_ticks_last;
+    worst_pkt_index   = packets_received_count;
+    worst_cdma_ticks  = dma_ticks_last;
+    worst_send_ticks  = send_ticks_last;
+    // other = loop - cdma - send (clamp; the three samples are taken at slightly
+    // different instants so rounding can make the sum momentarily exceed loop)
+    uint32_t accounted = dma_ticks_last + send_ticks_last;
+    worst_other_ticks = (loop_ticks_last > accounted) ? (loop_ticks_last - accounted) : 0;
+  }
+
+  // perf: distribution + over-budget frequency. Convert this packet's
+  // recv->transmit ticks to microseconds against the histogram edges. The 33.3 us
+  // budget is one sample period at 30 kHz.
+  if (perf_timer_hz) {
+    uint32_t loop_us = (uint32_t)(((uint64_t)loop_ticks_last * 1000000ULL) / perf_timer_hz);
+    int b;
+    if      (loop_us <  16) b = 0;
+    else if (loop_us <  25) b = 1;
+    else if (loop_us <  33) b = 2;
+    else if (loop_us <  50) b = 3;
+    else if (loop_us < 100) b = 4;
+    else                    b = 5;
+    loop_hist[b]++;
+    if (loop_us >= 33) over_budget_count++;   // 33.3 us budget; >=33 us is over
+  }
+
+  return 1;  // Success
 }
 
 // ---------------------------------------------------------------------------
@@ -121,8 +300,8 @@ void lfp_stream_service(void)
             break;                      // retry the SAME frame next call
         }
 
-        err_t e = pl_stream_send_frame(lfp_pcb, pkt, frame_words * 4,
-                                       &lfp_pbuf_alloc_fail);
+        err_t e = lfp_send_frame(lfp_pcb, pkt, frame_words * 4,
+                                 &lfp_pbuf_alloc_fail);
         if (e != ERR_OK) {
             // Do NOT advance: the ring holds 100+ frames of slack, so retrying
             // this frame next call is lossless. Advancing unconditionally would

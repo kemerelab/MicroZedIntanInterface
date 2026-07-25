@@ -109,6 +109,28 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 #define MAX_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MAX_PACKET_DATA_WORDS) // 154 words
 #define MIN_WORDS_PER_PACKET    (PACKET_HEADER_WORDS + MIN_PACKET_DATA_WORDS) // 32 words
 
+// ---- Capture-BRAM read method ----------------------------------------------
+// The PS M_AXI_GP master corrupts long *burst* reads of the capture BRAM (the
+// 0xFF dual-port dropout). What we learned chasing it:
+//   SINGLE - word-by-word Xil_In32. CLEAN by construction: each read is its own
+//            1-beat AXI transaction, so it never issues the burst that the GP
+//            master mishandles. But it is latency-bound and too slow to sustain
+//            0xFF (256 ch, 150-word packets) at the 131.25 MHz AXI clock.
+//            Raising the AXI clock to 210 MHz DID make single-beat fast enough --
+//            but 210 MHz is over the -1 part's M_AXI_GP ~150 MHz spec
+//            (clk_out2 also clocks the GP master), so it is bench-only, not
+//            shippable. Kept here as the conceptual reference / fallback.
+//   DMA    - an AXI CDMA (a PL master) copies each packet BRAM -> DDR over
+//            S_AXI_HP0 (see pl_dma.c), taking the PS GP master off the bulk-read
+//            path entirely. Clean at full bandwidth, in-spec at 131.25 MHz, and
+//            it frees core 0. This is the fix. DEFAULT.
+// (A removed third option, inline-`ldmia` chunked CPU bursts, was a burst over
+//  the same broken GP master AND its asm scrambled word order -> wrong magic;
+//  see git history. Don't reintroduce CPU bursts of the BRAM.)
+#define BRAM_READ_DMA     0
+#define BRAM_READ_SINGLE  1
+#define BRAM_READ_METHOD  BRAM_READ_DMA
+
 // ============================================================================
 // AXI LITE CONTROL INTERFACE
 // ============================================================================
@@ -496,6 +518,10 @@ extern uint32_t worst_pkt_index, worst_cdma_ticks, worst_send_ticks, worst_other
 extern uint32_t loop_hist[PERF_HIST_BUCKETS];
 // TX drop diagnostics
 extern uint32_t bb_pbuf_alloc_fail, bb_send_err;
+// Broadband NO-LOSS retry stats: bb_send_err counts only the drops that
+// survived every retry, so these say how often the retry actually saved a packet.
+extern uint32_t bb_send_retries, bb_pbuf_retries, bb_send_recovered;
+extern uint32_t staging_slot;   // rotating zero-copy staging-ring slot
 extern int32_t  bb_last_send_err;
 extern uint32_t lfp_pbuf_alloc_fail, lfp_send_err;
 extern int32_t  lfp_last_send_err;
@@ -645,6 +671,10 @@ uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 
 // Streaming (network.c): drain the LFP output BRAM -> UDP on the unified port
 // (udp_dest_port, default UDP_PORT), demuxed host-side by stream_type=2.
+// The two PL -> host stream services (src-core0/stream.c). Each turns a packet
+// the PL has already assembled in a BRAM ring into a UDP datagram; they differ
+// only in retry policy.
+int  process_packet_from_bram(void);   // broadband: one 30 kHz packet, retries in place
 void lfp_stream_init(void);
 void lfp_stream_service(void);   // call from the core-0 maintenance loop
 
