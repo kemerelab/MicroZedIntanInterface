@@ -108,8 +108,15 @@ def main():
     mode = 'open-loop' if target_kpps == 0 else f'paced {target_kpps:.0f}k'
     mode += ' +LFP' if lfp_every else ' broadband-only'
     if lfp_every:
-        print(f"  [mix] 1 LFP frame per {lfp_every} broadband; "
-              f"LFP drained {lfp_rate:.1f}k/s ({lfp_words_note(words)})")
+        # The per-30000 [INFO] lines above come from net.py's broadband validator
+        # and count broadband ONLY -- LFP frames are demuxed to a separate
+        # counter. Spell out the total so a 30k reading with the mix on doesn't
+        # read as "the LFP frames went missing".
+        print(f"  [mix] 1 LFP frame per {lfp_every} broadband ({lfp_words_note(words)}). "
+              f"Drained: {drain_rate:.1f}k/s broadband + {lfp_rate:.1f}k/s LFP "
+              f"= {drain_rate + lfp_rate:.1f}k/s total.")
+        print(f"        (the [INFO] Rate: lines above are BROADBAND ONLY -- "
+              f"{drain_rate:.1f}k is the expected reading, not {drain_rate + lfp_rate:.1f}k)")
     print(f"[{mode}] sender sent {sent_rate:.1f}k/s | net.py drained {drain_rate:.1f}k/s | "
           f"seq_gaps in window: {g1 - g0} | ring_drops: {sink._ring_drops}")
     if sent_rate < 29:
