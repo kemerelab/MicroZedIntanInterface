@@ -4,11 +4,11 @@
 // axi_lite_write_tb.sv
 //
 // Self-checking xsim testbench for the axi_lite_registers AXI-Lite write
-// handshake. Motivated by a hardware wedge: the historical FSM toggles
+// handshake. It guards against a specific hardware wedge: an FSM that toggles
 // awready/wready independently every cycle while the corresponding valid is
-// held, and only accepts when BOTH ready/valid pairs coincide -- if the
-// interconnect asserts AWVALID and WVALID one cycle apart, the two readys
-// oscillate in anti-phase and the write NEVER completes (CPU bus hang).
+// held, and only accepts when BOTH ready/valid pairs coincide, hangs whenever
+// the interconnect asserts AWVALID and WVALID one cycle apart -- the two readys
+// then oscillate in anti-phase and the write NEVER completes (CPU bus hang).
 //
 // Checks, for every skew in {AW first by 2,1,0, W first by 1,2}:
 //   A. the write completes (BVALID within a timeout)

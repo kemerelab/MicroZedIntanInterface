@@ -133,7 +133,7 @@ int pl_is_transmission_active(void) {
 }
 
 uint32_t pl_get_packets_sent(void) {
-    return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_2_OFFSET);  // Moved to register 2
+    return Xil_In32(PL_CTRL_BASE_ADDR + STATUS_REG_2_OFFSET);
 }
 
 int pl_is_loop_limit_reached(void) {
@@ -478,9 +478,9 @@ int pl_aux_confirm_bank(int slot, int bank, int timeout_ms) {
     return 0;
 }
 
-// pl_aux_seq_enable / pl_aux_seq_is_enabled retired: the aux engine is always on
-// (aux-default). There is no enable/disable, and hence no OFF-injection ordering
-// to manage -- clearing fast-settle now always reaches the chip.
+// The aux engine is always on, so there is deliberately no enable/disable entry
+// point here. With nothing to gate, there is no OFF-injection ordering to
+// manage: clearing fast-settle always reaches the chip.
 
 // cfg carries the AUX_CTRL fast-settle + DSP fields (bits [13:4])
 void pl_aux_set_fast_settle(uint32_t cfg) {
@@ -634,7 +634,7 @@ void pl_run_full_cable_test(void) {
 // ============================================================================
 // LFP/DSP engine control (CTRL_REG_LFP_*; see lfp_dsp_block.sv)
 // ============================================================================
-// Phase A default decimation: 30 kHz / 10 = 3 kHz LFP (was R=15 -> 2 kHz).
+// Total decimation is fixed by the cascade: 30 kHz / 10 = 3 kHz LFP.
 uint8_t  lfp_cfg_enable = 0, lfp_cfg_decim_R = 10, lfp_cfg_num_taps = 0;
 
 // The LFP lane mask MIRRORS the broadband channel-enable mask in the PL (single

@@ -48,7 +48,7 @@
 // Fixed point
 // -----------
 // Samples arrive from stage 1 as IN_W bits carrying (IN_W - OUT_W) fractional
-// bits below the original sample LSB. Coefficients are Q1.COEF_FRAC. The
+// bits below the wire-format sample LSB. Coefficients are Q1.COEF_FRAC. The
 // accumulator therefore holds COEF_FRAC + (IN_W - OUT_W) fractional bits, which
 // is what gets rounded away on the way out to the OUT_W wire format.
 // =====================================================================

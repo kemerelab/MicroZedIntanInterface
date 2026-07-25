@@ -4,10 +4,11 @@
 // File: fifo_bram_interface.sv
 // FIFO stores 128-bit words + 8-bit channel metadata, BRAM writes 32-bit words.
 // The 128-bit word holds up to EIGHT 16-bit segments (two SPI ports x 4 streams
-// each); the 8-bit channel mask selects which segments are valid and they are
-// packed tightly into the BRAM/packet. With only the low nibble set (port 0 /
-// single-port mode) the BRAM write stream is bit-identical to the original
-// 64-bit design -- the upper two chunks simply contribute zero segments.
+// each); the 8-bit channel mask selects which segments are valid, and ONLY those
+// are packed -- tightly, in ascending segment order -- into the BRAM/packet. A
+// masked-off segment leaves no hole, so the packet length tracks popcount(mask):
+// a mask confined to the low nibble emits half as many words, with the upper two
+// 32-bit chunks contributing nothing at all.
 // FSM: PROCESS_CHUNK (chunk_index 0..3), FINALIZE_PACKET.
 
 module fifo_bram_interface #(
@@ -62,7 +63,6 @@ localparam int BRAM_WORD_ADDR_WIDTH = $clog2(BRAM_DEPTH_WORDS);
 // element forces flip-flop inference plus a wide read mux and a giant reset fanout;
 // leaving the contents unreset lets Vivado infer memory instead. This mirrors the
 // no-reset pattern used by the capture buffer in bram.sv.
-// Production follow-up: convert to block RAM (requires a synchronous/registered read).
 (* ram_style = "distributed" *)
 logic [136:0] write_fifo [0:FIFO_DEPTH-1]; // 128-bit data + 8-bit mask + 1-bit flag
 logic [FIFO_PTR_WIDTH-1:0] fifo_write_ptr;
@@ -83,7 +83,7 @@ logic [1:0] chunk_index;  // 0..3 = which 32-bit chunk of the 128-bit word
 // Data processing registers
 logic [31:0] data_buffer_reg;        // Accumulates 32-bit words for BRAM
 logic        buffer_valid_reg;       // True when data_buffer_reg contains valid data
-logic        packet_end_reg;      // Used to copy packet end flag over to BRAM write as needed
+logic        packet_end_reg;      // Carries the packet-end flag across to the BRAM write
 
 logic [15:0] stash;              // Holds leftover 16-bit segment
 logic        stash_valid;        // True when stash contains valid data

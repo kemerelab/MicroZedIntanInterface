@@ -16,8 +16,8 @@
 //   - Reg-3 digout (reg22 digout_sw): substitutes the live D0 (reg3_shadow) into
 //     a WRITE(3) command's low byte on the wire
 //
-// The last two fold in the override-rewrite coverage that used to sit in
-// aux_command_engine_tb, at the level that actually reaches the chip.
+// The last two cover the override rewrite at the level that actually reaches the
+// chip -- the serialized wire, not the engine's internal signals.
 //
 // Run: bash programmable_logic/sim/run_aux_wire_tb.sh  ("RESULT: PASS")
 

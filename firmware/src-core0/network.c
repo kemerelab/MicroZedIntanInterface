@@ -57,10 +57,11 @@ ID   | Command          | Param1              | Param2
 #define CMD_DUMP_BRAM       0x41
 #define CMD_SET_UDP_DEST    0x50
 #define CMD_PING            0x60
-// Aux command sequencer / override layer (Epic A)
+// Aux command sequencer / override layer
 #define CMD_AUX_WRITE_WORD  0x70   // param1 = slot | bank<<8 | is_len<<16; param2 = addr<<16 | data
 #define CMD_AUX_BANK_SELECT 0x71   // param1 = slot; param2 = bank (confirms swap before ACK)
-// 0x72 retired (was CMD_AUX_SEQ_EN): the aux command engine is always on
+// 0x72 is unassigned and must stay so: the aux command engine is always on, so
+// there is no enable command, and a host that sends 0x72 must get an error.
 #define CMD_READ_REGISTER   0x73   // param1 = reg; responds 4-byte {cipo1,cipo0} result
 #define CMD_WRITE_REGISTER  0x74   // param1 = reg; param2 = value; responds 4-byte echo
 #define CMD_SET_FAST_SETTLE 0x75   // param1 = amp: sw | gpio_en<<1 | pin<<4; param2 = dsp: same layout
@@ -282,7 +283,7 @@ void collect_status_data(status_response_t* status) {
     status->worst_cdma_ticks  = worst_cdma_ticks;
     status->worst_send_ticks  = worst_send_ticks;
     status->worst_other_ticks = worst_other_ticks;
-    // TX drop diagnostics (v1.6)
+    // TX drop diagnostics
     status->bb_pbuf_alloc_fail  = bb_pbuf_alloc_fail;
     status->bb_send_err         = bb_send_err;
     status->bb_last_send_err    = bb_last_send_err;
@@ -302,9 +303,9 @@ void collect_status_data(status_response_t* status) {
     // RHD chip register mirror (commanded state of regs 0..21)
     memcpy(status->rhd_reg, rhd_reg_shadow, sizeof(status->rhd_reg));
 
-    // LFP/DSP engine config (host-set) + live status. The lane mask now MIRRORS
-    // the broadband channel-enable mask (single source of truth), so report the
-    // live broadband mask rather than a separate LFP mask.
+    // LFP/DSP engine config (host-set) + live status. The lane mask MIRRORS the
+    // broadband channel-enable mask (single source of truth), so report the live
+    // broadband mask rather than a separate LFP mask.
     status->lfp_enable       = lfp_cfg_enable;
     status->lfp_lane_mask    = pl_get_current_channel_enable() & 0xFF;
     status->lfp_decim_R      = lfp_cfg_decim_R;
@@ -563,9 +564,10 @@ static void process_command(struct tcp_pcb *tpcb, cmd_packet_t *cmd) {
                          cmd->param2 & 0xFF, LFP_DECIM_TOTAL);
             break;
 
-        // CMD_LFP_SET_CHANNELS is DEPRECATED: the LFP lane mask now mirrors the
-        // broadband channel-enable mask (set_channels) -- single source of truth.
-        // Accept-and-ignore so older hosts don't error; it no longer sets a mask.
+        // CMD_LFP_SET_CHANNELS sets nothing. The LFP lane mask mirrors the
+        // broadband channel-enable mask (set_channels) -- single source of
+        // truth -- so this command is accepted and ignored rather than erroring,
+        // and it must NOT be given a mask register of its own.
         case CMD_LFP_SET_CHANNELS:
             send_message("Binary Command: LFP_SET_CHANNELS ignored "
                          "(lane mask mirrors broadband channel_enable)\r\n");

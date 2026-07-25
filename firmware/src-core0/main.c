@@ -66,14 +66,14 @@ uint32_t worst_pkt_index = 0;                       // packet idx of the worst l
 uint32_t worst_cdma_ticks = 0, worst_send_ticks = 0, worst_other_ticks = 0;
 uint32_t loop_hist[PERF_HIST_BUCKETS] = {0};        // recv->transmit time distribution
 
-// TX drop diagnostics (v1.6): split udp_send_errors by stream + failure mode and
+// TX drop diagnostics: split udp_send_errors by stream + failure mode and
 // record WHEN drops happen. Each zero-copy PBUF_REF send holds one MEMP_PBUF
 // entry (MEMP_NUM_PBUF, shared by broadband + LFP) until the GEM TX-done reaps
 // it; pbuf_alloc()==NULL => that pool is momentarily empty. Declared before
 // perf_reset() so it can clear them. Cleared by CMD_PERF_RESET.
 uint32_t bb_pbuf_alloc_fail = 0, bb_send_err = 0;
 int32_t  bb_last_send_err = 0;
-// NO-LOSS retry stats (bb_send_err now = drops after exhausting all retries).
+// NO-LOSS retry stats: bb_send_err counts only drops that survived every retry.
 uint32_t bb_send_retries = 0, bb_pbuf_retries = 0, bb_send_recovered = 0;
 uint32_t lfp_pbuf_alloc_fail = 0, lfp_send_err = 0;
 int32_t  lfp_last_send_err = 0;
@@ -501,7 +501,7 @@ void process_command_flags(void) {
 // Publish a binary status snapshot to shared memory for core 1 to format/print.
 // Cheap, bounded, non-blocking: ~15 PL register reads + plain stores, no string
 // formatting and no print ring. seqlock (odd while writing) lets core 1 read a
-// consistent snapshot. This is what replaces the old core-0 console flood.
+// consistent snapshot. Core 0 does no console I/O of its own on this path.
 static void publish_status_snapshot(void) {
   uint32_t s0 = psmon->seq;
   psmon->seq = s0 | 1u;          // mark odd: update in progress
@@ -548,11 +548,11 @@ static void publish_status_snapshot(void) {
 // ---- GEM RX-hang self-heal (Zynq-7000 SI#692601) ---------------------------
 // The GEM RX can latch up ("used-bit hang"): RXSR sets BUFFNA (b0) and/or RXOVR
 // (b2), the RX DMA stops, and the MAC receives nothing (even though TX keeps
-// working) until reset. This was the "connect during boot -> unreachable until
-// power-cycle" failure. Recover by toggling RXEN (vendor SI#692601 workaround) and
-// clearing the sticky RX status bits, GATED on the actual hang bits so a healthy/
-// idle RX is never touched (the old resetrx toggled on merely-idle RX and regressed
-// normal boots). Cheap: one register read per call when there's no hang.
+// working) until reset. It presents as "connect during boot -> board unreachable
+// until power-cycle". Recover by toggling RXEN (vendor SI#692601 workaround) and
+// clearing the sticky RX status bits, GATED on the actual hang bits: toggling
+// RXEN on a merely-idle RX disturbs a healthy boot, so a healthy/idle RX must
+// never be touched. Cheap: one register read per call when there's no hang.
 #define GEM_BASE          XPAR_XEMACPS_0_BASEADDR
 #define GEM_NWCTRL_OFF    0x000u
 #define GEM_RXSR_OFF      0x020u

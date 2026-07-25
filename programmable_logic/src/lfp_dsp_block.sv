@@ -27,8 +27,8 @@
 // Stage 2 computes several lanes at once, so its outputs do NOT arrive in wire
 // order. Rather than buffer and reorder a frame, each sample is written to the
 // BRAM address implied by its channel: two 16-bit samples share a 32-bit word
-// and the byte-write enables select the half. Arrival order stops mattering,
-// and the old sequential pack state machine disappears.
+// and the byte-write enables select the half. Arrival order therefore does not
+// matter, and no sequential packing state is needed.
 //
 // Timestamp convention
 // --------------------
@@ -107,7 +107,8 @@ module lfp_dsp_block #(
     // -----------------------------------------------------------------
     // Control unpack. The lane mask MIRRORS the broadband channel-enable mask
     // (single source of truth), so the LFP filters exactly the broadband-enabled
-    // lanes; lfp_cfg[15:8] is kept on the wire but no longer drives the engine.
+    // lanes. lfp_cfg[15:8] is a reserved field the engine deliberately ignores:
+    // a host may still write a lane mask there, and it must have no effect.
     // The decimation is structural (/2 then /5), so only the tap count is
     // configurable here.
     // -----------------------------------------------------------------
@@ -137,8 +138,8 @@ module lfp_dsp_block #(
     endgenerate
 
     // -----------------------------------------------------------------
-    // Coefficient upload. One strobe-toggle window as before, plus a stage
-    // select so the host can load either filter:
+    // Coefficient upload: a single strobe-toggle window, with a stage select so
+    // the host can load either filter through it:
     //   lfp_strobe[0] toggle -> write one coefficient at the auto-incrementing ptr
     //   lfp_strobe[1] clear  -> reset the pointer (do this before each upload)
     //   lfp_strobe[2] stage  -> 0 = stage 1 (halfband), 1 = stage 2 (decimator)
@@ -263,7 +264,10 @@ module lfp_dsp_block #(
     wire [LFP_WORD_AW-1:0] sample_words =
          LFP_WORD_AW'((num_samples_word + 32'd1) >> 1);     // 2 samples per word
 
-    wire [31:0] cfg_word = {ov_frame, 7'd0, {1'b0, poly_taps},
+    // AUX0 = lane_mask | decim_R<<8 | num_taps<<16 | overrun<<24. The overrun
+    // BIT POSITION is contract, not a detail: net.py and the plugin both read
+    // (cfg >> 24) & 1, so putting it anywhere else silently hides every overrun.
+    wire [31:0] cfg_word = {7'd0, ov_frame, {1'b0, poly_taps},
                             8'(DECIM_TOTAL), lane_mask};
 
     // Where this sample belongs in the payload.

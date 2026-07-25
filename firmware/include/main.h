@@ -167,9 +167,9 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // LFP output BRAM (decimated stream, PS read via 2nd axi_bram_ctrl)
 #define LFP_BRAM_BASE_ADDR          0x84000000
 #define LFP_BRAM_SIZE_WORDS         16384      // 64 KB ring of 32-bit words (2x16-bit samples)
-// Unified-port format: the LFP band now streams on the SAME UDP port as
-// broadband (UDP_PORT / udp_dest_port, default UDP_PORT), demuxed host-side by
-// stream_type. The former separate LFP_UDP_PORT (5001) send path is REMOVED.
+// Unified-port format: the LFP band streams on the SAME UDP port as broadband
+// (udp_dest_port, default UDP_PORT), demuxed host-side by stream_type. There is
+// deliberately no second data port -- every PL stream shares this one.
 
 // CTRL_REG_AUX_CTRL bit fields
 // Program live-bank select: only slot 0 (the sole cycling program -- the accel
@@ -300,42 +300,22 @@ void beacon_send(void);   // broadcast one beacon (call ~1 Hz while link is up)
 // Protocol version
 #define PROTOCOL_VERSION               1
 #define FIRMWARE_VERSION_MAJOR         2
-#define FIRMWARE_VERSION_MINOR         1   // 2.1.0.0: aux command engine (from 2.0.0.0) + the on-PL LFP/DSP
-                                           //      engine re-added (stream_type=2 producer). ADDITIVE over
-                                           //      2.0.0.0: the broadband + aux wire contract is UNCHANGED, so a
-                                           //      2.0.x host still interoperates; LFP is a new stream on the SAME
-                                           //      unified port (0x6800, stream_type=2). LFP control regs 25..27
-                                           //      + status reg 13; PL N_CTRL 28, N_STATUS 14. status_response_t
-                                           //      wire size 288 B (264 aux + 24 LFP); keep net.py get_status,
-                                           //      the _Static_assert, AND the plugin parseStatusResponse in sync.
-                                           //      Unified 8-word header UNCHANGED (broadband=stream_type 1,
-                                           //      LFP=stream_type 2).
-                                           // 2.0.0.0: aux command-path re-architecture -- aux_seq_en retired
-                                           //      (CMD_AUX_SEQ_EN 0x72 gone), always-on aux_command_engine, reg22
-                                           //      semantics, accel slot-0 intra-packet reply @ data word 34.
-                                           // 1.x: broadband-only / on-PL LFP / prior internal history.
-                                           // 1.7: lwIP TX headroom -- n_tx_descriptors 64->256, mem_size
-                                           //      128K->256K (BSP lwip220 config) to eliminate the rare
-                                           //      udp_sendto ERR_MEM drops under ISR-stall catch-up bursts.
-                                           //      NOT the pbuf pool (pbuf_alloc never failed). Firmware
-                                           //      sources + struct unchanged (still 288 B); BSP regen only.
-                                           // 1.6: OCM staging REVERTED (back to DDR; OCM didn't help --
-                                           //      the recv->transmit tail is EMAC TX-done ISR preemption,
-                                           //      not DDR contention). Adds TX-drop instrumentation: split
-                                           //      udp_send_errors into bb/lfp pbuf-alloc-fail vs sendto-err
-                                           //      (+ err code), first/last drop packet index, and an 8-deep
-                                           //      drop-index ring; reports MEMP_NUM_PBUF. get_status -> 288 B.
-                                           // 1.4: recv->transmit spike instrumentation -- split the
-                                           //      timed window into CDMA / udp_sendto / other, capture
-                                           //      the worst packet's breakdown, a 6-bucket recv->transmit
-                                           //      histogram + over-budget count, and CMD_PERF_RESET to
-                                           //      clear the window. get_status grows to 220 bytes.
-                                           // 1.3: LFP default R=10 (3 kHz) + dual-MAC engine;
-                                           //      analytic chirp NCO (CTRL_REG_3). get_status adds
-                                           //      chirp config. Status wire = 168 bytes.
-                                           // 1.2: AXI-CDMA read path; get_status config tracking
-                                           //      (aux_ctrl + RHD register mirror); fast-settle/DSP/
-                                           //      digout via TTL/GPIO.
+// MAJOR bumps when the wire contract breaks; MINOR when it only grows.
+#define FIRMWARE_VERSION_MINOR         1   // 2.1.0.0: aux command engine + the on-PL LFP/DSP engine
+                                           //      (a stream_type=2 producer). ADDITIVE over 2.0.0.0 --
+                                           //      the broadband + aux wire contract is UNCHANGED, so a
+                                           //      2.0.x host still interoperates. LFP is a second stream
+                                           //      on the SAME unified port (0x6800, stream_type=2), with
+                                           //      the unified 8-word header unchanged. LFP control regs
+                                           //      25..27 + status reg 13; PL N_CTRL 28, N_STATUS 14.
+                                           //      status_response_t wire size 288 B (264 aux + 24 LFP):
+                                           //      keep net.py get_status, the _Static_assert, AND the
+                                           //      plugin parseStatusResponse in sync.
+                                           // 2.0.0.0: the current contract baseline. There is no aux
+                                           //      enable command (0x72 unassigned), the aux command
+                                           //      engine is always on, reg22 carries the override
+                                           //      semantics, and the accel slot-0 reply rides in-frame at
+                                           //      data word 34. A 1.x host does not interoperate.
 #define FIRMWARE_VERSION_PATCH         0
 #define FIRMWARE_VERSION_BUILD         0
 #define FIRMWARE_VERSION_WORD          ((FIRMWARE_VERSION_MAJOR << 24) | \
@@ -395,7 +375,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  aux_idx[3];        // per-slot sequence index
     uint8_t  reserved5[3];
 
-    // DMA / performance instrumentation (24 bytes; appended -- keep net.py in sync)
+    // DMA / performance instrumentation (24 bytes -- keep net.py in sync)
     // Raw global-timer ticks; host converts to us with timer_hz.
     uint32_t dma_errors;        // CDMA read failures since boot
     uint32_t dma_ticks_last;    // last CDMA transfer (ticks)
@@ -432,8 +412,8 @@ typedef struct __attribute__((packed)) {
     uint16_t chirp_rate;        // sweep_rate field (12-bit)
     uint8_t  chirp_reserved[2];
 
-    // recv->transmit spike instrumentation (52 bytes; appended -- keep net.py in
-    // sync). All times are raw global-timer ticks (host converts with timer_hz).
+    // recv->transmit spike instrumentation (52 bytes -- keep net.py in sync).
+    // All times are raw global-timer ticks (host converts with timer_hz).
     // The recv->transmit window (loop_ticks) is split into CDMA / udp_sendto /
     // other so the host can attribute the occasional ~40 us spike. The worst-case
     // snapshot is captured the instant a new loop_ticks_max is set, so we see WHAT
@@ -449,7 +429,7 @@ typedef struct __attribute__((packed)) {
     // recv->transmit histogram, microsecond bucket edges [<16,16-25,25-33,33-50,50-100,>=100]
     uint32_t loop_hist[6];      // counts per bucket
 
-    // TX drop diagnostics (v1.6): split udp_send_errors by stream + failure mode,
+    // TX drop diagnostics: split udp_send_errors by stream + failure mode,
     // and record WHEN drops happen. Each zero-copy PBUF_REF send holds one
     // MEMP_PBUF entry (MEMP_NUM_PBUF, shared by broadband + LFP) until the GEM
     // TX-done reaps it; pbuf_alloc()==NULL => that pool was momentarily empty,
@@ -514,7 +494,7 @@ extern uint32_t send_ticks_last, send_ticks_max;
 extern uint32_t over_budget_count;
 extern uint32_t worst_pkt_index, worst_cdma_ticks, worst_send_ticks, worst_other_ticks;
 extern uint32_t loop_hist[PERF_HIST_BUCKETS];
-// TX drop diagnostics (v1.6)
+// TX drop diagnostics
 extern uint32_t bb_pbuf_alloc_fail, bb_send_err;
 extern int32_t  bb_last_send_err;
 extern uint32_t lfp_pbuf_alloc_fail, lfp_send_err;
@@ -653,7 +633,7 @@ void stop_udp_stream(void);
 // LFP/DSP ENGINE (Tier-1) -- control + streaming
 // ============================================================================
 // Control (pl_control.c): config latches while streaming is stopped.
-// NOTE: the LFP lane mask is NO LONGER a separate parameter -- it MIRRORS the
+// NOTE: the LFP lane mask is NOT a separate parameter -- it MIRRORS the
 // broadband channel-enable mask in the PL (single source of truth). The PL
 // builds the complete LFP wire packet (header + samples) in its output BRAM, so
 // the PS just CDMAs it into a pbuf and sends it.

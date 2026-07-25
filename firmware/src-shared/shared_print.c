@@ -194,13 +194,13 @@ void send_message(const char *format, ...) {
 
 
     // NON-BLOCKING: if the target ring slot is still unread (ring full), DROP
-    // the message and count it instead of spinning. The old code waited up to
-    // 100*100us = 10 ms here, which stalled the core-0 data pump and corrupted
-    // packets under load. Routine status no longer goes through this ring (core
-    // 1 reads the psmon snapshot directly), so the ring carries only rare
-    // ad-hoc event strings -- safe to drop the string under pressure; the
-    // underlying counts/flags survive in psmon, and events_dropped is visible
-    // in the status snapshot.
+    // the message and count it instead of spinning. Waiting here is not an
+    // option -- a full ring can take ~10 ms to clear, which stalls the core-0
+    // data pump and corrupts packets under load. Routine status does not go
+    // through this ring (core 1 reads the psmon snapshot directly), so it
+    // carries only rare ad-hoc event strings -- safe to drop the string under
+    // pressure; the underlying counts/flags survive in psmon, and
+    // events_dropped is visible in the status snapshot.
     uint32_t write_idx = print_buffer->write_idx;
     if (print_buffer->entries[write_idx].data_present == 1) {
         psmon->events_dropped++;

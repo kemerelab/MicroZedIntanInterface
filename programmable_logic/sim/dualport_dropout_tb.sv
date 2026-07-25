@@ -3,7 +3,7 @@
 
 // dualport_dropout_tb.sv
 //
-// Reproduces the Phase-3 "neural channel dropout" report AND verifies the
+// Reproduces the "neural channel dropout" failure AND verifies the
 // unified packet format (docs/unified-packet-format.md): in debug mode with
 // channel_enable = 0xFF, specific SPI cycles' data come out stuck/wrong. Runs
 // the FULL datapath (data_generator = core + fifo_bram_interface) and captures
@@ -15,15 +15,14 @@
 // packets is "stuck" -> the bug. Header words may legitimately repeat, so only
 // the data region (offset >= HDR) is judged.
 //
-// UNIFIED HEADER + NO-DATA-LOSS assertions (this branch):
+// UNIFIED HEADER + NO-DATA-LOSS assertions:
 //   * the 14-word header decodes: w0 MAGIC=0xCAFEBABE, w1 stream_type=1/ver=1,
 //     w2/w3 timestamp, w4 per-stream SEQ, w5 AUX0=channel_enable|num_data_words<<8,
 //     w6 AUX1=digital_in/aux metadata, w7 RSVD=0.
 //   * the per-stream SEQ advances by exactly 1 per packet (the loss check).
-//   * BROADBAND CONTENT PRESERVED: every DATA word still matches the SAME sine
-//     reference as the original format (the framing changed, the data did not),
-//     and the timestamp advances by exactly 1 per packet -- so re-framing lost
-//     nothing.
+//   * BROADBAND CONTENT INTACT: every DATA word matches an independently
+//     computed sine reference and the timestamp advances by exactly 1 per
+//     packet, so the header framing perturbs no payload sample.
 //
 // Run: bash programmable_logic/sim/run_dualport_dropout_tb.sh  ("RESULT: PASS")
 
@@ -74,9 +73,9 @@ initial begin
     end
 end
 
-// Expected 4 packed BRAM words for cycle `c` at debug index `ddi`. This is the
-// SAME reference the original testbench used -- the data did not change, only the
-// framing -- so a match proves the broadband DATA content is preserved.
+// Expected 4 packed BRAM words for cycle `c` at debug index `ddi`, derived from
+// the debug sine LUT independently of the DUT. A match proves the broadband DATA
+// content is exactly what the acquisition core should have produced.
 function automatic void ref_cycle_words(input int c, input int ddi, output logic [31:0] w [0:3]);
     int coff = (c >= 2) ? (c - 2) : 0;
     int bp  = (ddi + coff) & 9'h1FF;
@@ -154,7 +153,7 @@ initial begin
                 if (hw[7] !== 32'h0)
                     err($sformatf("RSVD (w7) = 0x%08h, expected 0", hw[7]));
 
-                // ---- stuck-word check (the original dropout test), data region ----
+                // ---- stuck-word check (the dropout symptom), data region ----
                 for (int w = HDR; w < PKT; w++) begin
                     n_checks++;
                     if (wseq[a+w] === wseq[b+w]) begin
@@ -172,10 +171,10 @@ initial begin
                 else
                     $display("no stuck data words: all %0d data words advance between packets", PKT-HDR);
 
-                // ---- BROADBAND CONTENT PRESERVED: brute-force the debug index,
-                //      then compare EVERY data word to the SAME sine reference
-                //      the original format used. A 0-mismatch match proves the data
-                //      payload is byte-identical to before (only framing changed). ----
+                // ---- BROADBAND CONTENT INTACT: brute-force the debug index,
+                //      then compare EVERY data word to the independent sine
+                //      reference. Zero mismatches proves the payload is exactly
+                //      the acquisition data the core should emit. ----
                 begin
                     int best_ddi = -1, best_mism = 99999;
                     for (int ddi = 0; ddi < 512; ddi++) begin

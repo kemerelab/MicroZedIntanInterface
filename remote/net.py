@@ -197,7 +197,7 @@ CMD_PING = 0x60
 # Aux command sequencer / override layer (mirror firmware/src-core0/network.c)
 CMD_AUX_WRITE_WORD = 0x70   # param1 = slot | bank<<8 | is_len<<16; param2 = addr<<16 | data
 CMD_AUX_BANK_SELECT = 0x71  # param1 = slot; param2 = bank
-# 0x72 retired (was CMD_AUX_SEQ_EN): the aux command engine is always on
+# 0x72 is unassigned: the aux command engine is always on, so there is no enable command
 CMD_READ_REGISTER = 0x73    # param1 = reg -> 4-byte {cipo1, cipo0} response
 CMD_WRITE_REGISTER = 0x74   # param1 = reg; param2 = value -> 4-byte echo response
 CMD_SET_FAST_SETTLE = 0x75  # param1 = amp: sw|gpio_en<<1|pin<<4; param2 = dsp: same layout
@@ -212,7 +212,7 @@ PACKET_RATE_HZ     = 30000  # one phase update per broadband packet
 # LFP/DSP engine (Tier-1) -- configure while disabled, then enable
 CMD_LFP_ENABLE = 0x80       # param1 = 0/1
 CMD_LFP_SET_PARAMS = 0x81   # param1 ignored (decimation is structural /10), param2 = num_taps
-CMD_LFP_SET_CHANNELS = 0x82 # DEPRECATED: LFP lane mask now mirrors broadband channel_enable (firmware accepts-and-ignores)
+CMD_LFP_SET_CHANNELS = 0x82 # sets nothing: the LFP lane mask mirrors broadband channel_enable (firmware accepts-and-ignores)
 CMD_LFP_WRITE_COEF = 0x83   # param1 = [0] clear-ptr-first | [1] stage; param2 = 18-bit signed coef
 LFP_STAGE_HALFBAND = 0      # stage 1: 11-tap halfband, 30 -> 15 kHz
 LFP_STAGE_DECIMATOR = 1     # stage 2: <=120-tap decimator, 15 -> 3 kHz
@@ -300,9 +300,8 @@ DETECTION_LOOP_COUNT = 0          # 0 = infinite; finite counts emit zero UDP
 DETECTION_CHANNEL_ENABLE = 0xFF   # both ports, all 8 streams -> A and B parallel
 
 # The unified broadband header is 14 words; scoreChannel slices the data block
-# from here. net.py previously sliced packet[8:] -- that was a bug (it read 6
-# header/sub-block words as data and mis-located every lane), matching the same
-# bug the plugin fixed.
+# from here. Slicing at 8 (the length of the COMMON header alone) would read the
+# 6 broadband-specific header words as data and mis-locate every lane.
 CABLE_TEST_DATA_OFFSET_WORDS = 14  # == BB_HEADER_WORDS (defined later in module)
 
 # Detection packet with ce=0xFF: 14-word unified header + 140 data = 154 words.
@@ -1191,9 +1190,9 @@ class DataValidator:
         try:
             # Full unpack: the aux command path (echoes in words 6/8, the slot-0 accel
             # reply at data word 34) IS what we're testing, so every data word must be
-            # available -- and the historical net.py did this full unpack at 30k, so it
-            # was never the throughput problem. struct.unpack accepts the memoryview
-            # from recv_into directly (no copy). words is a plain int tuple, safe to keep.
+            # available. A full unpack sustains 30k packets/s and is not the throughput
+            # bottleneck. struct.unpack accepts the memoryview from recv_into directly
+            # (no copy). words is a plain int tuple, safe to keep.
             words = struct.unpack(f'<{self.expected_packet_size_words}I', data)
             self.last_packet_words = words
 
@@ -1622,69 +1621,6 @@ def _kaiser_window(num_taps, beta):
     return [i0(beta * math.sqrt(1 - ((n - a) / a) ** 2)) / i0(beta)
             for n in range(num_taps)]
 
-def design_lfp_lowpass(num_taps, cutoff_hz=1250.0, fs=30000.0, window="kaiser",
-                       beta=6.5):
-    """Windowed-sinc low-pass FIR, unity DC gain, quantized to Q1.17 (18-bit
-    signed). The decimation anti-alias; place cutoff (-6 dB) inside the
-    transition band fs/(2*R_pass) .. fs/(2*R). For R=10 (3 kHz, Nyquist 1.5 kHz)
-    the default ~131-tap Kaiser(beta=6.5) gives <1 dB ripple to 1 kHz, ~21 dB at
-    1.5 kHz, and >46 dB rejection of any band that folds onto the 0-1 kHz
-    passband. 'hamming' reproduces the legacy 2 kHz designer."""
-    import math
-    fc = cutoff_hz / fs                       # normalized cutoff (cycles/sample)
-    M = num_taps - 1
-    if window == "kaiser":
-        win = _kaiser_window(num_taps, beta)
-    else:  # legacy Hamming
-        win = [0.54 - 0.46 * math.cos(2 * math.pi * n / M) for n in range(num_taps)]
-    h = []
-    for n in range(num_taps):
-        x = n - M / 2.0
-        s = 2 * fc if abs(x) < 1e-9 else math.sin(2 * math.pi * fc * x) / (math.pi * x)
-        h.append(s * win[n])
-    g = sum(h) or 1.0
-    scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
-    return [max(-lim, min(lim - 1, int(round(c / g * scale)))) for c in h]
-
-def design_cic_comp_fir(num_taps=43, fc=1300.0, beta=6.0,
-                        R_cic=5, n_order=4, gain_shift=10, fs_in=30000.0):
-    """Droop-compensated comp-FIR / halfband (/2) for the CIC^4(/5)+FIR(/2) = /10
-    LFP datapath (USE_CIC=1, the default build). Designed at the CIC output rate
-    fs_in/R_cic (6 kHz) via frequency sampling: the target passband response is
-    1/CIC-droop so the COMBINED /10 chain is flat to ~1 kHz (<=0.02 dB), with
-    ~ -54 dB worst alias-into-passband and unity DC gain. Quantized Q1.17.
-    MUST match programmable_logic/sim/gen_cic_chain_vectors.py exactly."""
-    import math
-    fs1 = fs_in / R_cic                       # comp-FIR input rate (6 kHz)
-    def cic_mag(f):
-        w = math.pi * f / fs_in
-        if abs(w) < 1e-12: return 1.0
-        d = R_cic * math.sin(w)
-        return (math.sin(R_cic * w) / d) ** n_order if abs(d) > 1e-15 else 1.0
-    cic_dc = (R_cic ** n_order) / (1 << gain_shift)
-    win = _kaiser_window(num_taps, beta)
-    M = num_taps - 1
-    a = M / 2.0
-    def desired(f):
-        if f > fc: return 0.0
-        dr = cic_mag(f)
-        return (1.0 / dr) if dr > 1e-6 else 1.0
-    L = 2048
-    fs_grid = [fs1 / 2 * k / L for k in range(L + 1)]
-    Hd = [desired(f) for f in fs_grid]
-    df = fs_grid[1] - fs_grid[0]
-    h = [0.0] * num_taps
-    for n in range(num_taps):
-        acc = 0.0
-        for k in range(L + 1):
-            wgt = 0.5 if (k == 0 or k == L) else 1.0
-            acc += wgt * Hd[k] * math.cos(2 * math.pi * fs_grid[k] * (n - a) / fs1)
-        h[n] = acc * df * 2.0 / (fs1 / 2) * win[n]
-    dc = sum(h) or 1.0
-    h = [c * (1.0 / cic_dc) / dc for c in h]   # combined DC gain -> unity
-    scale, lim = (1 << LFP_COEF_FRAC), (1 << 17)
-    return [max(-lim, min(lim - 1, int(round(c * scale)))) for c in h]
-
 def lfp_upload_coeffs(sock, coeffs, stage=LFP_STAGE_DECIMATOR):
     """Stream taps into one filter of the cascade through the indirect window.
 
@@ -1903,10 +1839,10 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     restarts the stream itself."""
     import math, time
     fs = 3000.0   # LFP rate (30 kHz / decim_R=10)
-    # --- preflight: confirm the board is alive and on v1.3+ firmware. The chirp /
-    #     3 kHz-LFP commands lfp_sweep needs ONLY exist in v1.3; running against a
-    #     wedged or older-image board is the usual cause of an apparent "hang".
-    #     Fail fast and clearly instead. ---
+    # --- preflight: confirm the board is alive and running an image that has the
+    #     chirp / 3 kHz-LFP commands this sweep drives. A wedged board, or one
+    #     flashed with an image that lacks them, is the usual cause of an apparent
+    #     "hang" -- fail fast and clearly instead. ---
     st = get_status(sock)
     if not st:
         print("[SWEEP] board did NOT answer get_status -- unresponsive/wedged. "
@@ -1924,7 +1860,7 @@ def measure_lfp_response(sock, f_max=1490.0, period=3.0, n_periods=2,
     # The LFP lane mask mirrors the broadband channel_enable, so select the lanes
     # via set_channels; the LFP engine then filters exactly those lanes.
     send_binary_command(sock, CMD_SET_CHANNEL_ENABLE, lane_mask & 0xFF)
-    configure_lfp(sock, datapath="cic")                     # upload CIC comp-FIR
+    configure_lfp(sock, phase="linear")                     # stage-2 linear phase
     configure_chirp(sock, f_max, period, stride=0, enable=True)  # debug+chirp on
     lfp_enable(sock, True)
     send_binary_command(sock, CMD_START)
@@ -2202,7 +2138,7 @@ def get_status(sock):
         struct.unpack('<7I', data[168:196])
     loop_hist = struct.unpack('<6I', data[196:220])
 
-    # TX drop diagnostics (v1.6, 68 bytes): split udp_send_errors into broadband
+    # TX drop diagnostics (68 bytes): split udp_send_errors into broadband
     # vs LFP, pbuf-alloc-fail (MEMP_PBUF pool empty) vs udp_sendto error (+ err
     # code), first/last drop packet index, MEMP_NUM_PBUF, and an 8-deep ring of
     # recent drop indices. err_t: ERR_MEM=-1, ERR_BUF=-2, ERR_RTE=-4, ...
@@ -2262,7 +2198,7 @@ def get_status(sock):
         'worst_send_ticks': worst_send_ticks,
         'worst_other_ticks': worst_other_ticks,
         'loop_hist': list(loop_hist),
-        # TX drop diagnostics (v1.6)
+        # TX drop diagnostics
         'bb_pbuf_alloc_fail': bb_pbuf_alloc_fail,
         'bb_send_err': bb_send_err,
         'bb_last_send_err': bb_last_send_err,
@@ -2381,7 +2317,7 @@ def print_status(status):
     print(f"Over budget (>=33 us): {status['over_budget_count']}  ({100.0*status['over_budget_count']/total:.3f}% of {total} pkts)")
     print(f"DMA errors: {status['dma_errors']}   (timer {hz/1e6:.1f} MHz)   [perf_reset to clear maxes/histogram]")
 
-    # --- TX drops (v1.6): WHY udp_send_errors happened. pbuf-alloc-fail => the
+    # --- TX drops: WHY udp_send_errors happened. pbuf-alloc-fail => the
     # shared MEMP_PBUF zero-copy pool (bb + lfp) was momentarily empty; sendto-err
     # (ERR_MEM=-1) => no TX BD/mem. first/last/ring show whether drops cluster at
     # stream start (cold/warmup) or recur in steady state. Cleared by perf_reset.
@@ -2828,14 +2764,14 @@ def tcp_control():
                 elif cmd == "hex":
                     validator.print_last_packet_hex()
                 elif cmd == "lfp_config" or cmd.startswith("lfp_config "):
-                    # lfp_config [datapath=cic|fir] [taps]  (configure while off)
-                    # default = CIC^4(/5)+halfband(/2)=/10 -> 3 kHz, 43 comp taps.
-                    # The LFP lane mask mirrors the broadband channel_enable mask
-                    # (single source of truth) -- pick lanes with set_channels.
+                    # lfp_config [linear|minimum] [taps]  (configure while off)
+                    # Selects the stage-2 filter. Both give the same magnitude
+                    # response; minimum phase costs ~4.6x less latency but
+                    # disperses waveform shape. Lanes come from set_channels.
                     parts = cmd.split()
-                    dp   = parts[1] if len(parts) > 1 else "cic"
+                    ph   = parts[1] if len(parts) > 1 else "linear"
                     taps = int(parts[2]) if len(parts) > 2 else None
-                    configure_lfp(sock, datapath=dp, num_taps=taps)
+                    configure_lfp(sock, phase=ph, num_taps=taps)
                 elif cmd == "chirp" or cmd.startswith("chirp "):
                     # chirp [f_max_hz] [period_s] [stride]  (analytic swept-sine debug)
                     parts = cmd.split()
@@ -2940,7 +2876,7 @@ def tcp_control():
                     print("  dump_bram [start] [count]")
                     print("  stats, hex, quit")
                     print("LFP / Tier-1 (unified UDP 0x6800, stream_type=2):")
-                    print("  lfp_config [cic|fir] [taps] - set datapath/taps + upload LP kernel")
+                    print("  lfp_config [linear|minimum] [taps] - upload the stage-2 filter")
                     print("  lfp_on / lfp_off    - enable / disable the engine")
                     print("  lfp_recv [n]        - capture + print decoded LFP frames")
                     print("  (LFP lane mask = the broadband channel_enable mask -- pick lanes")

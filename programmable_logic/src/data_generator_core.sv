@@ -52,7 +52,7 @@ module data_generator_core (
     // engine. Pulses on each data-word write (NOT the header), carrying the same
     // 8x16-bit lanes as fifo_write_data with the slot index (cycle_counter) and a
     // once-per-packet tick. Offset-binary->signed conversion + amplifier-slot
-    // gating happen downstream in lfp_dsp_block. See docs/lfp-dsp-engine-design.md.
+    // gating happen downstream in lfp_dsp_block. See docs/lfp.md.
     output logic        dsp_sample_valid,
     output logic [127:0] dsp_sample_data,
     output logic [5:0]  dsp_sample_slot,

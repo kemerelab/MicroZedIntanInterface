@@ -125,9 +125,9 @@ void lfp_stream_service(void)
                                        &lfp_pbuf_alloc_fail);
         if (e != ERR_OK) {
             // Do NOT advance: the ring holds 100+ frames of slack, so retrying
-            // this frame next call is lossless. (Advancing unconditionally here
-            // is what used to turn a transient pool shortage into a dropped
-            // frame and a +1 SEQ gap on the host.)
+            // this frame next call is lossless. Advancing unconditionally would
+            // turn a transient pool shortage into a dropped frame and a +1 SEQ
+            // gap on the host.
             if (e != ERR_MEM || lfp_pbuf_alloc_fail == 0) {
                 lfp_send_err++; lfp_last_send_err = (int32_t)e;
             }

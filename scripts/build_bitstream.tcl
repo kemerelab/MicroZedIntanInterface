@@ -10,8 +10,21 @@ open_project ./vivado_project/klab_project.xpr
 # the underlying RTL in sources_1. The result is a stale sub-module DCP stitched into
 # an otherwise-fresh top build -- SILENT: fresh timestamp/SHA, old logic. Reset every
 # synthesis run so all modules re-synthesize from the current sources.
-foreach r [get_runs -filter {IS_SYNTHESIS && NAME != "synth_1"}] { reset_run $r }
+set ooc_runs [get_runs -filter {IS_SYNTHESIS && NAME != "synth_1"}]
+foreach r $ooc_runs { reset_run $r }
 reset_run synth_1
+
+# Run the out-of-context modules to completion FIRST, and wait for each one by
+# name. Letting them ride along as dependencies of synth_1 is not enough:
+# `wait_on_run synth_1` returns when the TOP finishes, which can leave a child
+# checkpoint not yet linked, and implementation then fails at opt_design with
+# the module as an empty black box -- with no synthesis error anywhere, because
+# the child run itself succeeded. Waiting explicitly makes the order certain.
+if {[llength $ooc_runs]} {
+    launch_runs $ooc_runs -jobs 4
+    foreach r $ooc_runs { wait_on_run $r }
+}
+
 launch_runs synth_1 -jobs 4
 wait_on_run synth_1
 
