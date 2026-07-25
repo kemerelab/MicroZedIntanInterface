@@ -1505,18 +1505,26 @@ class UnifiedSink:
                 else:
                     self.other_pkts += 1
             elif stream_type == STREAM_TYPE_LFP:
-                self._handle_lfp(bytes(mv))   # copy: LFP frame escapes the reused buffer
+                # This is the SAME thread that has to keep up with the broadband
+                # rate, so an LFP frame must cost almost nothing unless someone
+                # is actually going to read it. Count and check SEQ in place --
+                # no copy, no slice, no lock, no list -- and only pay for a copy
+                # once a subscriber exists to receive one.
+                self.lfp_pkts += 1
+                self.lfp_bytes += n
+                seq = struct.unpack_from('<I', mv, 16)[0]      # header word 4
+                if self._lfp_last_seq is not None and \
+                        seq != (self._lfp_last_seq + 1) & 0xFFFFFFFF:
+                    self._lfp_gaps += 1
+                self._lfp_last_seq = seq
+                if self._lfp_subs:          # empty unless lfp_recv/lfp_sink is running
+                    self._fanout_lfp(bytes(mv))
             else:
                 self.other_pkts += 1
 
-    def _handle_lfp(self, data):
-        self.lfp_pkts += 1
-        self.lfp_bytes += len(data)
-        # SEQ continuity for the LFP stream (header word 4)
-        seq = struct.unpack('<I', data[16:20])[0]
-        if self._lfp_last_seq is not None and seq != (self._lfp_last_seq + 1) & 0xFFFFFFFF:
-            self._lfp_gaps += 1
-        self._lfp_last_seq = seq
+    def _fanout_lfp(self, data):
+        """Hand a copied LFP frame to every subscriber. Only reached when at least
+        one exists, which keeps the lock and the list copy off the recv path."""
         with self._lock:
             subs = list(self._lfp_subs)
         for q in subs:
