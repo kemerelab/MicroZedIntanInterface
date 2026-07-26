@@ -308,15 +308,27 @@ void lfp_stream_service(void)
 {
     if (!lfp_cfg_enable || lfp_pcb == NULL) return;
 
-    // The lane mask mirrors the broadband channel-enable (single source of
-    // truth), so the frame size follows from it.
+    const uint32_t mask = LFP_BRAM_SIZE_WORDS - 1;
+
+    // Poll the write pointer FIRST, and give up here when it has not moved.
+    // The PL publishes lfp_wr_addr only once a frame's last sample has landed,
+    // so the pointer advances in whole frames: "nothing new" is exactly a zero
+    // difference, and deciding that needs no frame size. Almost every visit
+    // ends here, because this runs once per main-loop iteration while frames
+    // arrive at only 3 kHz -- and each Xil_In32 is an AXI-Lite transaction that
+    // stalls the core until the PL answers, so the one we skip is the point.
+    uint32_t wr_word = (pl_lfp_read_status() & 0xFFFF) >> 2;   // byte addr -> word index
+    if (((wr_word - lfp_read_word) & mask) == 0) return;
+
+    // Something is waiting, so the lane mask is now worth an AXI read. It
+    // mirrors the broadband channel-enable (single source of truth) and the
+    // frame size follows from it. Read rather than cached, so it cannot go
+    // stale behind a mask change; the loop below re-checks against the real
+    // frame size, which stays the authoritative guard.
     int nlanes = __builtin_popcount(pl_get_current_channel_enable() & 0xFF);
     if (nlanes == 0) return;
     uint32_t sample_words = (uint32_t)nlanes * 16;    // popcount*32 samples, 2 per word
     uint32_t frame_words  = UNIFIED_HEADER_WORDS + sample_words;
-    const uint32_t mask   = LFP_BRAM_SIZE_WORDS - 1;
-
-    uint32_t wr_word = (pl_lfp_read_status() & 0xFFFF) >> 2;   // byte addr -> word index
 
     for (int budget = LFP_FRAMES_PER_CALL; budget > 0; budget--) {
         if (((wr_word - lfp_read_word) & mask) < frame_words) break;   // no whole frame yet
@@ -351,16 +363,17 @@ void lfp_stream_service(void)
 
 // Drain every packet the PL has finished, then return to the caller's loop.
 //
-// The drain loop lives HERE, in the same translation unit as the two functions
-// it calls, and that placement is load-bearing rather than cosmetic. Both are
-// static, so the compiler can inline them into this loop and keep the read
-// pointer and packet size in registers across iterations. When this loop sat in
-// main.c and called across to here, every packet paid a real call plus a reload
-// of each global the compiler could no longer reason about -- several
-// microseconds out of a 33 us budget, enough that the PS fell behind the PL,
-// back-pressured it through fifo_full, and dragged the acquisition rate itself
-// below 30 kHz. Keeping the loop with its callees costs main() one call per
-// outer iteration instead of one per packet.
+// The loop sits in the same translation unit as the two static functions it
+// drives, so the compiler can inline both and keep the read pointer and packet
+// size in registers across iterations. Split across TUs each packet instead
+// pays a real call plus a reload of every global the compiler can no longer
+// reason about. This costs main() one call per outer iteration rather than one
+// per packet, which is the right shape for a loop on the 33 us sample budget.
+//
+// Treat that as an argument for keeping related code together, not as a
+// measured fix for any particular throughput problem: the inlining is real
+// (neither callee survives as an ELF symbol), but the packet-rate shortfall
+// that first prompted this arrangement was never confirmed to originate here.
 void broadband_stream_service(void)
 {
     if (!stream_enabled) return;
