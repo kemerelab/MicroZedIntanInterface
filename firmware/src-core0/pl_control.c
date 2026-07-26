@@ -115,6 +115,11 @@ void pl_set_channel_enable(int channel_enable) {
     Xil_Out32(PL_CTRL_BASE_ADDR + CTRL_REG_2_OFFSET, ctrl_reg_2);
     send_message("PL channel enable set to 0x%02X (port0=0x%X port1=0x%X)\r\n",
                  channel_enable & 0xFF, channel_enable & 0xF, (channel_enable >> 4) & 0xF);
+
+    // The LFP frame size is derived from this mask, so the framing the PS is
+    // mid-way through reading is now stale. Resynchronise rather than let it
+    // misparse every following frame.
+    lfp_stream_resync();
 }
 
 // ============================================================================

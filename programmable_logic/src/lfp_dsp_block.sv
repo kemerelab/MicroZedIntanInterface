@@ -113,7 +113,40 @@ module lfp_dsp_block #(
     // configurable here.
     // -----------------------------------------------------------------
     wire        lfp_en    = lfp_cfg[0];
-    wire [7:0]  lane_mask = dsp_channel_enable;
+    // The lane mask sets FOUR things about a frame: how many samples it holds,
+    // where each sample ranks in the payload, the frame size published to the
+    // PS, and the AUX0 field in its header. Driving those from a live wire lets
+    // a mask change land part-way through a frame and make them disagree, after
+    // which the PS parses every following frame at the wrong offset -- the
+    // rescan-while-running failure.
+    //
+    // So sample it once per frame and run the whole engine, filters included,
+    // from the latched copy: a new mask then takes effect cleanly at the next
+    // frame. frame_start comes from the decimation pass and does NOT depend on
+    // the mask, so this cannot wedge even if the mask goes to zero; while the
+    // engine is disabled it tracks freely, so enabling picks up the current
+    // mask at once.
+    logic frame_start;              // driven by the poly stage, declared here so
+                                    // the latch below and the filters can see it
+    logic [7:0] lane_mask_q;
+    logic       mask_armed;      // a frame has been framed at lane_mask_q
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            lane_mask_q <= 8'h00;
+            mask_armed  <= 1'b0;
+        end else if (!lfp_en || !mask_armed) begin
+            // Idle, or nothing framed yet: follow the live mask, so the FIRST
+            // frame after reset or enable is framed at the real value. Seeding
+            // matters -- latching only on frame_start leaves frame 1 framed at
+            // zero lanes, which emits nothing and is never published.
+            lane_mask_q <= dsp_channel_enable;
+            mask_armed  <= lfp_en;
+        end else if (frame_start) begin
+            // Running: adopt a new mask only on a frame boundary.
+            lane_mask_q <= dsp_channel_enable;
+        end
+    end
+    wire [7:0]  lane_mask = lane_mask_q;
     wire [7:0]  numtaps8  = lfp_cfg[31:24];
     wire [POLY_TAP_W-1:0] poly_taps =
          (numtaps8 == 0 || numtaps8 > MAX_POLY_TAPS) ? POLY_TAP_W'(MAX_POLY_TAPS)
@@ -211,7 +244,7 @@ module lfp_dsp_block #(
     // =================================================================
     // Stage 2: decimate-by-5, 15 kHz -> 3 kHz.
     // =================================================================
-    logic                    out_valid, frame_start, poly_busy, poly_overrun;
+    logic                    out_valid, poly_busy, poly_overrun;
     logic [CH_W-1:0]         out_channel;
     logic signed [OUT_W-1:0] out_data;
 

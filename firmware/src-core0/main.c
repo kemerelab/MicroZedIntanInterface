@@ -387,10 +387,6 @@ void network_maintenance_loop(void) {
   rx_hang_recover();   // steady-state GEM RX-hang self-heal (gated on the hang bits)
   process_command_flags();
 
-  // Drain the LFP output BRAM -> UDP (Tier-1). No-op unless the engine is
-  // enabled; the 16K-word ring tolerates bursty servicing.
-  lfp_stream_service();
-
   // Refresh the shared status snapshot at ~200 Hz (every 5 ms). Cheap and
   // non-blocking; core 1 reads it on demand or for its ~1 Hz monitor.
   uint32_t now_ms = sys_now();
@@ -600,8 +596,16 @@ int main() {
   // Main event loop
   while (1) {
     network_maintenance_loop();
-    
+
+    // Broadband first, and unconditionally: it is the 30 kHz path with the
+    // 33 us budget, and nothing may come between it and the PL.
     broadband_stream_service();
+
+    // LFP after it, deliberately. The decimated stream is 3 kHz and its 16K-word
+    // ring tolerates bursty servicing, so it yields to broadband every time.
+    // Kept on its own line rather than inside the network loop so that ordering
+    // is a visible scheduling decision instead of an implementation detail.
+    lfp_stream_service();
   }
   
   cleanup_platform();

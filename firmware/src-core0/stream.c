@@ -304,6 +304,23 @@ void lfp_stream_init(void)
     if (lfp_pcb == NULL) send_message("ERROR: Could not create LFP UDP PCB\r\n");
 }
 
+// Adopt the PL's current frame boundary and drop whatever is in flight.
+//
+// The LFP frame size follows the lane mask, so changing the broadband
+// channel-enable changes the framing mid-ring. The PS read pointer is left
+// sitting on a boundary measured in the OLD frame size, and every subsequent
+// frame is parsed at the wrong offset -- the symptom being a rescan while the
+// engine is running yielding garbage until the engine is toggled off and on
+// (which resynchronises only because the drain runs the pointer up to the PL's).
+//
+// Whatever is already in the ring was framed at the old lane count and cannot
+// be reinterpreted at the new one, so it is discarded deliberately rather than
+// misread. Call this whenever the lane mask changes.
+void lfp_stream_resync(void)
+{
+    lfp_read_word = (pl_lfp_read_status() & 0xFFFF) >> 2;   // byte addr -> word index
+}
+
 void lfp_stream_service(void)
 {
     if (!lfp_cfg_enable || lfp_pcb == NULL) return;

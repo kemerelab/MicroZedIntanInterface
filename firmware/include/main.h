@@ -676,7 +676,8 @@ uint32_t pl_lfp_read_status(void);                        // STATUS_REG_13
 // only in retry policy.
 void broadband_stream_service(void);   // broadband: drain every ready packet
 void lfp_stream_init(void);
-void lfp_stream_service(void);   // call from the core-0 maintenance loop
+void lfp_stream_service(void);   // call from the core-0 main loop, after broadband
+void lfp_stream_resync(void);    // re-align the PS read pointer after a lane-mask change
 
 // Tracked config / counters (mirrored into status_response_t). The lane mask is
 // the broadband channel_enable (reported via pl_get_current_channel_enable()).

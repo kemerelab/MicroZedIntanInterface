@@ -19,7 +19,7 @@ module led_status_controller #(
     
     // Status register input (width matches axi_lite_registers N_STATUS;
     // only status reg 0 is read here)
-    input  wire [32*13-1:0] status_regs_pl,
+    input  wire [32*14-1:0] status_regs_pl,
     
     // LED outputs
     (* X_INTERFACE_INFO = "xilinx.com:signal:data:1.0 LED0 DATA" *)
